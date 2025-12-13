@@ -164,9 +164,15 @@ Node index in the solution vector (0 for ground).
 node_index(net::MNANet) = net.index
 
 """
-Branch index in the solution vector (offset by num_nodes).
+Branch index placeholder (negative to mark as branch during stamping).
+The actual index is resolved in compile_circuit to num_nodes + |index|.
 """
-branch_index(circuit::MNACircuit, branch::BranchVar) = circuit.num_nodes + branch.index
+branch_index(circuit::MNACircuit, branch::BranchVar) = -branch.index
+
+"""
+Resolve an index that may be a branch placeholder (negative) to final index.
+"""
+resolve_index(circuit::MNACircuit, idx::Int) = idx > 0 ? idx : circuit.num_nodes - idx
 
 #=
 Stamping functions for various circuit elements.
@@ -460,20 +466,26 @@ Returns (G, C, b) where G*x + C*dx/dt = b for the linear part.
 function compile_circuit(circuit::MNACircuit)
     n = circuit.num_nodes + circuit.num_branches
 
+    # Resolve branch indices (negative placeholders become num_nodes + |index|)
+    G_i_resolved = [resolve_index(circuit, i) for i in circuit.G_i]
+    G_j_resolved = [resolve_index(circuit, j) for j in circuit.G_j]
+
     # Build sparse G matrix
-    G = sparse(circuit.G_i, circuit.G_j, circuit.G_v, n, n)
+    G = sparse(G_i_resolved, G_j_resolved, circuit.G_v, n, n)
 
     # Build sparse C matrix (for dynamics)
     if isempty(circuit.C_i)
         C = spzeros(n, n)
     else
-        C = sparse(circuit.C_i, circuit.C_j, circuit.C_v, n, n)
+        C_i_resolved = [resolve_index(circuit, i) for i in circuit.C_i]
+        C_j_resolved = [resolve_index(circuit, j) for j in circuit.C_j]
+        C = sparse(C_i_resolved, C_j_resolved, circuit.C_v, n, n)
     end
 
-    # Build source vector
+    # Build source vector with resolved indices
     b = zeros(n)
     for (i, v) in zip(circuit.b_i, circuit.b_v)
-        b[i] += v
+        b[resolve_index(circuit, i)] += v
     end
 
     return G, C, b
@@ -493,8 +505,9 @@ function solve_dc!(circuit::MNACircuit; maxiter=100, tol=1e-9)
     # Initial guess
     x = zeros(n)
 
-    # Add gmin to diagonal for numerical stability
-    for i in 1:n
+    # Add gmin to node equations only (not branch equations)
+    # gmin provides a tiny conductance to ground for numerical stability
+    for i in 1:circuit.num_nodes
         G[i, i] += circuit.gmin
     end
 
@@ -670,8 +683,8 @@ function compile_ode_system(circuit::MNACircuit)
     G, C, b = compile_circuit(circuit)
     n = size(G, 1)
 
-    # Add gmin to G diagonal for stability
-    for i in 1:n
+    # Add gmin to node equations only (not branch constraint equations)
+    for i in 1:circuit.num_nodes
         G[i, i] += circuit.gmin
     end
 

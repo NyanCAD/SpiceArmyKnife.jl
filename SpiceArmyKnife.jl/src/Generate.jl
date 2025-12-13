@@ -195,10 +195,22 @@ function upload_to_couchdb(models, chunk_size=100)
     )
     
     try
+        # Preserve database permissions and views before upload
+        println("Preserving database permissions and views...")
+        security_doc = fetch_security(url, headers)
+        design_docs = fetch_design_docs(url, headers)
+
+        if security_doc !== nothing
+            println("  ✓ Saved database permissions")
+        end
+        if !isempty(design_docs)
+            println("  ✓ Saved $(length(design_docs)) design document(s) (views)")
+        end
+
         # Get existing revisions
         response = HTTP.get("$url/models/_all_docs", headers)
         existing_revs = Dict{String, String}()
-        
+
         if response.status == 200
             data = JSON.parse(String(response.body))
             for row in data["rows"]
@@ -235,7 +247,13 @@ function upload_to_couchdb(models, chunk_size=100)
             end
         end
         
-        println("✓ Successfully uploaded $total_uploaded/$length(models)) models to CouchDB!")
+        println("✓ Successfully uploaded $total_uploaded/$(length(models)) models to CouchDB!")
+
+        # Restore permissions and views
+        println("\nRestoring database permissions and views...")
+        restore_security(url, headers, security_doc)
+        restore_design_docs(url, headers, design_docs)
+
         return true
         
     catch e
@@ -244,6 +262,118 @@ function upload_to_couchdb(models, chunk_size=100)
         println()
         return false
     end
+end
+
+"""
+Fetch the database security document (permissions).
+Returns nothing if the document doesn't exist or on error.
+"""
+function fetch_security(url, headers)
+    try
+        response = HTTP.get("$url/models/_security", headers)
+        if response.status == 200
+            return JSON.parse(String(response.body))
+        end
+    catch e
+        # Security document might not exist in new databases
+        if isa(e, HTTP.ExceptionRequest.StatusError) && e.status == 404
+            return nothing
+        end
+        println("  ⚠ Warning: Could not fetch security document: $e")
+    end
+    return nothing
+end
+
+"""
+Restore the database security document (permissions).
+"""
+function restore_security(url, headers, security_doc)
+    if security_doc === nothing
+        return true
+    end
+
+    try
+        response = HTTP.put("$url/models/_security", headers, JSON.json(security_doc))
+        if response.status in [200, 201]
+            println("  ✓ Restored database permissions")
+            return true
+        else
+            println("  ✗ Failed to restore permissions: $(response.status)")
+            return false
+        end
+    catch e
+        println("  ✗ Error restoring permissions: $e")
+        return false
+    end
+end
+
+"""
+Fetch all design documents (views, shows, lists, etc.).
+Returns a vector of design documents.
+"""
+function fetch_design_docs(url, headers)
+    design_docs = []
+    try
+        # Fetch design documents using _all_docs with startkey and endkey
+        query_params = "startkey=\"_design/\"&endkey=\"_design0\"&include_docs=true"
+        response = HTTP.get("$url/models/_all_docs?$query_params", headers)
+
+        if response.status == 200
+            data = JSON.parse(String(response.body))
+            for row in data["rows"]
+                if haskey(row, "doc")
+                    push!(design_docs, row["doc"])
+                end
+            end
+        end
+    catch e
+        println("  ⚠ Warning: Could not fetch design documents: $e")
+    end
+    return design_docs
+end
+
+"""
+Restore design documents (views) to the database.
+"""
+function restore_design_docs(url, headers, design_docs)
+    if isempty(design_docs)
+        return true
+    end
+
+    println("  Restoring $(length(design_docs)) design document(s)...")
+    success = true
+
+    for doc in design_docs
+        try
+            doc_id = doc["_id"]
+            # Remove _rev to get the latest revision from the server
+            delete!(doc, "_rev")
+
+            # Try to get current revision
+            try
+                get_response = HTTP.get("$url/models/$doc_id", headers)
+                if get_response.status == 200
+                    current_doc = JSON.parse(String(get_response.body))
+                    doc["_rev"] = current_doc["_rev"]
+                end
+            catch e
+                # Document doesn't exist, that's ok
+            end
+
+            response = HTTP.put("$url/models/$doc_id", headers, JSON.json(doc))
+            if response.status in [200, 201]
+                println("    ✓ Restored design document: $doc_id")
+            else
+                println("    ✗ Failed to restore design document $doc_id: $(response.status)")
+                success = false
+            end
+        catch e
+            println("    ✗ Error restoring design document: $e")
+            success = false
+        end
+    end
+
+    return success
 end
 
 end # module Generate

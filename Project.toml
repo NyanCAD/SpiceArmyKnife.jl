@@ -18,6 +18,7 @@ ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
 
 [compat]
 AbstractTrees = "0.4"

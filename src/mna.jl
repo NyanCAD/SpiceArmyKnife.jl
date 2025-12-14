@@ -3,8 +3,10 @@
 
 using LinearAlgebra
 using SparseArrays
+using NonlinearSolve
+using ADTypes
 
-export MNACircuit, MNANet, stamp!, compile_circuit, solve_dc!, transient_problem
+export MNACircuit, MNANet, stamp!, compile_circuit, solve_dc!, dc!, transient_problem
 
 #=
 MNA Matrix Structure:
@@ -494,16 +496,13 @@ end
 """
     solve_dc!(circuit::MNACircuit; maxiter=100, tol=1e-9)
 
-Solve for DC operating point using Newton-Raphson iteration.
+Solve for DC operating point using NonlinearSolve.
 Returns the solution vector.
 """
-function solve_dc!(circuit::MNACircuit; maxiter=100, tol=1e-9)
+function solve_dc!(circuit::MNACircuit; maxiter=200, tol=1e-9)
     circuit.mode = :dcop
     G, C, b = compile_circuit(circuit)
     n = size(G, 1)
-
-    # Initial guess
-    x = zeros(n)
 
     # Add gmin to node equations only (not branch equations)
     # gmin provides a tiny conductance to ground for numerical stability
@@ -513,44 +512,48 @@ function solve_dc!(circuit::MNACircuit; maxiter=100, tol=1e-9)
 
     if isempty(circuit.nonlinear_elements)
         # Pure linear circuit - direct solve
-        x = G \ b
-    else
-        # Newton-Raphson for nonlinear circuits
-        for iter in 1:maxiter
-            # Evaluate nonlinear contributions
-            f = copy(b)
-            J = copy(G)
-
-            for elem_func in circuit.nonlinear_elements
-                residual, jac_entries = elem_func(x, circuit.params, circuit)
-                f .-= residual
-                for (i, j, v) in jac_entries
-                    J[i, j] += v
-                end
-            end
-
-            # Residual
-            r = J * x - f
-
-            # Check convergence
-            if norm(r) < tol
-                return x
-            end
-
-            # Newton update
-            dx = J \ r
-            x .-= dx
-
-            if norm(dx) < tol
-                return x
-            end
-        end
-
-        @warn "DC operating point did not converge after $maxiter iterations"
+        return G \ b
     end
 
-    return x
+    # Define the residual function for NonlinearSolve
+    # MNA equation: G*x = b + f_nl(x)
+    # Residual: F(x) = G*x - b - f_nl(x) = 0
+    function mna_residual!(F, x, p)
+        # Start with linear part
+        mul!(F, G, x)
+        F .-= b
+
+        # Subtract nonlinear contributions
+        for elem_func in circuit.nonlinear_elements
+            residual, _ = elem_func(x, circuit.params, circuit)
+            F .-= residual
+        end
+        return nothing
+    end
+
+    # Initial guess - small random values help escape local minima
+    x0 = 0.1 * randn(n)
+
+    # Create and solve the nonlinear problem
+    prob = NonlinearProblem(mna_residual!, x0)
+
+    # Use RobustMultiNewton with finite differencing (same as CedarSim)
+    sol = solve(prob, RobustMultiNewton(autodiff=AutoFiniteDiff());
+                abstol=tol, maxiters=maxiter)
+
+    if sol.retcode != ReturnCode.Success
+        @warn "DC operating point may not have converged: $(sol.retcode)"
+    end
+
+    return sol.u
 end
+
+"""
+    dc!(circuit::MNACircuit; kwargs...)
+
+Alias for solve_dc! for convenience.
+"""
+dc!(circuit::MNACircuit; kwargs...) = solve_dc!(circuit; kwargs...)
 
 """
     DiodeModel

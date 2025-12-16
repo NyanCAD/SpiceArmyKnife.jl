@@ -22,9 +22,19 @@ using VerilogAParser.VerilogACSTParser:
 using VerilogAParser.VerilogATokenize:
     Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, is_scale_factor
 using Combinatorics
+using ForwardDiff
+using ForwardDiff: Dual
 
 const MNA_VAT = VerilogAParser.VerilogATokenize
 const MNA_VANode = VerilogAParser.VerilogACSTParser.Node
+
+# Tag type for ForwardDiff to track ddx derivatives
+struct MNASimTag end
+ForwardDiff.:(≺)(::Type{<:ForwardDiff.Tag}, ::Type{MNASimTag}) = true
+ForwardDiff.:(≺)(::Type{MNASimTag}, ::Type{<:ForwardDiff.Tag}) = false
+
+# Export the tag for generated code
+export MNASimTag
 
 export @mna_va_str, MNAVAFile, mna_va_load, MNABranchKind, MNA_CURRENT, MNA_VOLTAGE
 
@@ -104,11 +114,32 @@ struct MNAScope
     var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}}}
     all_functions::Dict{Symbol, MNAVAFunction}
     undefault_ids::Bool
+    ddx_order::Vector{Symbol}       # Nodes used in ddx() calls for ForwardDiff tracking
 end
 
 MNAScope() = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0, Vector{Pair{Symbol}}(),
     Set{Pair{Symbol}}(), Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
-    Dict{Symbol, MNAVAFunction}(), false)
+    Dict{Symbol, MNAVAFunction}(), false, Vector{Symbol}())
+
+"""
+    find_ddx!(ddx_order::Vector{Symbol}, va::MNA_VANode)
+
+Scan a Verilog-A AST node for ddx() calls and collect the probe nodes.
+Used to determine which nodes need ForwardDiff tracking.
+"""
+function find_ddx!(ddx_order::Vector{Symbol}, va::MNA_VANode)
+    for stmt in AbstractTrees.PreOrderDFS(va)
+        if stmt isa MNA_VANode{FunctionCall} && Symbol(stmt.id) == :ddx
+            item = stmt.args[2].item
+            @assert mna_formof(item) == FunctionCall
+            @assert Symbol(item.id) == :V
+            for arg in item.args
+                name = Symbol(mna_assemble_id_string(arg.item))
+                !in(name, ddx_order) && push!(ddx_order, name)
+            end
+        end
+    end
+end
 
 # Scale factor mapping
 const mna_sf_mapping = Dict(
@@ -186,7 +217,8 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
                 $eqvar = 0.0
                 $svar = $kind_expr
             end
-            $eqvar += $(to_julia(cs.assign_expr))
+            # Use ForwardDiff.value to extract scalar from Dual (for ddx support)
+            $eqvar += $(ForwardDiff.value)($(CedarSim.MNASimTag), $(to_julia(cs.assign_expr)))
         end
     elseif length(refs) == 2
         # Two node reference: I(p,n) or V(p,n)
@@ -209,7 +241,8 @@ function (to_julia::MNAScope)(cs::MNA_VANode{ContributionStatement})
                 $eqvar = 0.0
                 $svar = $kind_expr
             end
-            $s = $(to_julia(cs.assign_expr))
+            # Use ForwardDiff.value to extract scalar from Dual (for ddx support)
+            $s = $(ForwardDiff.value)($(CedarSim.MNASimTag), $(to_julia(cs.assign_expr)))
             $eqvar += $(reversed ? :(-$s) : s)
         end
     end
@@ -263,7 +296,7 @@ function (to_julia::MNAScope)(asb::MNA_VANode{AnalogSeqBlock})
         end
         to_julia_block = MNAScope(to_julia.parameters, to_julia.node_order,
             to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-            block_var_types, to_julia.all_functions, to_julia.undefault_ids)
+            block_var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
     else
         to_julia_block = to_julia
     end
@@ -351,14 +384,28 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
     end
 
     # V() probe - returns voltage
+    # If the node is in ddx_order, wrap in ForwardDiff Dual for derivative tracking
     if fname == :V
+        # Helper to wrap a node voltage in Dual if it's in ddx_order
+        function Vref(id)
+            id_idx = findfirst(==(id), to_julia.ddx_order)
+            if id_idx !== nothing
+                # Wrap in Dual with partial = 1 at this node's position
+                n_ddx = length(to_julia.ddx_order)
+                partials = ntuple(i -> i == id_idx ? 1.0 : 0.0, n_ddx)
+                return :($(ForwardDiff.Dual){$(CedarSim.MNASimTag)}($id, $(partials...)))
+            else
+                return id
+            end
+        end
+
         @assert length(stmt.args) in (1, 2)
         id1 = Symbol(stmt.args[1].item)
         id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : nothing
 
         if id2 === nothing
             push!(to_julia.used_branches, id1 => Symbol("0"))
-            return id1  # Just the node voltage variable
+            return Vref(id1)
         else
             idx = findfirst(to_julia.branch_order) do branch
                 branch == (id1 => id2) || branch == (id2 => id1)
@@ -366,7 +413,7 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
             @assert idx !== nothing
             branch = to_julia.branch_order[idx]
             push!(to_julia.used_branches, branch)
-            return :($id1 - $id2)
+            return :($(Vref(id1)) - $(Vref(id2)))
         end
 
     # I() probe - returns current (not commonly used in MNA residual computation)
@@ -384,6 +431,38 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
         # For transient, this would need to be handled by the ODE solver
         args = map(x->to_julia(x.item), stmt.args)
         return :(mna_ddt($(args...)))
+
+    # ddx() - derivative with respect to a node voltage
+    # ddx(expr, V(node)) returns d(expr)/d(V(node))
+    elseif fname == :ddx
+        item = stmt.args[2].item
+        @assert mna_formof(item) == FunctionCall
+        @assert Symbol(item.id) == :V
+
+        if length(item.args) == 1
+            # ddx(expr, V(node)) - single node
+            probe = Symbol(mna_assemble_id_string(item.args[1].item))
+            id_idx = findfirst(==(probe), to_julia.ddx_order)
+            expr_code = to_julia(stmt.args[1].item)
+            return :(let _x = $expr_code
+                isa(_x, $(ForwardDiff.Dual)) ?
+                    (@inbounds $(ForwardDiff.partials)($(CedarSim.MNASimTag), _x, $id_idx)) : 0.0
+            end)
+        else
+            # ddx(expr, V(node1, node2)) - differential voltage
+            probe1 = Symbol(mna_assemble_id_string(item.args[1].item))
+            probe2 = Symbol(mna_assemble_id_string(item.args[2].item))
+            id1_idx = findfirst(==(probe1), to_julia.ddx_order)
+            id2_idx = findfirst(==(probe2), to_julia.ddx_order)
+            expr_code = to_julia(stmt.args[1].item)
+            return :(let _x = $expr_code,
+                        _dx1 = isa(_x, $(ForwardDiff.Dual)) ?
+                            (@inbounds $(ForwardDiff.partials)($(CedarSim.MNASimTag), _x, $id1_idx)) : 0.0,
+                        _dx2 = isa(_x, $(ForwardDiff.Dual)) ?
+                            (@inbounds $(ForwardDiff.partials)($(CedarSim.MNASimTag), _x, $id2_idx)) : 0.0
+                (_dx1 - _dx2) / 2
+            end)
+        end
 
     # Noise functions - ignored for DC
     elseif fname ∈ (:white_noise, :flicker_noise)
@@ -533,7 +612,7 @@ function (to_julia::MNAScope)(fd::MNA_VANode{AnalogFunctionDeclaration})
 
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches,
-        var_types, to_julia.all_functions, to_julia.undefault_ids)
+        var_types, to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
 
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
@@ -656,11 +735,15 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
     aliases = Dict{Symbol, Symbol}()
 
+    # Scan for ddx() calls to determine which nodes need derivative tracking
+    ddx_order = Vector{Symbol}()
+    find_ddx!(ddx_order, vm)
+
     # Create scope for default expression evaluation
     to_julia_defaults = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0,
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
         Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
-        Dict{Symbol, MNAVAFunction}(), true)
+        Dict{Symbol, MNAVAFunction}(), true, ddx_order)
 
     # First pass: collect declarations
     for child in vm.items
@@ -713,7 +796,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
         collect(map(x->Pair(x...), combinations(node_order, 2))),
         Set{Pair{Symbol}}(),
         var_types,
-        Dict{Symbol, MNAVAFunction}(), false)
+        Dict{Symbol, MNAVAFunction}(), false, ddx_order)
 
     # Second pass: translate analog block and function declarations
     analog_code = Expr(:block)
@@ -856,7 +939,10 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
 
     quote
         # Helper functions for VA compatibility
+        # Handle ForwardDiff Dual numbers by extracting value first
+        mna_vaconvert(::Type{Float64}, x::$(ForwardDiff.Dual)) = Float64($(ForwardDiff.value)(x))
         mna_vaconvert(::Type{Float64}, x) = Float64(x)
+        mna_vaconvert(::Type{Int}, x::$(ForwardDiff.Dual)) = Int(round($(ForwardDiff.value)(x)))
         mna_vaconvert(::Type{Int}, x) = Int(round(x))
         mna_undefault(x) = x  # For now, just return value
         mna_isdefault(x) = false  # For now, assume not default

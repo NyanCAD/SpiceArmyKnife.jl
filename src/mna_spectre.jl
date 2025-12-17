@@ -460,3 +460,54 @@ end
 function (n::MNANamed{typeof(mna_net)})(args...)
     return mna_net(n.name)
 end
+
+#=
+VA Device wrapper for MNA spectre integration
+Allows VA-generated devices (from mna_va_load) to work with the spectre infrastructure
+=#
+
+"""
+    MNAVADeviceWrapper{T}
+
+Wraps a VA-generated device type (from mna_va_load) for use with MNA spectre infrastructure.
+The VA device must have a constructor of form: DeviceType(circuit, pin1, pin2, ...; kwargs...)
+"""
+struct MNAVADeviceWrapper{T}
+    device_type::Type{T}
+    default_params::Dict{Symbol, Any}
+end
+
+MNAVADeviceWrapper(T::Type; kwargs...) = MNAVADeviceWrapper(T, Dict{Symbol, Any}(kwargs...))
+
+function (w::MNAVADeviceWrapper)(nets::MNANetRef...; dscope=nothing, m=1.0, kwargs...)
+    ckt = mna_circuit[]
+    ckt === nothing && error("No MNA circuit in scope")
+
+    # Merge default params with call-time kwargs
+    all_params = merge(w.default_params, Dict{Symbol, Any}(kwargs...))
+
+    # Create device name
+    name = dscope !== nothing ? dscope : gensym(:va_dev)
+
+    # Get raw MNANet from each MNANetRef
+    raw_nets = [net.net for net in nets]
+
+    # Create and stamp the VA device
+    device = w.device_type(ckt, raw_nets...; name=name, all_params...)
+    stamp!(device, ckt)
+
+    return device
+end
+
+"""
+    wrap_va_device(DeviceType; kwargs...)
+
+Create a wrapper for a VA-generated device type that works with MNA spectre infrastructure.
+Default parameters can be provided as keyword arguments.
+
+Example:
+    mna_va_load(@__MODULE__, "path/to/model.va")  # Creates MyDevice type
+    my_device = wrap_va_device(MyDevice; param1=1.0, param2=2.0)
+    # Use in circuit: my_device(net1, net2, net3, net4; other_param=3.0)
+"""
+wrap_va_device(T::Type; kwargs...) = MNAVADeviceWrapper(T; kwargs...)

@@ -126,8 +126,9 @@ mutable struct MNACircuit
     gmin::Float64
 
     # Transient simulation state
-    time::Float64  # Current simulation time
-    dt::Float64    # Current timestep
+    time::Float64       # Current simulation time
+    dt::Float64         # Current timestep
+    prev_time::Float64  # Time of last accepted step (for companion model)
 end
 
 function MNACircuit(;temp=27.0, gmin=1e-12)
@@ -151,7 +152,8 @@ function MNACircuit(;temp=27.0, gmin=1e-12)
         temp,                      # temperature
         gmin,                      # gmin
         0.0,                       # time
-        0.0                        # dt
+        0.0,                       # dt
+        0.0                        # prev_time
     )
 end
 
@@ -780,12 +782,33 @@ function (sys::MNAODESystem)(du, u, p, t)
     circuit = sys.circuit
 
     # For DC analysis, alpha = 0 (no reactive contribution)
-    # For transient, alpha = 1/dt (Backward Euler) or 2/dt (Trapezoidal)
+    # For transient, alpha = 1/dt (Backward Euler) where dt is step from prev_time
+    #
+    # Key insight: The ODE function may be called multiple times per step
+    # (for error estimation, adaptive stepping, etc.), so we should NOT update
+    # circuit state (charge_values, prev_time) here. Instead:
+    # - Compute alpha from the current evaluation point vs prev_time
+    # - charge_values already contains Q from the last accepted step
+    # - After step acceptance, update_charges! should be called
+    #
+    # Note: Solvers can step backwards (e.g., for event handling). In this case,
+    # we use |dt| for alpha to maintain stability.
     if circuit.mode == :tran
-        dt = max(t - circuit.time, 1e-15)  # Avoid division by zero
-        alpha = 1.0 / dt  # Backward Euler
+        # dt is the time from last accepted step (can be negative for backward steps)
+        dt = t - circuit.prev_time
+
+        # Only use companion model when we have a meaningful timestep
+        # For first evaluation (t ≈ prev_time) or very small dt, use alpha = 0
+        # This correctly handles the initial condition where ddt = 0
+        # Use abs(dt) to handle backward stepping during event detection
+        if abs(dt) > 1e-14
+            alpha = 1.0 / abs(dt)  # Backward Euler (use |dt| for backward steps)
+        else
+            alpha = 0.0  # Treat as DC/initial condition
+        end
         circuit.params[:alpha] = alpha
         circuit.dt = dt
+        circuit.time = t  # Track current evaluation time (not prev_time)
     else
         circuit.params[:alpha] = 0.0
     end
@@ -802,6 +825,8 @@ function (sys::MNAODESystem)(du, u, p, t)
     end
 
     # Add nonlinear contributions (including VA devices with ddt)
+    # Note: We do NOT update charge_values here - that's done in update_charges!
+    # after the ODE solver accepts a step
     for elem_func in circuit.nonlinear_elements
         result = elem_func(u, p, circuit)
 
@@ -809,17 +834,8 @@ function (sys::MNAODESystem)(du, u, p, t)
         if length(result) >= 4
             # VA device: (residual, jacobian, react_charges, charge_indices)
             # residual includes I + alpha*(Q - Q_prev) from companion model
-            residual, _, react_charges, charge_indices = result
-
+            residual, _, _, _ = result
             rhs .-= residual
-
-            # Store new charge values for history
-            # These become Q_prev for the next evaluation
-            for (i, charge_idx) in enumerate(charge_indices)
-                if charge_idx <= length(circuit.charge_values)
-                    circuit.charge_values[charge_idx] = react_charges[i]
-                end
-            end
         else
             # Standard device: (residual, jacobian)
             residual, _ = result
@@ -827,21 +843,19 @@ function (sys::MNAODESystem)(du, u, p, t)
         end
     end
 
-    # Update circuit time for next call
-    if circuit.mode == :tran
-        circuit.time = t
-    end
-
     du .= rhs
 end
 
 """
-    update_charges!(circuit::MNACircuit, u::Vector{Float64})
+    update_charges!(circuit::MNACircuit, u::Vector{Float64}, t::Float64)
 
 Update stored charge values after a successful timestep.
 Called after the ODE solver accepts a step.
+This updates:
+- charge_values: Q values become Q_prev for next step
+- prev_time: for computing dt in next step
 """
-function update_charges!(circuit::MNACircuit, u::Vector{Float64})
+function update_charges!(circuit::MNACircuit, u::Vector{Float64}, t::Float64)
     # Re-evaluate nonlinear elements to get final charge values
     for elem_func in circuit.nonlinear_elements
         result = elem_func(u, circuit.params, circuit)
@@ -854,8 +868,13 @@ function update_charges!(circuit::MNACircuit, u::Vector{Float64})
         end
     end
 
-    # Update simulation time
-    circuit.time += circuit.dt
+    # Update prev_time for next step's dt calculation
+    circuit.prev_time = t
+end
+
+# Backward compatible version
+function update_charges!(circuit::MNACircuit, u::Vector{Float64})
+    update_charges!(circuit, u, circuit.time)
 end
 
 """
@@ -890,10 +909,14 @@ function transient_problem(circuit::MNACircuit, tspan; u0=nothing)
         circuit.mode = :tran
     end
 
-    # Initialize charge values from DC solution
-    # Evaluate devices to get initial Q values
+    # Initialize transient state
+    # prev_time is where we start - used for computing dt = t - prev_time
     circuit.time = tspan[1]
-    circuit.dt = 1e-12  # Small initial dt
+    circuit.prev_time = tspan[1]
+    circuit.dt = 0.0  # No step taken yet
+
+    # Initialize charge values from DC solution
+    # At DC, ddt = 0, so charges are in equilibrium
     initialize_charges!(circuit, u0)
 
     # For circuits with capacitors/inductors, we need a DAE formulation
@@ -918,11 +941,15 @@ end
 
 Initialize charge state values from initial conditions.
 This evaluates all devices to compute Q = f(V) at the initial point.
+At DC steady state, charges are in equilibrium (ddt = 0).
 """
 function initialize_charges!(circuit::MNACircuit, u0::Vector{Float64})
-    # Initialize all dQ/dt to 0 (DC steady state)
-    for i in 1:circuit.num_charges
-        circuit.params[Symbol(:dQdt_, i)] = 0.0
+    # Ensure alpha = 0 for initialization (DC conditions)
+    circuit.params[:alpha] = 0.0
+
+    # Resize charge_values if needed
+    while length(circuit.charge_values) < circuit.num_charges
+        push!(circuit.charge_values, 0.0)
     end
 
     # Evaluate devices to get initial charge values
@@ -932,7 +959,9 @@ function initialize_charges!(circuit::MNACircuit, u0::Vector{Float64})
         if length(result) >= 4
             _, _, charge_values, charge_indices = result
             for (i, charge_idx) in enumerate(charge_indices)
-                circuit.charge_values[charge_idx] = charge_values[i]
+                if charge_idx <= length(circuit.charge_values)
+                    circuit.charge_values[charge_idx] = charge_values[i]
+                end
             end
         end
     end

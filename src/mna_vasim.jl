@@ -443,9 +443,10 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
         return :(error("I() probe not yet supported in MNA backend"))
 
     # ddt() - time derivative (for transient)
+    # Companion model approach (like ngspice/OpenVAF):
+    # ddt(Q) ≈ alpha * (Q - Q_prev) where alpha = 1/dt (Backward Euler)
+    # This returns the current contribution from the charge dynamics
     elseif fname == :ddt
-        # For transient simulation, ddt(Q) = dQ/dt where Q is a charge state variable
-        # We track each ddt() call with a unique index for the charge state
         expr_code = to_julia(stmt.args[1].item)
 
         # Assign charge index (1-based, incremented for each ddt call)
@@ -453,13 +454,20 @@ function (to_julia::MNAScope)(stmt::MNA_VANode{FunctionCall})
         charge_idx = length(to_julia.ddt_exprs)
 
         # Generated code:
-        # - _charge_values[idx] stores the computed charge Q = expr
-        # - _dQdt[idx] receives the charge derivative from transient solver
-        # - For DC: ddt = 0, for transient: ddt = _dQdt[idx]
+        # - Evaluate Q expression
+        # - Store Q value for later history update
+        # - Return alpha * (Q - Q_prev) as the companion model current
+        # - For DC: alpha = 0, so ddt = 0
+        # - For transient: ddt ≈ (Q - Q_prev) / dt
         return quote
-            let _q = $(ForwardDiff.value)($(CedarSim.MNASimTag), $expr_code)
-                _charge_values[$charge_idx] = _q
-                _dQdt[$charge_idx]  # This is 0.0 for DC, set by transient solver
+            let _q_expr = $expr_code
+                # Extract scalar value
+                _Q_new = $(ForwardDiff.value)($(CedarSim.MNASimTag), _q_expr)
+                _react_charges[$charge_idx] = _Q_new
+                # Get previous charge value (0 for first step)
+                _Q_prev = _charge_prev[$charge_idx]
+                # Companion model: I = alpha * (Q - Q_prev)
+                _alpha * (_Q_new - _Q_prev)
             end
         end
 
@@ -1039,9 +1047,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             push!(circuit.nonlinear_elements, (x, params, circ) -> _mna_residual(device, x, circ))
         end
 
-        # Residual function - computes current contributions
-        # Returns: (residual, jacobian_entries, charge_values)
-        # where charge_values contains Q for each ddt(Q) for transient integration
+        # Residual function - computes resist (I) and react (Q) contributions separately
+        # Returns: (residual, jacobian_entries, react_charges, charge_indices)
+        # OpenVAF approach: resist + alpha * react where alpha is integration coefficient
         function _mna_residual(_self::$symname, x::Vector{Float64}, circuit::CedarSim.MNACircuit)
             _mna_n_size = length(x)
 
@@ -1055,29 +1063,31 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             # Get internal node voltages
             _internal_voltages = Float64[x[i] for i in _self._internal_net_indices]
 
-            # Initialize current accumulators
+            # Initialize current accumulators (resistive contributions)
             _pin_currents = zeros($n_pins)
             _internal_currents = zeros($n_internal)
             _branch_residuals = zeros($n_branches)  # For voltage contributions
 
-            # Initialize charge tracking arrays
-            # _charge_values[i] stores Q computed from ddt(Q) expressions
-            # _dQdt[i] stores dQ/dt from transient solver (0 for DC)
-            _charge_values = zeros($n_charges)
-            _dQdt = zeros($n_charges)
+            # Initialize reactive charge storage
+            # _react_charges[i] stores Q from ddt(Q) expressions (current step)
+            # _charge_prev[i] stores Q from previous timestep (for companion model)
+            _react_charges = zeros($n_charges)
+            _charge_prev = zeros($n_charges)
 
-            # For transient simulation, get charge derivatives from state vector
-            if circuit.mode == :tran && $n_charges > 0
-                # In transient mode, charges are state variables
-                # The ODE solver provides dQ/dt through the extended state
-                # For now, we compute dQ/dt = (Q_current - Q_stored) / dt
-                # This will be updated by the ODE solver infrastructure
-                for (i, charge_idx) in enumerate(_self._charge_indices)
-                    # Get stored charge from circuit (set by ODE solver)
-                    if haskey(circuit.params, Symbol(:dQdt_, charge_idx))
-                        _dQdt[i] = circuit.params[Symbol(:dQdt_, charge_idx)]
-                    end
+            # Get previous charge values from circuit storage
+            for (i, charge_idx) in enumerate(_self._charge_indices)
+                if charge_idx <= length(circuit.charge_values)
+                    _charge_prev[i] = circuit.charge_values[charge_idx]
                 end
+            end
+
+            # Integration coefficient alpha (companion model):
+            # - DC: alpha = 0 (ddt terms don't contribute)
+            # - Transient: alpha = 1/dt (Backward Euler)
+            # ddt(Q) returns alpha * (Q - Q_prev)
+            _alpha = 0.0
+            if circuit.mode == :tran
+                _alpha = get(circuit.params, :alpha, 0.0)
             end
 
             # Temperature (Kelvin)
@@ -1099,13 +1109,13 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             $(branch_init...)
 
             # Execute analog block (computes branch values)
-            # This also populates _charge_values through ddt() calls
+            # ddt(Q) calls store Q in _react_charges and contribute alpha*Q to current
             $analog_code
 
             # Convert branch values to current contributions
             $(current_contributions...)
 
-            # Build residual vector
+            # Build residual vector (includes both resist and alpha*react terms)
             residual = zeros(_mna_n_size)
             for (i, net) in enumerate(_self._nets)
                 idx = net.index
@@ -1121,8 +1131,9 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
                 residual[circuit.num_nodes + local_idx] = _branch_residuals[i]
             end
 
-            # Return residual, empty jacobian, and charge values for transient
-            return (residual, Tuple{Int,Int,Float64}[], _charge_values, _self._charge_indices)
+            # Return residual and reactive charges (Q values from ddt expressions)
+            # The ODE solver uses Q for capacitance computation: C = dQ/dV
+            return (residual, Tuple{Int,Int,Float64}[], _react_charges, _self._charge_indices)
         end
 
         # Convenience function to add device to circuit

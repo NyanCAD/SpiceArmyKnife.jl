@@ -763,25 +763,32 @@ end
     (sys::MNAODESystem)(du, u, p, t)
 
 ODE right-hand side function for DifferentialEquations.jl
-Computes: C * du/dt = b(t) - G * u - f_nonlinear(u)
-Rearranged: du/dt = C^{-1} * (b(t) - G * u - f_nonlinear(u))
 
-For DAE form, this computes the residual: C * du - (b - G*u - f_nl) = 0
+OpenVAF-style resist/react separation with companion model integration:
+- Device returns: resist (I) + alpha * react (Q) as combined residual
+- alpha = integration coefficient (0 for DC, 1/dt for BE, 2/dt for trap)
+- History term: alpha * Q_prev added to RHS
 
-For charge-based models (from ddt() calls in VA):
-- Q is computed as a function of voltages: Q = f(V)
-- I = dQ/dt is computed using backward Euler: I ≈ (Q - Q_prev) / dt
-- This current is added to the KCL equations
+The equation at each timestep is:
+  I(V) + alpha * Q(V) = alpha * Q_prev
+Rearranged:
+  I(V) + alpha * (Q(V) - Q_prev) = 0
+
+This is equivalent to I + dQ/dt = 0 with dQ/dt ≈ (Q - Q_prev)/dt
 """
 function (sys::MNAODESystem)(du, u, p, t)
     circuit = sys.circuit
 
-    # Update circuit time and compute dt
-    dt = t - circuit.time
-    if dt <= 0
-        dt = 1e-12  # Small dt for initial evaluation
+    # For DC analysis, alpha = 0 (no reactive contribution)
+    # For transient, alpha = 1/dt (Backward Euler) or 2/dt (Trapezoidal)
+    if circuit.mode == :tran
+        dt = max(t - circuit.time, 1e-15)  # Avoid division by zero
+        alpha = 1.0 / dt  # Backward Euler
+        circuit.params[:alpha] = alpha
+        circuit.dt = dt
+    else
+        circuit.params[:alpha] = 0.0
     end
-    circuit.dt = dt
 
     # Start with linear contribution: -G * u + b
     rhs = sys.b - sys.G * u
@@ -800,21 +807,19 @@ function (sys::MNAODESystem)(du, u, p, t)
 
         # Handle different return formats
         if length(result) >= 4
-            # VA device with charges: (residual, jacobian, charge_values, charge_indices)
-            residual, _, charge_values, charge_indices = result
-
-            # For each charge, compute dQ/dt using backward Euler
-            # dQ/dt = (Q_current - Q_previous) / dt
-            for (i, charge_idx) in enumerate(charge_indices)
-                Q_current = charge_values[i]
-                Q_prev = circuit.charge_values[charge_idx]
-                dQdt = (Q_current - Q_prev) / dt
-
-                # Store dQ/dt for the device to use
-                circuit.params[Symbol(:dQdt_, charge_idx)] = dQdt
-            end
+            # VA device: (residual, jacobian, react_charges, charge_indices)
+            # residual includes I + alpha*(Q - Q_prev) from companion model
+            residual, _, react_charges, charge_indices = result
 
             rhs .-= residual
+
+            # Store new charge values for history
+            # These become Q_prev for the next evaluation
+            for (i, charge_idx) in enumerate(charge_indices)
+                if charge_idx <= length(circuit.charge_values)
+                    circuit.charge_values[charge_idx] = react_charges[i]
+                end
+            end
         else
             # Standard device: (residual, jacobian)
             residual, _ = result
@@ -822,9 +827,11 @@ function (sys::MNAODESystem)(du, u, p, t)
         end
     end
 
-    # For differential equations: C * du/dt = rhs
-    # Use the DAE residual form: 0 = C * du - rhs
-    # DifferentialEquations.jl will handle this with mass matrix
+    # Update circuit time for next call
+    if circuit.mode == :tran
+        circuit.time = t
+    end
+
     du .= rhs
 end
 

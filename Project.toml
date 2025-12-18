@@ -17,10 +17,12 @@ OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 SpectreNetlistParser = "72c5b8b4-6eac-4a9c-9647-0f5a982ce801"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+SymbolicIndexingInterface = "2efcf032-c050-4f8e-a9bb-153293bab1f5"
 VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
 
 [compat]

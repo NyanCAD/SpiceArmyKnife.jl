@@ -6,6 +6,8 @@ using DiffEqBase
 using OrdinaryDiffEq
 using Printf
 using ScopedValues
+using SymbolicIndexingInterface
+using SciMLBase
 
 #=
 Utility types and functions
@@ -95,6 +97,17 @@ export SpcVCVS, SpcVCCS, MNAGnd
 export MNAParallelInstances, MNANamed
 export build_mna_circuit, simulate_dc, simulate_tran
 export mna_sim_mode, mna_spec, MNASimSpec
+
+#=
+CircuitSystem - SciML-compatible API for named solution access
+=#
+
+include("circuit_system.jl")
+
+# Re-exports for CircuitSystem
+export CircuitSystem
+export voltage, current, node_voltage, branch_current
+export create_ode_function, create_problem, solve_tran
 
 #=
 Simulation Interface

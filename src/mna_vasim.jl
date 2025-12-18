@@ -1042,7 +1042,7 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
             _params::$(Symbol(symname, "Params"))
         end
 
-        # Constructor that connects to MNA circuit
+        # Constructor that connects to MNA circuit (kwargs version for backward compat)
         function $symname(circuit::CedarSim.MNACircuit, $(ps...); name::Symbol=$(QuoteNode(symname)), kwargs...)
             # Get/create nets for external pins
             nets = [CedarSim.get_net!(circuit, n) for n in [$(ps...)]]
@@ -1073,6 +1073,51 @@ function make_mna_va_device(vm::MNA_VANode{VerilogModule})
 
             # Build immutable params struct from kwargs
             params = $(Symbol(symname, "Params"))(; kwargs...)
+
+            $symname(nets, internal_indices, branch_indices, charge_indices,
+                     name, $n_charges, params)
+        end
+
+        # Constructor with ParamLens - enables selective constant folding
+        # Parameters not in lens are constant-folded, those in lens are sweepable
+        # Usage: device(circuit, pins..., lens; param1=default1, param2=default2, ...)
+        function $symname(circuit::CedarSim.MNACircuit, $(ps...), 🔍::CedarSim.AbstractParamLens;
+                         name::Symbol=$(QuoteNode(symname)), kwargs...)
+            # Get/create nets for external pins
+            nets = [CedarSim.get_net!(circuit, n) for n in [$(ps...)]]
+
+            # Create internal nodes
+            internal_indices = Int[]
+            for i in 1:$n_internal
+                internal_name = Symbol(name, :_, :internal, i)
+                internal_net = CedarSim.get_net!(circuit, internal_name)
+                push!(internal_indices, internal_net.index)
+            end
+
+            # Create branch current variables for voltage contributions
+            branch_indices = Int[]
+            branch_names = $(Expr(:vect, [QuoteNode(s) for s in branch_syms]...))
+            for bname in branch_names
+                branch = CedarSim.get_branch!(circuit, Symbol(name, :_, bname))
+                push!(branch_indices, branch.index)
+            end
+
+            # Create charge state variables for ddt() calls
+            charge_indices = Int[]
+            for i in 1:$n_charges
+                charge = CedarSim.get_charge!(circuit, Symbol(name, :_Q, i))
+                push!(charge_indices, charge.index)
+            end
+
+            # Apply lens to each parameter: getproperty(🔍, :param)(default)
+            # - If param in lens → ValLens → returns lens value (sweepable)
+            # - If param not in lens → IdentityLens → returns default (constant-foldable)
+            resolved_kwargs = NamedTuple{keys(kwargs)}(
+                Tuple(getproperty(🔍, k)(v) for (k, v) in pairs(kwargs))
+            )
+
+            # Build immutable params struct from lens-resolved values
+            params = $(Symbol(symname, "Params"))(; resolved_kwargs...)
 
             $symname(nets, internal_indices, branch_indices, charge_indices,
                      name, $n_charges, params)

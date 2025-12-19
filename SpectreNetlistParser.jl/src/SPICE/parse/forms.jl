@@ -444,8 +444,9 @@ end
 struct OSDIDevice <: AbstractInstanceNode
     name::EXPR{HierarchialNode}
     nodes::EXPRList{HierarchialNode}
-    model::EXPR{HierarchialNode}
+    model::Maybe{EXPR{HierarchialNode}}  # Model name before parameters
     parameters::EXPRList{Parameter}
+    model_after::Maybe{EXPR{Identifier}}  # Model name after parameters (bare identifier)
     nl::EXPR{Notation}
 end
 

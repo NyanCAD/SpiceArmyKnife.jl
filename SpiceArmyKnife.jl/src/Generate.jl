@@ -38,7 +38,7 @@ function (@main)(ARGS)
             nothing,
             ["Cordell"],
             :inline; # copyright Cordell Audio (preserved in model comments)
-            target_dialects=[:ngspice]
+            target_simulators=[Ngspice()]
         ),
 
         ArchiveConfig(
@@ -62,24 +62,38 @@ function (@main)(ARGS)
                 "ntc.lib" => "resistor" # thermistors (temperature-dependent resistors)
             ),
             encoding=enc"ISO-8859-1",  # MicroCap files contain degree symbols in Latin-1 encoding
-            spice_dialect=:pspice,  # MicroCap syntax is closest to PSpice
+            simulator=Pspice(),  # MicroCap syntax is closest to PSpice
         ),
 
         ArchiveConfig(
-            "https://github.com/CedarEDA/Sky130PDK.jl/archive/refs/heads/main.zip",
-            ["Sky130PDK.jl-main/sky130A/libs.tech/ngspice/sky130.lib.spice"],
+            "https://nyancad.com/gh/fossi-foundation/skywater-pdk-libs-sky130_fd_pr/archive/refs/heads/main.zip",
+            ["skywater-pdk-libs-sky130_fd_pr-main/combined_models/sky130.lib.spice"],
             ["Sky130"],
             :lib; # FOSSi but large
-            lib_section="tt",  # Only process "tt" (typical) corner to avoid duplicates
+            lib_sections=["tt"],  # Only process "tt" (typical) corner to avoid duplicates
             device_blacklist=r"__parasitic|__base"i  # Skip parasitic and base implementation devices
         ),
-        
+
         ArchiveConfig(
-            "https://github.com/CedarEDA/GF180MCUPDK.jl/archive/refs/heads/main.zip",
-            ["GF180MCUPDK.jl-main/model/sm141064.ngspice"],
+            "https://nyancad.com/gh/fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pr/archive/refs/heads/main.zip",
+            ["globalfoundries-pdk-libs-gf180mcu_fd_pr-main/models/ngspice/sm141064.ngspice"],
             ["GF180MCU"],
             :lib; # FOSSi but large
-            lib_section="typical"
+            lib_sections=["typical"]
+        ),
+
+        ArchiveConfig(
+            "https://nyancad.com/gh/IHP-GmbH/IHP-Open-PDK/archive/refs/heads/main.zip",
+            [
+                "IHP-Open-PDK-main/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib",
+                "IHP-Open-PDK-main/ihp-sg13g2/libs.tech/ngspice/models/cornerMOShv.lib",
+                "IHP-Open-PDK-main/ihp-sg13g2/libs.tech/ngspice/models/cornerCAP.lib",
+                "IHP-Open-PDK-main/ihp-sg13g2/libs.tech/ngspice/models/cornerRES.lib",
+                "IHP-Open-PDK-main/ihp-sg13g2/libs.tech/ngspice/models/cornerHBT.lib",
+            ],
+            ["IHP-SG13G2"],
+            :lib; # FOSSi but large
+            lib_sections=["mos_tt", "cap_typ", "res_typ", "hbt_typ"]
         )
     ]
     
@@ -89,7 +103,7 @@ function (@main)(ARGS)
         println("Category: $(join(config.base_category, " / "))")
         println("Mode: $(config.mode)")
         println("Entrypoints: $(config.entrypoints === nothing ? "auto-discover" : join(config.entrypoints, ", "))")
-        println("Lib section: $(config.lib_section === nothing ? "all" : config.lib_section)")
+        println("Lib sections: $(isempty(config.lib_sections) ? "all" : join(config.lib_sections, ", "))")
         println("Device blacklist: $(config.device_blacklist === nothing ? "none" : config.device_blacklist)")
         println("-" ^ 60)
         
@@ -195,48 +209,64 @@ function upload_to_couchdb(models, chunk_size=100)
     )
     
     try
-        # Get existing revisions
-        response = HTTP.get("$url/models/_all_docs", headers)
-        existing_revs = Dict{String, String}()
-        
-        if response.status == 200
-            data = JSON.parse(String(response.body))
-            for row in data["rows"]
-                existing_revs[row["id"]] = row["value"]["rev"]
-            end
-            println("Found $(length(existing_revs)) existing documents")
+        # Delete existing database
+        try
+            HTTP.delete("$url/models", headers)
+            println("Deleted existing 'models' database")
+        catch
+            println("Note: Database 'models' did not exist (will create fresh)")
         end
-        
-        # Add revisions to models
-        docs_with_revs = []
-        for model in models
-            doc = deepcopy(model)
-            if haskey(existing_revs, doc["_id"])
-                doc["_rev"] = existing_revs[doc["_id"]]
-            end
-            push!(docs_with_revs, doc)
-        end
-        
+
+        # Create fresh database
+        HTTP.put("$url/models", headers)
+        println("Created fresh 'models' database")
+
         # Upload in chunks
         total_uploaded = 0
-        chunks = [docs_with_revs[i:min(i+chunk_size-1, end)] for i in 1:chunk_size:length(docs_with_revs)]
+        chunks = [models[i:min(i+chunk_size-1, end)] for i in 1:chunk_size:length(models)]
         
         for (i, chunk) in enumerate(chunks)
             println("Uploading chunk $i/$(length(chunks)) ($(length(chunk)) docs)...")
-            
+
             response = HTTP.post("$url/models/_bulk_docs", headers, JSON.json(Dict("docs" => chunk)))
-            
+
             if response.status in [200, 201]
-                total_uploaded += length(chunk)
-                println("  ✓ Chunk $i uploaded successfully")
+                # Parse response to check per-document results
+                results = JSON.parse(String(response.body))
+
+                successful = 0
+                failed = 0
+                for result in results
+                    if haskey(result, "error")
+                        failed += 1
+                        error_msg = get(result, "reason", "Unknown error")
+                        println("    ✗ Document '$(result["id"])' failed: $(result["error"]) - $error_msg")
+                    else
+                        successful += 1
+                    end
+                end
+
+                total_uploaded += successful
+
+                if failed > 0
+                    println("  ⚠ Chunk $i: $successful succeeded, $failed failed")
+                else
+                    println("  ✓ Chunk $i uploaded successfully ($successful docs)")
+                end
             else
-                println("  ✗ Chunk $i failed: $(response.status)")
+                println("  ✗ Chunk $i failed with HTTP $(response.status)")
                 return false
             end
         end
         
-        println("✓ Successfully uploaded $total_uploaded/$length(models)) models to CouchDB!")
-        return true
+        total_failed = length(models) - total_uploaded
+        if total_failed > 0
+            println("⚠ Upload completed with partial success: $total_uploaded succeeded, $total_failed failed out of $(length(models)) models")
+            return false  # Return false to indicate partial failure
+        else
+            println("✓ Successfully uploaded $total_uploaded/$(length(models)) models to CouchDB!")
+            return true
+        end
         
     catch e
         print("✗ Error uploading: ")

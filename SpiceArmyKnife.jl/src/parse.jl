@@ -7,16 +7,16 @@ mutable struct ExtractionConfig
     parsed_files::Dict{String, Any}
     includepaths::Vector{String}
     libraries::Set{Tuple{String,String}}
-    lib_section::Union{String, Nothing}
+    lib_sections::Vector{String}
     device_blacklist::Union{Regex, Nothing}
     current_file::String
     file_device_types::Dict{String, String}  # filename -> device type override
 
     function ExtractionConfig(; parsed_files=Dict{String, Any}(),
                             includepaths=String[], libraries=Set{Tuple{String,String}}(),
-                            lib_section=nothing, device_blacklist=nothing, current_file="",
+                            lib_sections=String[], device_blacklist=nothing, current_file="",
                             file_device_types=Dict{String, String}())
-        new(parsed_files, includepaths, libraries, lib_section, device_blacklist, current_file, file_device_types)
+        new(parsed_files, includepaths, libraries, lib_sections, device_blacklist, current_file, file_device_types)
     end
 end
 
@@ -26,7 +26,7 @@ function deeper(config::ExtractionConfig; new_includepaths=nothing, new_file=not
         parsed_files=config.parsed_files,
         includepaths=new_includepaths === nothing ? config.includepaths : new_includepaths,
         libraries=config.libraries,
-        lib_section=config.lib_section, device_blacklist=config.device_blacklist,
+        lib_sections=config.lib_sections, device_blacklist=config.device_blacklist,
         current_file=new_file === nothing ? config.current_file : new_file,
         file_device_types=config.file_device_types)
 end
@@ -41,7 +41,7 @@ Fields:
 - entrypoints: Either Vector{String} of specific paths or nothing for auto-discovery
 - base_category: Base category path for Mosaic format
 - mode: Template mode (:inline, :include, :lib)
-- lib_section: If specified, only process this .lib section to avoid duplicates
+- lib_sections: Vector of .lib section names to whitelist. Only sections in this list will be processed. Empty vector processes all sections.
 - device_blacklist: Regex pattern to skip device names (use alternation like r"__parasitic|__base"i)
 - file_device_types: Dict mapping filename -> device type for file-level overrides
 - encoding: File encoding (default: enc"UTF-8"). Use enc"ISO-8859-1" for older SPICE files with degree symbols
@@ -54,7 +54,7 @@ struct ArchiveConfig
     entrypoints::Union{Vector{String}, Nothing}
     base_category::Vector{String}
     mode::Symbol
-    lib_section::Union{String, Nothing}
+    lib_sections::Vector{String}
     device_blacklist::Union{Regex, Nothing}
     file_device_types::Dict{String, String}
     encoding::Encoding
@@ -62,8 +62,8 @@ struct ArchiveConfig
     strict::Bool
     target_simulators::Vector{AbstractSimulator}
 
-    function ArchiveConfig(url, entrypoints, base_category, mode; lib_section=nothing, device_blacklist=nothing, file_device_types=Dict{String, String}(), encoding=enc"UTF-8", simulator=Ngspice(), strict=false, target_simulators=AbstractSimulator[])
-        new(url, entrypoints, base_category, mode, lib_section, device_blacklist, file_device_types, encoding, simulator, strict, target_simulators)
+    function ArchiveConfig(url, entrypoints, base_category, mode; lib_sections=String[], device_blacklist=nothing, file_device_types=Dict{String, String}(), encoding=enc"UTF-8", simulator=Ngspice(), strict=false, target_simulators=AbstractSimulator[])
+        new(url, entrypoints, base_category, mode, lib_sections, device_blacklist, file_device_types, encoding, simulator, strict, target_simulators)
     end
 end
 
@@ -92,16 +92,17 @@ function generate_template_code(code, mode, archive_url, file_path)
 end
 
 """
-    extract_definitions_from_file(filepath::String; lib_section=nothing, device_blacklist=nothing, encoding=enc"UTF-8", simulator=Ngspice(), strict=false) -> (models, subcircuits)
+    extract_definitions_from_file(filepath::String; lib_sections=String[], device_blacklist=nothing, encoding=enc"UTF-8", simulator=Ngspice(), strict=false) -> (models, subcircuits)
 
 Parse a SPICE/Spectre file and extract model and subcircuit definitions.
 Uses automatic file extension detection (.scs = Spectre, others = SPICE).
 Handles .include and .lib statements by recursively parsing referenced files.
 
+The lib_sections parameter whitelists which .lib sections to process. Empty vector processes all sections.
 The simulator parameter controls SPICE lexer behavior (Ngspice(), Hspice(), Pspice()).
 The strict parameter enforces dialect-specific rules when true.
 """
-function extract_definitions_from_file(filepath::String; lib_section=nothing, device_blacklist=nothing, encoding=enc"UTF-8", simulator=Ngspice(), strict=false)
+function extract_definitions_from_file(filepath::String; lib_sections=String[], device_blacklist=nothing, encoding=enc"UTF-8", simulator=Ngspice(), strict=false)
     # Read file with specified encoding
     content = read(filepath, String, encoding)
     spice_dialect = symbol_from_simulator(simulator)
@@ -112,7 +113,7 @@ function extract_definitions_from_file(filepath::String; lib_section=nothing, de
 
     config = ExtractionConfig(
         includepaths=[dirname(abspath(filepath))],
-        lib_section=lib_section,
+        lib_sections=lib_sections,
         device_blacklist=device_blacklist,
         current_file=filepath
     )
@@ -175,9 +176,9 @@ function extract_definitions(ast, config::ExtractionConfig, models::Vector{Any},
             # Recurse into spectre netlist source nodes
             extract_definitions(stmt, config, models, subcircuits, error_stats, failed_files)
         elseif isa(stmt, SNode{SP.LibStatement})
-            # Recurse into .lib sections, but filter by lib_section if specified
+            # Recurse into .lib sections, but filter by lib_sections whitelist if specified
             section_name = String(stmt.name)
-            if config.lib_section === nothing || section_name == config.lib_section
+            if isempty(config.lib_sections) || section_name in config.lib_sections
                 extract_definitions(stmt, deeper(config), models, subcircuits, error_stats, failed_files)
             end
         elseif isa(stmt, SNode{SP.IncludeStatement})
@@ -358,9 +359,8 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
     # Convert models (SPICE .model statements)
     for (name, typ, subtype, code) in models
         try
-            # Create deterministic ID based on name, type, and category path
-            category_str = isempty(base_category) ? "" : join(base_category, "_")
-            model_id = "models:$(category_str)_$(typ)_$(name)"
+            # Create unique random ID for this model
+            model_id = "models:$(string(uuid4()))"
             
             # Map SPICE device types directly to Mosaic types, using subtype for polarity
             mosaic_type = device_type_mapping(typ, subtype)
@@ -428,10 +428,9 @@ function to_mosaic_format(models, subcircuits; source_file=nothing, base_categor
         try
             # Use file-level override if specified, otherwise detect from name
             device_type = file_device_type !== nothing ? file_device_type : detect_device_type_from_name(name)
-            
-            # Create deterministic ID based on name, detected type, and category path
-            category_str = isempty(base_category) ? "" : join(base_category, "_")
-            model_id = "models:$(category_str)_$(device_type)_$(name)"
+
+            # Create unique random ID for this subcircuit
+            model_id = "models:$(string(uuid4()))"
             
             # Determine port layout using heuristics based on port names
             port_layout = determine_port_layout(ports)
@@ -735,7 +734,7 @@ function process_archive(config::ArchiveConfig)
 
             try
                 # Extract definitions from file
-                extraction_result = extract_definitions_from_file(full_path; lib_section=config.lib_section, device_blacklist=config.device_blacklist, encoding=config.encoding, simulator=config.simulator, strict=config.strict)
+                extraction_result = extract_definitions_from_file(full_path; lib_sections=config.lib_sections, device_blacklist=config.device_blacklist, encoding=config.encoding, simulator=config.simulator, strict=config.strict)
 
                 # Merge error statistics
                 for (error_type, count) in extraction_result.error_stats

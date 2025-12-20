@@ -2,59 +2,12 @@
 
 ## Goal
 
-Replace the current simulation backend with direct MNA (Modified Nodal Analysis) for SpiceArmyKnife.jl circuit simulation.
+Replace the current simulation backend with direct MNA (Modified Nodal Analysis).
 
 **Why:**
-- Current backend is unmaintainable and overly complex
+- Current backend is unmaintainable
 - Need plain Julia functions for DifferentialEquations.jl
-- Direct MNA gives full control over matrix structure
-
-## Core Approach
-
-Based on research of ngspice, VACASK, OpenVAF, and the SciML ecosystem, the migration follows these principles:
-
-### 1. Direct Stamping for Simple Devices
-
-For linear devices like resistors and capacitors, generate code that stamps directly into MNA matrices without creating unnecessary current variables.
-
-**Example:** `I(p,n) <+ V(p,n)/R` in Verilog-A:
-```julia
-function stamp!(R::Resistor, ctx::MNAContext, p::Int, n::Int)
-    G = 1.0 / R.r
-    stamp_G!(ctx, p, p,  G)
-    stamp_G!(ctx, p, n, -G)
-    stamp_G!(ctx, n, p, -G)
-    stamp_G!(ctx, n, n,  G)
-end
-```
-
-No current variable needed. Just stamps.
-
-### 2. Separate G/C/b Representation
-
-Maintain separate matrices for analysis flexibility:
-```
-G: Conductance matrix (resistive Jacobian ∂f/∂x)
-C: Capacitance matrix (reactive Jacobian ∂q/∂x)
-b: RHS vector (independent sources)
-```
-
-This enables:
-- **DC**: Solve `G*x = b`
-- **AC**: Solve `(G + jωC)*x = b` with complex arithmetic
-- **Transient**: ODEProblem with mass matrix C
-
-### 3. Current Variables Only When Needed
-
-Only allocate current variables for:
-- **Voltage sources**: Voltage is constrained, current unknown
-- **Inductors**: Current is a state variable (appears in ddt)
-
-All other devices (resistors, capacitors, current sources, VCCSs) stamp directly.
-
-### 4. AD for Nonlinear Devices
-
-For nonlinear devices where we can't extract coefficients at codegen time, use ForwardDiff at runtime to compute the linearized Jacobian at each Newton iteration.
+- Direct MNA gives explicit control over matrix structure
 
 ---
 
@@ -65,9 +18,9 @@ Netlist (SPICE/Spectre/Verilog-A)
     ↓
 Parser (SpectreNetlistParser.jl, VerilogAParser.jl)
     ↓
-Codegen (spc/codegen.jl, vasim.jl) → emits stamp!() calls
+Codegen → emits stamp!() calls or contribution functions
     ↓
-MNAContext ← collects stamps during circuit trace
+Circuit trace with MNAContext → collects stamps
     ↓
 ┌─────────────────────────────────────────┐
 │ Analysis Dispatch                        │
@@ -81,46 +34,192 @@ DifferentialEquations.jl / LinearSolve.jl
 Solution
 ```
 
-### Key New Types
+---
+
+## What Replaces the Current Netlist API?
+
+### Current API (to be removed)
+
+The current system uses:
+- `net(name)` → creates a Net with DAECompiler variable
+- `branch!(net₊, net₋)` → creates current variable, KCL equations
+- `kcl!(net, current)` → accumulates current into KCL equation
+- `equation!(residual)` → adds residual equation
+
+This is **replaced** by direct stamping during circuit trace.
+
+### New API
 
 ```julia
-# MNA context accumulates device contributions
 mutable struct MNAContext
     # Node tracking
     node_names::Vector{Symbol}
     node_to_idx::Dict{Symbol, Int}
+    n_nodes::Int
 
-    # Current variables (for V-sources, inductors only)
+    # Current variables (only for V-sources and inductors)
     current_names::Vector{Symbol}
     n_currents::Int
 
-    # Sparse matrix builders (COO format during construction)
-    G_I::Vector{Int}    # Row indices
-    G_J::Vector{Int}    # Column indices
-    G_V::Vector{Float64}  # Values
+    # Sparse matrix builders (COO format)
+    G_I::Vector{Int}
+    G_J::Vector{Int}
+    G_V::Vector{Float64}
 
     C_I::Vector{Int}
     C_J::Vector{Int}
     C_V::Vector{Float64}
 
-    b::Vector{Float64}  # RHS vector
+    b::Vector{Float64}
 end
 
-# Stamping functions
-function stamp_G!(ctx::MNAContext, i::Int, j::Int, val::Float64)
-    i == 0 || j == 0 && return  # Ground node
-    push!(ctx.G_I, i)
-    push!(ctx.G_J, j)
-    push!(ctx.G_V, val)
+# Node allocation
+function get_node!(ctx::MNAContext, name::Symbol)::Int
+    get!(ctx.node_to_idx, name) do
+        push!(ctx.node_names, name)
+        ctx.n_nodes += 1
+    end
+end
+
+# Current variable allocation (only for V-sources, inductors)
+function alloc_current!(ctx::MNAContext, name::Symbol)::Int
+    push!(ctx.current_names, name)
+    ctx.n_currents += 1
+    return ctx.n_nodes + ctx.n_currents
+end
+
+# Stamping primitives
+function stamp_G!(ctx, i, j, val)
+    (i == 0 || j == 0) && return  # Ground node
+    push!(ctx.G_I, i); push!(ctx.G_J, j); push!(ctx.G_V, val)
+end
+
+function stamp_C!(ctx, i, j, val)
+    (i == 0 || j == 0) && return
+    push!(ctx.C_I, i); push!(ctx.C_J, j); push!(ctx.C_V, val)
+end
+
+function stamp_b!(ctx, i, val)
+    i == 0 && return
+    ctx.b[i] += val
 end
 ```
 
-### Device Interface
+### Circuit Trace
 
-Devices implement stamping directly:
+Instead of the current `circuit()` function that calls device functions with nets,
+we trace the circuit and collect stamps:
 
 ```julia
-# Linear resistor - stamps G matrix
+function trace_circuit!(ctx::MNAContext, circuit)
+    # Parse netlist, create nodes, call stamp! on each device
+    # Details depend on codegen (see below)
+end
+
+function build_mna_system(circuit)
+    ctx = MNAContext()
+    trace_circuit!(ctx, circuit)
+
+    n = ctx.n_nodes + ctx.n_currents
+    G = sparse(ctx.G_I, ctx.G_J, ctx.G_V, n, n)
+    C = sparse(ctx.C_I, ctx.C_J, ctx.C_V, n, n)
+
+    return MNASystem(G, C, ctx.b, ctx.node_names)
+end
+```
+
+---
+
+## SPICE Code Generation
+
+### Current Codegen (spc/codegen.jl)
+
+Currently generates:
+```julia
+Named(spicecall(resistor; r=1000.0), "R1")(vcc, out)
+```
+
+Which calls `SimpleResistor(r=1000)(vcc_net, out_net)` using the `branch!` API.
+
+### New Codegen
+
+SPICE codegen will emit direct stamp calls:
+
+```julia
+# For: R1 vcc out 1k
+stamp!(SimpleResistor(r=1000.0), ctx, get_node!(ctx, :vcc), get_node!(ctx, :out))
+
+# For: C1 out gnd 1u
+stamp!(SimpleCapacitor(c=1e-6), ctx, get_node!(ctx, :out), 0)  # 0 = ground
+
+# For: V1 vcc gnd DC 5
+stamp!(VoltageSource(dc=5.0), ctx, get_node!(ctx, :vcc), 0)
+```
+
+The circuit function becomes:
+```julia
+function trace_spice_circuit!(ctx::MNAContext, netlist)
+    # Ground node is always 0
+    # Parse netlist and emit stamp! calls
+    for instance in netlist.instances
+        device = create_device(instance)
+        nodes = [get_node!(ctx, n) for n in instance.ports]
+        stamp!(device, ctx, nodes...)
+    end
+end
+```
+
+---
+
+## Verilog-A Code Generation
+
+### Current Codegen (vasim.jl)
+
+Currently generates device structs with a call operator that uses `branch!`:
+```julia
+function (self::VAResistor)(port_p, port_n; dscope=...)
+    I_p_n = DAECompiler.variable(...)
+    branch_value_p_n = (port_p.V - port_n.V) / self.R
+    kcl!(port_p, -I_p_n)
+    kcl!(port_n, I_p_n)
+    DAECompiler.equation!(I_p_n - branch_value_p_n, ...)
+end
+```
+
+### New Codegen
+
+VA codegen will emit a contribution function evaluated with AD:
+
+```julia
+@kwdef struct VAResistor
+    R::Float64 = 1.0
+end
+
+# Generated contribution function
+function contribution(self::VAResistor, Vp, Vn)
+    Vpn = Vp - Vn
+    return Vpn / self.R  # May include ddt() calls
+end
+
+# Stamping uses the general AD-based approach
+function stamp!(self::VAResistor, ctx::MNAContext, p::Int, n::Int, x::Vector)
+    contrib = V -> contribution(self, V[p], V[n])
+    stamp_current_contribution!(ctx, p, n, contrib, x)
+end
+```
+
+For devices with `ddt()`, the s-dual approach automatically separates
+resistive and reactive contributions. See `mna_ad_stamping.md`.
+
+---
+
+## Simple Device Implementations
+
+These replace the current `simpledevices.jl` implementations:
+
+### Resistor
+
+```julia
 function stamp!(R::SimpleResistor, ctx::MNAContext, p::Int, n::Int)
     G = 1.0 / R.r
     stamp_G!(ctx, p, p,  G)
@@ -128,8 +227,11 @@ function stamp!(R::SimpleResistor, ctx::MNAContext, p::Int, n::Int)
     stamp_G!(ctx, n, p, -G)
     stamp_G!(ctx, n, n,  G)
 end
+```
 
-# Linear capacitor - stamps C matrix
+### Capacitor
+
+```julia
 function stamp!(C::SimpleCapacitor, ctx::MNAContext, p::Int, n::Int)
     cap = C.capacitance
     stamp_C!(ctx, p, p,  cap)
@@ -137,23 +239,49 @@ function stamp!(C::SimpleCapacitor, ctx::MNAContext, p::Int, n::Int)
     stamp_C!(ctx, n, p, -cap)
     stamp_C!(ctx, n, n,  cap)
 end
+```
 
-# Voltage source - needs current variable
+### Voltage Source (needs current variable)
+
+```julia
 function stamp!(V::VoltageSource, ctx::MNAContext, p::Int, n::Int)
     I_idx = alloc_current!(ctx, V.name)
 
-    # KCL rows
+    # KCL: current flows through
     stamp_G!(ctx, p, I_idx,  1.0)
     stamp_G!(ctx, n, I_idx, -1.0)
 
-    # Voltage equation
+    # Voltage equation: V(p) - V(n) = Vdc
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
     stamp_b!(ctx, I_idx, V.dc)
 end
+```
 
-# Nonlinear device - evaluated at runtime
-function evaluate!(D::Diode, ctx::MNAContext, p::Int, n::Int, x::Vector)
+### Inductor (needs current variable)
+
+```julia
+function stamp!(L::SimpleInductor, ctx::MNAContext, p::Int, n::Int)
+    I_idx = alloc_current!(ctx, L.name)
+
+    # KCL
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+
+    # V = L*dI/dt
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+    stamp_C!(ctx, I_idx, I_idx, -L.inductance)
+end
+```
+
+### Nonlinear Devices
+
+For nonlinear devices, `stamp!` takes the solution vector and computes
+linearized stamps at each Newton iteration:
+
+```julia
+function stamp!(D::Diode, ctx::MNAContext, p::Int, n::Int, x::Vector)
     V = x[p] - x[n]
 
     # Compute current and conductance
@@ -174,71 +302,41 @@ end
 
 ---
 
-## Codegen Strategy
+## AD-Based Stamping for General VA
 
-### Classifying Verilog-A Contributions
+For arbitrary VA contributions with mixed resistive/reactive terms,
+use ForwardDiff with the Laplace variable `s` as a Dual:
 
-When processing `I(p,n) <+ expr` in vasim.jl, classify the contribution:
-
-| Pattern | Classification | Generated Code |
-|---------|---------------|----------------|
-| `V(p,n)/R` | Linear conductance | Direct G stamp |
-| `C * ddt(V(p,n))` | Linear capacitance | Direct C stamp |
-| `Idc` | Current source | Direct b stamp |
-| `gm * V(c,e)` | VCCS | Off-diagonal G stamps |
-| `Is * (exp(V/Vt) - 1)` | Nonlinear | Runtime evaluate! |
-
-For `V(p,n) <+ expr`, always allocate a current variable.
-
-### Example: Resistor Codegen
-
-**Input (resistor.va):**
-```verilog
-module BasicVAResistor(p, n);
-parameter real R=1;
-analog begin
-    I(p,n) <+ V(p,n)/R;
-end
-endmodule
-```
-
-**Generated Julia:**
 ```julia
-@kwdef struct BasicVAResistor
-    R::Float64 = 1.0
-end
+using ForwardDiff: Dual, value, partials
 
-function stamp!(self::BasicVAResistor, ctx::MNAContext, p::Int, n::Int)
-    G = 1.0 / self.R
-    stamp_G!(ctx, p, p,  G)
-    stamp_G!(ctx, p, n, -G)
-    stamp_G!(ctx, n, p, -G)
-    stamp_G!(ctx, n, n,  G)
-end
+const s = Dual(0.0, 1.0)
+ddt(x) = s * x
+
+# Evaluating: I(p,n) <+ V/R + C*ddt(V)
+# Result: Dual(V/R, C*V)
+# - value() = V/R → resistive, stamps into G
+# - partials() = C*V → charge q, stamps into C via ∂q/∂V
 ```
+
+See `mna_ad_stamping.md` for the complete approach with nested duals
+for Jacobian computation.
+
+---
+
+## When Do We Need Current Variables?
+
+| Contribution Type | Current Variable? | Why |
+|-------------------|-------------------|-----|
+| `I(a,b) <+ f(V)` | NO | Stamps directly into G |
+| `I(a,b) <+ ddt(q(V))` | NO | Stamps directly into C |
+| `I(a,b) <+ constant` | NO | Stamps directly into b |
+| `V(a,b) <+ anything` | YES | Voltage constraint needs I |
+| Inductor | YES | Current is state variable |
 
 ---
 
 ## SciML Integration
-
-### Building the System
-
-```julia
-function build_mna_system(circuit)
-    ctx = MNAContext()
-
-    # Trace circuit to collect stamps
-    trace_circuit!(ctx, circuit)
-
-    # Build sparse matrices
-    n = ctx.n_nodes + ctx.n_currents
-    G = sparse(ctx.G_I, ctx.G_J, ctx.G_V, n, n)
-    C = sparse(ctx.C_I, ctx.C_J, ctx.C_V, n, n)
-    b = ctx.b
-
-    return MNASystem(G, C, b, ctx.node_names)
-end
-```
 
 ### ODEProblem with Mass Matrix
 
@@ -247,16 +345,14 @@ function make_ode_problem(sys::MNASystem, tspan)
     G, C, b = sys.G, sys.C, sys.b
 
     function rhs!(du, u, p, t)
-        # du = -G*u + b (in mass matrix form: C*du/dt = -G*u + b)
+        # C*du/dt = -G*u + b
         mul!(du, G, u)
         du .*= -1
         du .+= b
     end
 
-    # C is the mass matrix (may be singular for algebraic constraints)
     f = ODEFunction(rhs!; mass_matrix=C, jac=(J,u,p,t) -> (J .= -G))
-    prob = ODEProblem(f, zeros(size(G,1)), tspan)
-    return prob
+    return ODEProblem(f, zeros(size(G,1)), tspan)
 end
 ```
 
@@ -264,7 +360,6 @@ end
 
 ```julia
 function dc!(sys::MNASystem)
-    # For DC, just solve G*x = b
     x = sys.G \ sys.b
     return DCSolution(x, sys.node_names)
 end
@@ -277,7 +372,6 @@ function ac!(sys::MNASystem, freqs)
     results = Vector{ComplexF64}[]
     for f in freqs
         ω = 2π * f
-        # Solve (G + jωC)*x = b
         A = sys.G + im * ω * sys.C
         x = A \ sys.b
         push!(results, x)
@@ -288,150 +382,13 @@ end
 
 ---
 
-## Handling Tricky Cases
-
-### Voltage Sources
-
-Need current variable because voltage is constrained:
-
-```julia
-function stamp!(V::VoltageSource, ctx, p, n)
-    I_idx = alloc_current!(ctx)
-
-    # Current flows through source
-    stamp_G!(ctx, p, I_idx,  1.0)
-    stamp_G!(ctx, n, I_idx, -1.0)
-
-    # V(p) - V(n) = Vdc
-    stamp_G!(ctx, I_idx, p,  1.0)
-    stamp_G!(ctx, I_idx, n, -1.0)
-    stamp_b!(ctx, I_idx, Vdc)
-end
-```
-
-### Inductors
-
-Current is a state variable (appears in ddt):
-
-```julia
-function stamp!(L::Inductor, ctx, p, n)
-    I_idx = alloc_current!(ctx)
-
-    # KCL
-    stamp_G!(ctx, p, I_idx,  1.0)
-    stamp_G!(ctx, n, I_idx, -1.0)
-
-    # V = L*dI/dt → in matrix form
-    stamp_G!(ctx, I_idx, p,  1.0)
-    stamp_G!(ctx, I_idx, n, -1.0)
-    stamp_C!(ctx, I_idx, I_idx, -L.inductance)
-end
-```
-
-### Nonlinear ddt(q) where q = q(V)
-
-For `I(p,n) <+ ddt(q)` with nonlinear q:
-
-```julia
-function evaluate!(dev, ctx, p, n, x)
-    V = x[p] - x[n]
-
-    # Compute charge and incremental capacitance via AD
-    q = dev.q_func(V)
-    C_incr = ForwardDiff.derivative(dev.q_func, V)
-
-    stamp_C!(ctx, p, p,  C_incr)
-    stamp_C!(ctx, p, n, -C_incr)
-    stamp_C!(ctx, n, p, -C_incr)
-    stamp_C!(ctx, n, n,  C_incr)
-end
-```
-
-### General Case: AD with s-Dual
-
-For arbitrary VA contributions with mixed resistive/reactive terms, we use ForwardDiff
-with the Laplace variable `s` as a Dual to automatically separate components:
-
-```julia
-using ForwardDiff: Dual, value, partials
-
-# s = Dual(0, 1) represents the Laplace variable
-# ddt(x) = s * x in the Laplace domain
-const s = Dual(0.0, 1.0)
-ddt(x) = s * x
-
-# Example: I(p,n) <+ V/R + C*ddt(V)
-# Evaluates to: V/R + s*(C*V) = Dual(V/R, C*V)
-# - value() = V/R → resistive, stamps into G
-# - partials() = C*V → charge q, stamps into C via ∂q/∂V
-```
-
-See `doc/mna_ad_stamping.md` for the complete AD-based approach to general
-VA contribution stamping.
-
-### VCCS (Voltage-Controlled Current Source)
-
-```julia
-# I(out+,out-) <+ gm * V(in+,in-)
-function stamp!(vccs, ctx, out_p, out_n, in_p, in_n)
-    gm = vccs.gm
-    stamp_G!(ctx, out_p, in_p,  gm)
-    stamp_G!(ctx, out_p, in_n, -gm)
-    stamp_G!(ctx, out_n, in_p, -gm)
-    stamp_G!(ctx, out_n, in_n,  gm)
-end
-```
-
----
-
-## Summary: When Do We Need Current Variables?
-
-| Contribution Type | Current Variable? | Why |
-|-------------------|-------------------|-----|
-| `I(a,b) <+ linear(V)` | NO | Stamps directly into G |
-| `I(a,b) <+ ddt(linear(V))` | NO | Stamps directly into C |
-| `I(a,b) <+ constant` | NO | Stamps directly into b |
-| `I(a,b) <+ nonlinear(V)` | NO | Linearize + stamp G, b |
-| `V(a,b) <+ anything` | YES | Voltage constraint needs I |
-| `V(a,b) <+ L*ddt(I)` | YES | Inductor, I is state |
-
-**Key insight:** Most devices are current contributions that stamp directly. Only voltage constraints and inductors need explicit current variables.
-
----
-
-## Migration Phases
-
-### Phase 1: MNA Core
-- Define `MNAContext`, stamping primitives
-- DC solver for linear circuits
-- Unit tests against analytical solutions
-
-### Phase 2: Simple Devices
-- Rewrite simpledevices.jl to use stamp! interface
-- Resistor, capacitor, inductor
-- Voltage/current sources
-- Controlled sources (VCVS, VCCS)
-
-### Phase 3: Verilog-A Codegen
-- Modify vasim.jl to emit contribution functions
-- Use ForwardDiff with s-dual for resist/react separation (ddt(x) = s*x)
-- Nested duals for Jacobian computation
-- Voltage contributions (`V(p,n) <+ ...`) allocate current variables
-
-### Phase 4: Analysis Types
-- Transient via ODEProblem with mass matrix
-- AC small-signal analysis
-- Integration with existing test suite
-
----
-
 ## Files to Modify/Create
 
 | File | Change |
 |------|--------|
 | New `src/mna/context.jl` | MNAContext and stamping primitives |
 | New `src/mna/solve.jl` | DC, AC, transient solvers |
-| `src/simpledevices.jl` | Replace branch! with stamp! |
-| `src/vasim.jl` | Classify contributions, emit stamps |
-| `src/spc/codegen.jl` | Emit stamp calls instead of Named(...) |
-| `src/simulate_ir.jl` | Replace Net/branch! with MNA-aware versions |
+| `src/simpledevices.jl` | Replace `(::Device)(A, B)` with `stamp!(device, ctx, a, b)` |
+| `src/vasim.jl` | Emit contribution functions instead of branch!/kcl! code |
+| `src/spc/codegen.jl` | Emit `stamp!` calls instead of `Named(...)` |
+| `src/simulate_ir.jl` | Remove Net/branch!/kcl! infrastructure |

@@ -25,6 +25,8 @@ Replace the current simulation backend with direct MNA (Modified Nodal Analysis)
 
 **Let the solver handle time integration:** Don't discretize ddt() yourself. DifferentialEquations.jl solvers can reject steps, use higher-order methods, and handle variable timesteps. Express `dQ/dt` contributions and let the solver do the rest.
 
+**Preserve constant folding:** The current system achieves good performance by letting Julia constant-fold device parameters at compile time. Device structs are typed, so `self.R` is known when the device is concrete. ParamLens uses a NamedTuple typed on its keys, so non-overridden parameters still fold while overridden ones flow through the `p` argument. The stamp!-based approach must preserve this - stamp! should be specialized per device type to enable inlining.
+
 ---
 
 ## Architecture Overview

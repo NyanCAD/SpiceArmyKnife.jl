@@ -2,47 +2,35 @@
 
 ## Goal
 
-Replace DAECompiler with direct MNA (Modified Nodal Analysis) for SpiceArmyKnife.jl circuit simulation.
+Replace the current simulation backend with direct MNA (Modified Nodal Analysis) for SpiceArmyKnife.jl circuit simulation.
 
 **Why:**
-- DAECompiler is unmaintainable and complex compiler code
-- MTK symbolic equations grow exponentially for complex circuits
+- Current backend is unmaintainable and overly complex
 - Need plain Julia functions for DifferentialEquations.jl
+- Direct MNA gives full control over matrix structure
 
 ## Core Approach
 
-Based on research of ngspice, VACASK, DAECompiler, OpenVAF, and the SciML ecosystem, the migration follows these principles:
+Based on research of ngspice, VACASK, OpenVAF, and the SciML ecosystem, the migration follows these principles:
 
-### 1. Separate Evaluation from Loading (VACASK Pattern)
+### 1. Direct Stamping for Simple Devices
 
-Devices compute contributions in an **eval** phase, then **load** into matrices. This separation enables:
-- Instance bypass for unchanged devices (optimization)
-- Different loading for different analysis types
-- Clean device interface
+For linear devices like resistors and capacitors, generate code that stamps directly into MNA matrices without creating unnecessary current variables.
 
-### 2. Explicit DAE Formulation
-
-Express the circuit as:
-```
-f(x) + d/dt[q(x)] = 0
-
-where:
-  x     = state vector (node voltages + branch currents)
-  f(x)  = resistive residual (DC, algebraic)
-  q(x)  = reactive residual (charges, fluxes)
+**Example:** `I(p,n) <+ V(p,n)/R` in Verilog-A:
+```julia
+function stamp!(R::Resistor, ctx::MNAContext, p::Int, n::Int)
+    G = 1.0 / R.r
+    stamp_G!(ctx, p, p,  G)
+    stamp_G!(ctx, p, n, -G)
+    stamp_G!(ctx, n, p, -G)
+    stamp_G!(ctx, n, n,  G)
+end
 ```
 
-This maps directly to SciML's `DAEProblem` or `ODEProblem` with mass matrix.
+No current variable needed. Just stamps.
 
-### 3. Let the Solver Handle Time Integration
-
-Unlike ngspice's companion models (`I = C*(V - V_prev)/dt`), we express `dq/dt` directly and let DifferentialEquations.jl's adaptive solvers handle:
-- Step size selection
-- Higher-order methods (not just trapezoidal/Gear)
-- Step rejection and retry
-- Stiffness detection
-
-### 4. Separate G/C/b Representation
+### 2. Separate G/C/b Representation
 
 Maintain separate matrices for analysis flexibility:
 ```
@@ -52,23 +40,21 @@ b: RHS vector (independent sources)
 ```
 
 This enables:
-- **DC**: Solve `G*x = b` (C terms zero, q=0 at steady state)
+- **DC**: Solve `G*x = b`
 - **AC**: Solve `(G + jωC)*x = b` with complex arithmetic
-- **Transient**: `DAEProblem` with `0 = f(x) + dq/dt`
-- **Noise/Sensitivity**: Access individual matrix contributions
+- **Transient**: ODEProblem with mass matrix C
 
-### 5. Trace-Time Structure Discovery
+### 3. Current Variables Only When Needed
 
-Use ForwardDiff Dual numbers at setup time to discover:
-- Which contributions are resistive vs reactive (t-partial tagging)
-- Jacobian sparsity pattern
-- Charge dependencies on voltages
+Only allocate current variables for:
+- **Voltage sources**: Voltage is constrained, current unknown
+- **Inductors**: Current is a state variable (appears in ddt)
 
-This happens once during circuit compilation, not every timestep.
+All other devices (resistors, capacitors, current sources, VCCSs) stamp directly.
 
-### 6. Preserve Constant Folding
+### 4. AD for Nonlinear Devices
 
-Parameters not being swept should fold into generated code at compile time. The device interface must support this—unswept parameters become compile-time constants.
+For nonlinear devices where we can't extract coefficients at codegen time, use ForwardDiff at runtime to compute the linearized Jacobian at each Newton iteration.
 
 ---
 
@@ -79,15 +65,15 @@ Netlist (SPICE/Spectre/Verilog-A)
     ↓
 Parser (SpectreNetlistParser.jl, VerilogAParser.jl)
     ↓
-Codegen (spectre.jl, vasim.jl) → emits MNA primitives
+Codegen (spc/codegen.jl, vasim.jl) → emits stamp!() calls
     ↓
-MNAContext (new) ← collects device contributions
+MNAContext ← collects stamps during circuit trace
     ↓
 ┌─────────────────────────────────────────┐
 │ Analysis Dispatch                        │
 ├──────────┬──────────┬───────────────────┤
 │ DC       │ Transient│ AC                │
-│ G*x = b  │ DAEProblem│ (G+jωC)*x = b   │
+│ G*x = b  │ ODEProblem│ (G+jωC)*x = b   │
 └──────────┴──────────┴───────────────────┘
     ↓
 DifferentialEquations.jl / LinearSolve.jl
@@ -99,40 +85,135 @@ Solution
 
 ```julia
 # MNA context accumulates device contributions
-struct MNAContext
-    nodes::Vector{Node}           # Circuit nodes
-    branches::Vector{Branch}      # Voltage source branches
+mutable struct MNAContext
+    # Node tracking
+    node_names::Vector{Symbol}
+    node_to_idx::Dict{Symbol, Int}
+
+    # Current variables (for V-sources, inductors only)
+    current_names::Vector{Symbol}
+    n_currents::Int
 
     # Sparse matrix builders (COO format during construction)
-    G_entries::Vector{MatrixEntry}  # Resistive Jacobian
-    C_entries::Vector{MatrixEntry}  # Reactive Jacobian
-    b_entries::Vector{RHSEntry}     # RHS contributions
+    G_I::Vector{Int}    # Row indices
+    G_J::Vector{Int}    # Column indices
+    G_V::Vector{Float64}  # Values
+
+    C_I::Vector{Int}
+    C_J::Vector{Int}
+    C_V::Vector{Float64}
+
+    b::Vector{Float64}  # RHS vector
 end
 
-# Device contribution interface
-struct DeviceContribution
-    resist_residual::Float64      # f(x) contribution
-    react_residual::Float64       # q(x) contribution
-    resist_jacobian::SparseEntries  # ∂f/∂x
-    react_jacobian::SparseEntries   # ∂q/∂x
+# Stamping functions
+function stamp_G!(ctx::MNAContext, i::Int, j::Int, val::Float64)
+    i == 0 || j == 0 && return  # Ground node
+    push!(ctx.G_I, i)
+    push!(ctx.G_J, j)
+    push!(ctx.G_V, val)
 end
 ```
 
 ### Device Interface
 
-Devices implement a two-phase protocol:
+Devices implement stamping directly:
 
 ```julia
-# Phase 1: Setup (once per elaboration)
-function setup!(device, ctx::MNAContext)
-    # Register nodes, create branch variables
-    # Return indices for stamping
+# Linear resistor - stamps G matrix
+function stamp!(R::SimpleResistor, ctx::MNAContext, p::Int, n::Int)
+    G = 1.0 / R.r
+    stamp_G!(ctx, p, p,  G)
+    stamp_G!(ctx, p, n, -G)
+    stamp_G!(ctx, n, p, -G)
+    stamp_G!(ctx, n, n,  G)
 end
 
-# Phase 2: Evaluate (each Newton iteration)
-function evaluate!(device, ctx::MNAContext, x::Vector)
-    # Compute residuals and Jacobian entries
-    # Stamp into ctx.G, ctx.C, ctx.b
+# Linear capacitor - stamps C matrix
+function stamp!(C::SimpleCapacitor, ctx::MNAContext, p::Int, n::Int)
+    cap = C.capacitance
+    stamp_C!(ctx, p, p,  cap)
+    stamp_C!(ctx, p, n, -cap)
+    stamp_C!(ctx, n, p, -cap)
+    stamp_C!(ctx, n, n,  cap)
+end
+
+# Voltage source - needs current variable
+function stamp!(V::VoltageSource, ctx::MNAContext, p::Int, n::Int)
+    I_idx = alloc_current!(ctx, V.name)
+
+    # KCL rows
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+
+    # Voltage equation
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+    stamp_b!(ctx, I_idx, V.dc)
+end
+
+# Nonlinear device - evaluated at runtime
+function evaluate!(D::Diode, ctx::MNAContext, p::Int, n::Int, x::Vector)
+    V = x[p] - x[n]
+
+    # Compute current and conductance
+    I = D.Is * (exp(V / D.Vt) - 1)
+    G = D.Is / D.Vt * exp(V / D.Vt)
+
+    # Equivalent source for Newton
+    Ieq = I - G * V
+
+    stamp_G!(ctx, p, p,  G)
+    stamp_G!(ctx, p, n, -G)
+    stamp_G!(ctx, n, p, -G)
+    stamp_G!(ctx, n, n,  G)
+    stamp_b!(ctx, p, -Ieq)
+    stamp_b!(ctx, n,  Ieq)
+end
+```
+
+---
+
+## Codegen Strategy
+
+### Classifying Verilog-A Contributions
+
+When processing `I(p,n) <+ expr` in vasim.jl, classify the contribution:
+
+| Pattern | Classification | Generated Code |
+|---------|---------------|----------------|
+| `V(p,n)/R` | Linear conductance | Direct G stamp |
+| `C * ddt(V(p,n))` | Linear capacitance | Direct C stamp |
+| `Idc` | Current source | Direct b stamp |
+| `gm * V(c,e)` | VCCS | Off-diagonal G stamps |
+| `Is * (exp(V/Vt) - 1)` | Nonlinear | Runtime evaluate! |
+
+For `V(p,n) <+ expr`, always allocate a current variable.
+
+### Example: Resistor Codegen
+
+**Input (resistor.va):**
+```verilog
+module BasicVAResistor(p, n);
+parameter real R=1;
+analog begin
+    I(p,n) <+ V(p,n)/R;
+end
+endmodule
+```
+
+**Generated Julia:**
+```julia
+@kwdef struct BasicVAResistor
+    R::Float64 = 1.0
+end
+
+function stamp!(self::BasicVAResistor, ctx::MNAContext, p::Int, n::Int)
+    G = 1.0 / self.R
+    stamp_G!(ctx, p, p,  G)
+    stamp_G!(ctx, p, n, -G)
+    stamp_G!(ctx, n, p, -G)
+    stamp_G!(ctx, n, n,  G)
 end
 ```
 
@@ -140,274 +221,194 @@ end
 
 ## SciML Integration
 
-### DAEProblem Formulation
-
-For a circuit with `n` node voltages and `m` branch currents:
+### Building the System
 
 ```julia
-function circuit_residual!(res, du, u, p, t)
-    # u = [V_nodes..., I_branches...]
-    # du = d/dt[u]
+function build_mna_system(circuit)
+    ctx = MNAContext()
 
-    # Zero residuals
-    res .= 0.0
+    # Trace circuit to collect stamps
+    trace_circuit!(ctx, circuit)
 
-    # Evaluate all devices, accumulate into res
-    for device in circuit.devices
-        evaluate!(device, res, du, u, p, t)
+    # Build sparse matrices
+    n = ctx.n_nodes + ctx.n_currents
+    G = sparse(ctx.G_I, ctx.G_J, ctx.G_V, n, n)
+    C = sparse(ctx.C_I, ctx.C_J, ctx.C_V, n, n)
+    b = ctx.b
+
+    return MNASystem(G, C, b, ctx.node_names)
+end
+```
+
+### ODEProblem with Mass Matrix
+
+```julia
+function make_ode_problem(sys::MNASystem, tspan)
+    G, C, b = sys.G, sys.C, sys.b
+
+    function rhs!(du, u, p, t)
+        # du = -G*u + b (in mass matrix form: C*du/dt = -G*u + b)
+        mul!(du, G, u)
+        du .*= -1
+        du .+= b
     end
+
+    # C is the mass matrix (may be singular for algebraic constraints)
+    f = ODEFunction(rhs!; mass_matrix=C, jac=(J,u,p,t) -> (J .= -G))
+    prob = ODEProblem(f, zeros(size(G,1)), tspan)
+    return prob
 end
-
-# Jacobian: γ * ∂G/∂(du) + ∂G/∂u = γ*C + G
-function circuit_jacobian!(J, du, u, p, gamma, t)
-    J .= gamma .* C .+ G
-end
-
-prob = DAEProblem(circuit_residual!, du0, u0, tspan;
-    differential_vars = diff_vars,  # Which vars have du terms
-    jac = circuit_jacobian!)
-
-sol = solve(prob, IDA())
 ```
 
-### ODEProblem with Mass Matrix (Alternative)
-
-For circuits with constant capacitances:
+### DC Operating Point
 
 ```julia
-function circuit_rhs!(du, u, p, t)
-    # du here is the RHS, not derivative
-    du .= -G * u .+ b
+function dc!(sys::MNASystem)
+    # For DC, just solve G*x = b
+    x = sys.G \ sys.b
+    return DCSolution(x, sys.node_names)
 end
-
-# Mass matrix: C * (actual du/dt) = rhs
-# Singular where algebraic constraints exist
-mass_matrix = build_C_matrix(circuit)
-
-f = ODEFunction(circuit_rhs!; mass_matrix, jac = -G)
-prob = ODEProblem(f, u0, tspan)
-sol = solve(prob, Rodas5())
 ```
 
-### Jacobian Specification
-
-Use sparse Jacobian with precomputed sparsity:
+### AC Analysis
 
 ```julia
-jac_prototype = build_sparsity_pattern(circuit)  # Sparse matrix
-
-dae_fn = DAEFunction(circuit_residual!;
-    jac = circuit_jacobian!,
-    jac_prototype = jac_prototype)
+function ac!(sys::MNASystem, freqs)
+    results = Vector{ComplexF64}[]
+    for f in freqs
+        ω = 2π * f
+        # Solve (G + jωC)*x = b
+        A = sys.G + im * ω * sys.C
+        x = A \ sys.b
+        push!(results, x)
+    end
+    return ACSolution(freqs, results, sys.node_names)
+end
 ```
+
+---
+
+## Handling Tricky Cases
+
+### Voltage Sources
+
+Need current variable because voltage is constrained:
+
+```julia
+function stamp!(V::VoltageSource, ctx, p, n)
+    I_idx = alloc_current!(ctx)
+
+    # Current flows through source
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+
+    # V(p) - V(n) = Vdc
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+    stamp_b!(ctx, I_idx, Vdc)
+end
+```
+
+### Inductors
+
+Current is a state variable (appears in ddt):
+
+```julia
+function stamp!(L::Inductor, ctx, p, n)
+    I_idx = alloc_current!(ctx)
+
+    # KCL
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+
+    # V = L*dI/dt → in matrix form
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+    stamp_C!(ctx, I_idx, I_idx, -L.inductance)
+end
+```
+
+### Nonlinear ddt(q) where q = q(V)
+
+For `I(p,n) <+ ddt(q)` with nonlinear q:
+
+```julia
+function evaluate!(dev, ctx, p, n, x)
+    V = x[p] - x[n]
+
+    # Compute charge and incremental capacitance via AD
+    q = dev.q_func(V)
+    C_incr = ForwardDiff.derivative(dev.q_func, V)
+
+    stamp_C!(ctx, p, p,  C_incr)
+    stamp_C!(ctx, p, n, -C_incr)
+    stamp_C!(ctx, n, p, -C_incr)
+    stamp_C!(ctx, n, n,  C_incr)
+end
+```
+
+### VCCS (Voltage-Controlled Current Source)
+
+```julia
+# I(out+,out-) <+ gm * V(in+,in-)
+function stamp!(vccs, ctx, out_p, out_n, in_p, in_n)
+    gm = vccs.gm
+    stamp_G!(ctx, out_p, in_p,  gm)
+    stamp_G!(ctx, out_p, in_n, -gm)
+    stamp_G!(ctx, out_n, in_p, -gm)
+    stamp_G!(ctx, out_n, in_n,  gm)
+end
+```
+
+---
+
+## Summary: When Do We Need Current Variables?
+
+| Contribution Type | Current Variable? | Why |
+|-------------------|-------------------|-----|
+| `I(a,b) <+ linear(V)` | NO | Stamps directly into G |
+| `I(a,b) <+ ddt(linear(V))` | NO | Stamps directly into C |
+| `I(a,b) <+ constant` | NO | Stamps directly into b |
+| `I(a,b) <+ nonlinear(V)` | NO | Linearize + stamp G, b |
+| `V(a,b) <+ anything` | YES | Voltage constraint needs I |
+| `V(a,b) <+ L*ddt(I)` | YES | Inductor, I is state |
+
+**Key insight:** Most devices are current contributions that stamp directly. Only voltage constraints and inductors need explicit current variables.
 
 ---
 
 ## Migration Phases
 
-### Phase 1: MNA Core and Primitives
-**See: [mna_phase1_core.md](mna_phase1_core.md)**
-
-- Define `MNAContext`, `Node`, `Branch` types
-- Implement matrix stamping primitives
+### Phase 1: MNA Core
+- Define `MNAContext`, stamping primitives
 - DC solver for linear circuits
 - Unit tests against analytical solutions
 
-### Phase 2: Simple SPICE/Spectre Devices
-**See: [mna_phase2_devices.md](mna_phase2_devices.md)**
-
-- Update `spectre.jl` codegen for built-in devices
+### Phase 2: Simple Devices
+- Rewrite simpledevices.jl to use stamp! interface
 - Resistor, capacitor, inductor
 - Voltage/current sources
-- Controlled sources (VCVS, VCCS, CCVS, CCCS)
+- Controlled sources (VCVS, VCCS)
+
+### Phase 3: Verilog-A Codegen
+- Modify vasim.jl to classify contributions
+- Generate direct stamps for linear cases
+- Generate evaluate! for nonlinear cases
+
+### Phase 4: Analysis Types
+- Transient via ODEProblem with mass matrix
+- AC small-signal analysis
 - Integration with existing test suite
 
-### Phase 3: Verilog-A and Analysis Types
-**See: [mna_phase3_verilog_a.md](mna_phase3_verilog_a.md)**
-
-- Update `vasim.jl` for Verilog-A devices
-- Transient analysis with DAEProblem
-- AC small-signal analysis
-- Nonlinear devices (diode, MOSFET)
-- BSIM model support
-
 ---
 
-## Key Lessons from Research
+## Files to Modify/Create
 
-### From VACASK
-- Residual-based convergence (not solution-based) is more accurate
-- Eval/load separation enables optimization
-- Instance bypass for unchanged devices
-- Proper MNA sign conventions critical
-
-### From ngspice
-- Companion models work but limit solver flexibility
-- State array management for multi-step methods
-- Voltage limiting for convergence (pn junction limiter)
-- GMIN stepping and source stepping for difficult convergence
-
-### From DAECompiler
-- Structural analysis identifies differential vs algebraic variables
-- Automatic differentiation for Jacobians
-- Scope system for hierarchical naming
-- Pain point: restricted Julia subset, complex compilation
-
-### From OpenVAF
-- Clean separation of Verilog-A semantics from simulator backend
-- Explicit `f(x) + ddt(q(x)) = 0` formulation
-- Automatic differentiation for `ddx()` small-signal
-- Parameter caching for expensive computations
-
-### From SciML
-- `DAEProblem` with `differential_vars` for mixed DAE
-- IDA solver is gold standard for stiff DAEs
-- Sparse Jacobian via `jac_prototype`
-- Initialization via `BrownFullBasicInit` or custom
-
----
-
-## Refined Approach: Minimal Changes Based on Code Tracing
-
-**See: [implementation_trace_notes.md](implementation_trace_notes.md)** for detailed code path analysis.
-
-### Key Discovery: Interception Points
-
-After tracing through the codebase, the cleanest approach intercepts at two levels:
-
-1. **`simulate_ir.jl`**: The `Net` and `branch!` infrastructure
-2. **`circuitodesystem.jl`**: The `CircuitIRODESystem` entry point
-
-**Critical insight:** Device code doesn't need to change. The `Net` struct and `branch!` function are the aggregation points where all device contributions flow.
-
-### Implementation Strategy
-
-#### Step 1: Dual-Mode Net and branch!
-
-Add MNA collection alongside existing DAECompiler path:
-
-```julia
-# simulate_ir.jl - Modified Net constructor
-function Net(name::AbstractScope, multiplier::Float64 = 1.0)
-    # Always create DAECompiler variables (for compatibility)
-    V = variable(name)
-    kcl! = equation(name)
-    dVdt = ddt(V)
-
-    # Also record for MNA if collector is active
-    if mna_collector[] !== nothing
-        register_node!(mna_collector[], name)
-    end
-
-    return new{typeof(dVdt)}(V, kcl!, multiplier)
-end
-
-# Modified branch! to record branch info
-function branch!(scope::AbstractScope, net₊::AbstractNet, net₋::AbstractNet)
-    I = variable(scope(:I))
-    kcl!(net₊, -I)
-    kcl!(net₋,  I)
-    V = net₊.V - net₋.V
-    observed!(V, scope(:V))
-
-    # Record for MNA if collector is active
-    if mna_collector[] !== nothing
-        record_branch!(mna_collector[], scope, net₊, net₋)
-    end
-
-    (V, I)
-end
-```
-
-#### Step 2: Stamp Collection During Trace
-
-Device equations use `equation!()` which we intercept:
-
-```julia
-# Add MNA-aware equation! wrapper
-function mna_equation!(val, scope)
-    # Original DAECompiler path
-    DAECompiler.equation!(val, scope)
-
-    # If MNA collection active, record the contribution
-    if mna_collector[] !== nothing
-        record_equation!(mna_collector[], val, scope)
-    end
-end
-```
-
-#### Step 3: Alternative System Constructor
-
-```julia
-function CircuitMNASystem(circuit::AbstractSim; kwargs...)
-    # Create collector
-    collector = MNACollector()
-
-    # Trace the circuit with collector active
-    with(mna_collector => collector) do
-        circuit()
-    end
-
-    # Build MNA system from collected stamps
-    return build_mna_system(collector)
-end
-```
-
-### What Stays the Same
-
-- **Device implementations** (`simpledevices.jl`): No changes needed
-- **Verilog-A codegen** (`vasim.jl`): Generated code uses same primitives
-- **SPICE codegen** (`spc/codegen.jl`): Uses same Named/net/branch patterns
-- **ParamLens mechanism**: Works unchanged through trace
-
-### What Changes
-
-| Component | Change |
-|-----------|--------|
-| `simulate_ir.jl` | Add MNA collection hooks to Net/branch! |
-| `circuitodesystem.jl` | Add `CircuitMNASystem` alternative constructor |
-| New `mna/collector.jl` | MNA stamp collection during trace |
-| New `mna/system.jl` | Build G/C/b matrices from stamps |
-| New `mna/solve.jl` | DC, AC, transient using SciML |
-
-### Validation Strategy
-
-Keep both paths available to compare results:
-
-```julia
-# Run both and compare
-sys_dae = CircuitIRODESystem(circuit)
-sys_mna = CircuitMNASystem(circuit)
-
-# DC comparison
-sol_dae = dc!(sys_dae, circuit)
-sol_mna = dc!(sys_mna, circuit)
-@assert isapprox(sol_dae.u, sol_mna.u; rtol=1e-10)
-
-# Transient comparison
-prob_dae = ODEProblem(sys_dae, u0, tspan, circuit)
-prob_mna = ODEProblem(sys_mna, u0, tspan)
-sol_dae = solve(prob_dae, FBDF())
-sol_mna = solve(prob_mna, FBDF())
-```
-
-This parallel validation allows incremental migration while maintaining correctness.
-
----
-
-## Summary
-
-| Avoid | Prefer |
-|-------|--------|
-| Complete rewrite | Incremental: core → devices → VA |
-| Companion models | Let solver handle time integration |
-| Combined G+C matrix | Separate for analysis flexibility |
-| AST walking for ddt | Trace-time Dual detection |
-| Dense Jacobians | Sparse with precomputed pattern |
-| Losing constant folding | Preserve for unswept parameters |
-| Rewriting device code | Intercept at Net/branch! level |
-| Breaking existing tests | Parallel validation with DAECompiler |
-
-**The key insight:** Design primitives that are easy to target from existing codegen (`spectre.jl`, `vasim.jl`) and map cleanly to SciML's `DAEProblem`/`ODEProblem`. The solver handles the hard numerical work.
-
-**The refined insight:** Intercept at the `Net` and `branch!` level in `simulate_ir.jl` to collect MNA stamps during circuit trace. This keeps all device code unchanged while enabling a parallel MNA backend for validation and eventual replacement.
+| File | Change |
+|------|--------|
+| New `src/mna/context.jl` | MNAContext and stamping primitives |
+| New `src/mna/solve.jl` | DC, AC, transient solvers |
+| `src/simpledevices.jl` | Replace branch! with stamp! |
+| `src/vasim.jl` | Classify contributions, emit stamps |
+| `src/spc/codegen.jl` | Emit stamp calls instead of Named(...) |
+| `src/simulate_ir.jl` | Replace Net/branch! with MNA-aware versions |

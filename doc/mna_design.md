@@ -11,6 +11,22 @@ Replace the current simulation backend with direct MNA (Modified Nodal Analysis)
 
 ---
 
+## Key Principles
+
+| Avoid | Prefer |
+|-------|--------|
+| Complete rewrite all at once | Incremental: core → simple devices → complex VA |
+| Companion models for ddt (`I = (Q-Q_prev)/dt`) | Let DiffEq solver handle time integration |
+| AST walking to detect ddt() | ForwardDiff s-dual approach |
+| Combining G and C into one matrix | Keep separate for analysis flexibility |
+| Losing constant folding | Preserve parameter folding for unswept params |
+
+**Sign convention:** MNA uses "current leaving node." SPICE uses "current into positive terminal." Be careful with signs in stamp! implementations.
+
+**Let the solver handle time integration:** Don't discretize ddt() yourself. DifferentialEquations.jl solvers can reject steps, use higher-order methods, and handle variable timesteps. Express `dQ/dt` contributions and let the solver do the rest.
+
+---
+
 ## Architecture Overview
 
 ```

@@ -267,6 +267,134 @@ dae_fn = DAEFunction(circuit_residual!;
 
 ---
 
+## Refined Approach: Minimal Changes Based on Code Tracing
+
+**See: [implementation_trace_notes.md](implementation_trace_notes.md)** for detailed code path analysis.
+
+### Key Discovery: Interception Points
+
+After tracing through the codebase, the cleanest approach intercepts at two levels:
+
+1. **`simulate_ir.jl`**: The `Net` and `branch!` infrastructure
+2. **`circuitodesystem.jl`**: The `CircuitIRODESystem` entry point
+
+**Critical insight:** Device code doesn't need to change. The `Net` struct and `branch!` function are the aggregation points where all device contributions flow.
+
+### Implementation Strategy
+
+#### Step 1: Dual-Mode Net and branch!
+
+Add MNA collection alongside existing DAECompiler path:
+
+```julia
+# simulate_ir.jl - Modified Net constructor
+function Net(name::AbstractScope, multiplier::Float64 = 1.0)
+    # Always create DAECompiler variables (for compatibility)
+    V = variable(name)
+    kcl! = equation(name)
+    dVdt = ddt(V)
+
+    # Also record for MNA if collector is active
+    if mna_collector[] !== nothing
+        register_node!(mna_collector[], name)
+    end
+
+    return new{typeof(dVdt)}(V, kcl!, multiplier)
+end
+
+# Modified branch! to record branch info
+function branch!(scope::AbstractScope, net₊::AbstractNet, net₋::AbstractNet)
+    I = variable(scope(:I))
+    kcl!(net₊, -I)
+    kcl!(net₋,  I)
+    V = net₊.V - net₋.V
+    observed!(V, scope(:V))
+
+    # Record for MNA if collector is active
+    if mna_collector[] !== nothing
+        record_branch!(mna_collector[], scope, net₊, net₋)
+    end
+
+    (V, I)
+end
+```
+
+#### Step 2: Stamp Collection During Trace
+
+Device equations use `equation!()` which we intercept:
+
+```julia
+# Add MNA-aware equation! wrapper
+function mna_equation!(val, scope)
+    # Original DAECompiler path
+    DAECompiler.equation!(val, scope)
+
+    # If MNA collection active, record the contribution
+    if mna_collector[] !== nothing
+        record_equation!(mna_collector[], val, scope)
+    end
+end
+```
+
+#### Step 3: Alternative System Constructor
+
+```julia
+function CircuitMNASystem(circuit::AbstractSim; kwargs...)
+    # Create collector
+    collector = MNACollector()
+
+    # Trace the circuit with collector active
+    with(mna_collector => collector) do
+        circuit()
+    end
+
+    # Build MNA system from collected stamps
+    return build_mna_system(collector)
+end
+```
+
+### What Stays the Same
+
+- **Device implementations** (`simpledevices.jl`): No changes needed
+- **Verilog-A codegen** (`vasim.jl`): Generated code uses same primitives
+- **SPICE codegen** (`spc/codegen.jl`): Uses same Named/net/branch patterns
+- **ParamLens mechanism**: Works unchanged through trace
+
+### What Changes
+
+| Component | Change |
+|-----------|--------|
+| `simulate_ir.jl` | Add MNA collection hooks to Net/branch! |
+| `circuitodesystem.jl` | Add `CircuitMNASystem` alternative constructor |
+| New `mna/collector.jl` | MNA stamp collection during trace |
+| New `mna/system.jl` | Build G/C/b matrices from stamps |
+| New `mna/solve.jl` | DC, AC, transient using SciML |
+
+### Validation Strategy
+
+Keep both paths available to compare results:
+
+```julia
+# Run both and compare
+sys_dae = CircuitIRODESystem(circuit)
+sys_mna = CircuitMNASystem(circuit)
+
+# DC comparison
+sol_dae = dc!(sys_dae, circuit)
+sol_mna = dc!(sys_mna, circuit)
+@assert isapprox(sol_dae.u, sol_mna.u; rtol=1e-10)
+
+# Transient comparison
+prob_dae = ODEProblem(sys_dae, u0, tspan, circuit)
+prob_mna = ODEProblem(sys_mna, u0, tspan)
+sol_dae = solve(prob_dae, FBDF())
+sol_mna = solve(prob_mna, FBDF())
+```
+
+This parallel validation allows incremental migration while maintaining correctness.
+
+---
+
 ## Summary
 
 | Avoid | Prefer |
@@ -277,5 +405,9 @@ dae_fn = DAEFunction(circuit_residual!;
 | AST walking for ddt | Trace-time Dual detection |
 | Dense Jacobians | Sparse with precomputed pattern |
 | Losing constant folding | Preserve for unswept parameters |
+| Rewriting device code | Intercept at Net/branch! level |
+| Breaking existing tests | Parallel validation with DAECompiler |
 
 **The key insight:** Design primitives that are easy to target from existing codegen (`spectre.jl`, `vasim.jl`) and map cleanly to SciML's `DAEProblem`/`ODEProblem`. The solver handles the hard numerical work.
+
+**The refined insight:** Intercept at the `Net` and `branch!` level in `simulate_ir.jl` to collect MNA stamps during circuit trace. This keeps all device code unchanged while enabling a parallel MNA backend for validation and eventual replacement.

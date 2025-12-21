@@ -23,7 +23,21 @@ let res = VerilogAParser.parse(var)
 end
 
 include("sv_tests.jl")
-include("invariants.jl")
+
+# Phase 0: Check if CMC is available (requires CedarEDA registry)
+const HAS_CMC = try
+    @eval import CMC
+    true
+catch
+    false
+end
+
+if HAS_CMC
+    include("invariants.jl")
+    include("cmc_models.jl")
+else
+    @info "Skipping CMC-dependent tests (invariants.jl, cmc_models.jl)"
+end
+
 include("regression.jl")
 include("errors.jl")
-include("cmc_models.jl")

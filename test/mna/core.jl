@@ -1093,4 +1093,224 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test sol(5τ)[2] ≈ Vcc rtol=1e-3
     end
 
+    @testset "Parameterized circuit with mode switching" begin
+        using OrdinaryDiffEq
+        using DiffEqBase: BrownFullBasicInit
+
+        # Build a parameterized RC circuit with a step voltage source
+        # In :dcop mode, source returns dc_value
+        # In :tran mode, source returns time-dependent value
+        function build_rc_step(p)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # Time-dependent voltage: step from 0 to Vcc at t=0
+            # In :dcop mode, use 0V (pre-step state) or Vcc (post-step state)
+            if p.mode == :dcop
+                # DC operating point at t=0+ (after step)
+                stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+            else
+                # For transient, use full voltage (step already occurred at t=0)
+                stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+            end
+
+            stamp!(Resistor(p.R), ctx, vcc, out)
+            stamp!(Capacitor(p.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        # Create parameterized simulation
+        sim = MNASim(build_rc_step; Vcc=5.0, R=1000.0, C=1e-6)
+
+        # Test 1: DC analysis with default mode (:tran)
+        sol_dc = solve_dc(sim)
+        @test voltage(sol_dc, :vcc) ≈ 5.0
+        @test voltage(sol_dc, :out) ≈ 5.0  # steady state
+
+        # Test 2: Change parameters using alter()
+        sim_modified = alter(sim; R=2000.0, C=2e-6)
+        sol_mod = solve_dc(sim_modified)
+        @test voltage(sol_mod, :vcc) ≈ 5.0
+        @test voltage(sol_mod, :out) ≈ 5.0  # same DC, different dynamics
+
+        # Verify time constant changed: τ = R*C
+        τ_original = 1000.0 * 1e-6   # 1ms
+        τ_modified = 2000.0 * 2e-6   # 4ms
+        @test τ_modified == 4 * τ_original
+
+        # Test 3: Change Vcc parameter and verify DC changes
+        sim_highv = alter(sim; Vcc=10.0)
+        sol_highv = solve_dc(sim_highv)
+        @test voltage(sol_highv, :out) ≈ 10.0
+
+        # Test 4: Mode switching with with_mode()
+        sim_dcop = with_mode(sim, :dcop)
+        @test sim_dcop.mode == :dcop
+        sol_dcop = solve_dc(sim_dcop)
+        @test voltage(sol_dcop, :out) ≈ 5.0
+
+        # Test 5: Transient simulation with different parameters
+        # Compare τ=1ms circuit vs τ=4ms circuit
+        function run_transient(sim_instance)
+            sys = assemble!(sim_instance)
+            R = sim_instance.params.R
+            C = sim_instance.params.C
+            τ = R * C
+            tspan = (0.0, 5τ)
+
+            ode_data = make_dc_initialized_ode_problem(sys, tspan)
+
+            M = ode_data.mass_matrix
+            f! = ode_data.f!
+            u0 = ode_data.u0
+            jac! = ode_data.jac!
+            jac_proto = ode_data.jac_prototype
+
+            ode_fn = ODEFunction(f!; mass_matrix=M, jac=jac!, jac_prototype=jac_proto)
+            prob = ODEProblem(ode_fn, u0, tspan)
+            sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+            return sol, τ
+        end
+
+        sol_fast, τ_fast = run_transient(sim)  # τ=1ms
+        sol_slow, τ_slow = run_transient(sim_modified)  # τ=4ms
+
+        # Both should start at steady state (DC-initialized)
+        @test sol_fast(0.0)[2] ≈ 5.0 rtol=1e-3
+        @test sol_slow(0.0)[2] ≈ 5.0 rtol=1e-3
+
+        # Both should end at steady state
+        @test sol_fast(5*τ_fast)[2] ≈ 5.0 rtol=1e-3
+        @test sol_slow(5*τ_slow)[2] ≈ 5.0 rtol=1e-3
+
+        # Test 6: Chain multiple alterations
+        sim_chain = alter(alter(sim; Vcc=3.3); R=4700.0)
+        sol_chain = solve_dc(sim_chain)
+        @test voltage(sol_chain, :vcc) ≈ 3.3
+        @test voltage(sol_chain, :out) ≈ 3.3
+        @test sim_chain.params.R == 4700.0
+        @test sim_chain.params.Vcc == 3.3
+        @test sim_chain.params.C == 1e-6  # unchanged from original
+    end
+
+    @testset "Time-dependent source with mode" begin
+        using OrdinaryDiffEq
+
+        # Test TimeDependentVoltageSource behavior
+        pulse_src = TimeDependentVoltageSource(
+            t -> t < 1e-3 ? 0.0 : 5.0;  # Step at t=1ms
+            dc_value = 2.5,  # DC value for :dcop mode
+            name = :Vpulse
+        )
+
+        # In :dcop mode, should return dc_value
+        @test get_source_value(pulse_src, 0.0, :dcop) == 2.5
+        @test get_source_value(pulse_src, 1e-3, :dcop) == 2.5
+        @test get_source_value(pulse_src, 5e-3, :dcop) == 2.5
+
+        # In :tran mode, should return time-dependent value
+        @test get_source_value(pulse_src, 0.0, :tran) == 0.0
+        @test get_source_value(pulse_src, 0.5e-3, :tran) == 0.0
+        @test get_source_value(pulse_src, 1.5e-3, :tran) == 5.0
+
+        # Test PWLVoltageSource behavior
+        pwl_src = PWLVoltageSource(
+            [0.0, 1e-3, 2e-3],  # times
+            [0.0, 5.0, 5.0];    # values (ramp then hold)
+            name = :Vramp
+        )
+
+        @test pwl_value(pwl_src, 0.0) == 0.0
+        @test pwl_value(pwl_src, 0.5e-3) ≈ 2.5  # midpoint of ramp
+        @test pwl_value(pwl_src, 1e-3) == 5.0
+        @test pwl_value(pwl_src, 1.5e-3) == 5.0  # hold
+        @test pwl_value(pwl_src, 5e-3) == 5.0   # after last point
+    end
+
+    @testset "Mode-aware parameterized simulation" begin
+        using OrdinaryDiffEq
+
+        # Build RC circuit with time-dependent source that respects mode
+        function build_mode_aware_rc(p)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # Use mode to determine source value
+            # :dcop -> use steady-state value (p.Vdc)
+            # :tranop -> use t=0 transient value
+            # :tran -> (for stamping, use DC value; time-dependence handled in ODE)
+            source_voltage = if p.mode == :dcop
+                p.Vdc  # DC operating point value
+            else
+                p.Vss  # Steady-state transient value
+            end
+
+            stamp!(VoltageSource(source_voltage), ctx, vcc, 0)
+            stamp!(Resistor(p.R), ctx, vcc, out)
+            stamp!(Capacitor(p.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        # Create sim with both DC and steady-state parameters
+        sim = MNASim(build_mode_aware_rc; Vdc=0.0, Vss=5.0, R=1000.0, C=1e-6)
+
+        # Test DC mode gives Vdc
+        sim_dcop = with_mode(sim, :dcop)
+        sol_dcop = solve_dc(sim_dcop)
+        @test voltage(sol_dcop, :vcc) ≈ 0.0
+        @test voltage(sol_dcop, :out) ≈ 0.0
+
+        # Test transient mode gives Vss
+        sim_tran = with_mode(sim, :tran)
+        sol_tran = solve_dc(sim_tran)
+        @test voltage(sol_tran, :vcc) ≈ 5.0
+        @test voltage(sol_tran, :out) ≈ 5.0
+
+        # Run transient from DC operating point
+        # This simulates the typical SPICE flow:
+        # 1. Compute DC operating point (with sources at DC values)
+        # 2. Run transient (with sources at transient values)
+
+        # First, get DC operating point (cap starts at 0V)
+        dcop_sys = assemble!(sim_dcop)
+        dc_sol = solve_dc(dcop_sys)
+        V_cap_dc = voltage(dc_sol, :out)
+        @test V_cap_dc ≈ 0.0  # Cap at 0V in DC mode
+
+        # Now run transient with source at 5V, cap starting at 0V
+        tran_sys = assemble!(sim_tran)
+        τ = 1000.0 * 1e-6  # 1ms
+        tspan = (0.0, 5τ)
+
+        # Create ODE problem with initial condition from DC
+        ode_data = make_ode_problem(tran_sys, tspan)
+
+        # Override u0 with DC solution (cap at 0V)
+        u0 = copy(ode_data.u0)
+        u0[1] = 5.0  # vcc at Vss
+        u0[2] = 0.0  # out starts at DC value (0V)
+        u0[3] = 5.0 / 1000.0  # initial current from DC
+
+        M = ode_data.mass_matrix
+        f! = ode_data.f
+        jac! = ode_data.jac
+        jac_proto = ode_data.jac_prototype
+
+        ode_fn = ODEFunction(f!; mass_matrix=M, jac=jac!, jac_prototype=jac_proto)
+        prob = ODEProblem(ode_fn, u0, tspan)
+        sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
+
+        @test sol.retcode == ReturnCode.Success
+
+        # Should see exponential charging from 0V to 5V
+        @test sol(0.0)[2] ≈ 0.0 rtol=1e-3
+        @test sol(τ)[2] ≈ 5.0 * (1 - exp(-1)) rtol=1e-2  # ~3.16V at t=τ
+        @test sol(5τ)[2] ≈ 5.0 rtol=1e-2  # ~5V at t=5τ
+    end
+
 end  # @testset "MNA Core Tests"

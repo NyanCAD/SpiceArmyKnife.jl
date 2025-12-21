@@ -591,8 +591,10 @@ end
 export MNASim, alter, with_mode
 
 # Allow calling the sim to build the circuit
+# Passes a NamedTuple with mode and all user params
 function (sim::MNASim)()
-    return sim.builder(sim.params)
+    full_params = merge((mode=sim.mode,), sim.params)
+    return sim.builder(full_params)
 end
 
 # Build and assemble in one step

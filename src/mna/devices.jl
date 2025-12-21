@@ -91,6 +91,123 @@ struct CurrentSource
 end
 CurrentSource(i::Real; name::Symbol=:I) = CurrentSource(Float64(i), name)
 
+#==============================================================================#
+# Time-Dependent Sources (Mode-Aware)
+#==============================================================================#
+
+"""
+    TimeDependentVoltageSource{F}
+
+A voltage source with time-dependent value, respecting simulation mode.
+
+In `:dcop` mode, returns `dc_value` (steady state).
+In `:tran` mode, calls `value_fn(t)` for time-dependent behavior.
+
+# Example
+```julia
+# Pulse source: 0V at t<1ms, 5V at t>=1ms
+pulse = TimeDependentVoltageSource(
+    t -> t < 1e-3 ? 0.0 : 5.0,
+    dc_value = 0.0,  # DC operating point value
+    name = :Vpulse
+)
+```
+"""
+struct TimeDependentVoltageSource{F}
+    value_fn::F      # Function t -> voltage
+    dc_value::Float64  # Value for DC analysis (mode = :dcop)
+    name::Symbol
+end
+
+function TimeDependentVoltageSource(value_fn::F; dc_value::Real=0.0, name::Symbol=:V) where {F}
+    TimeDependentVoltageSource{F}(value_fn, Float64(dc_value), name)
+end
+
+export TimeDependentVoltageSource
+
+"""
+    get_source_value(src::TimeDependentVoltageSource, t::Real, mode::Symbol) -> Float64
+
+Get the source value at time `t` for the given simulation mode.
+"""
+function get_source_value(src::TimeDependentVoltageSource, t::Real, mode::Symbol)
+    if mode == :dcop
+        return src.dc_value
+    else
+        return src.value_fn(t)
+    end
+end
+
+export get_source_value
+
+"""
+    PWLVoltageSource
+
+Piecewise-linear voltage source defined by time-value pairs.
+
+# Example
+```julia
+# Ramp from 0V to 5V over 1ms
+pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vramp)
+```
+"""
+struct PWLVoltageSource
+    times::Vector{Float64}
+    values::Vector{Float64}
+    name::Symbol
+
+    function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
+        @assert length(times) == length(values) "times and values must have same length"
+        @assert issorted(times) "times must be sorted"
+        new(Float64.(times), Float64.(values), name)
+    end
+end
+
+export PWLVoltageSource
+
+"""
+    pwl_value(src::PWLVoltageSource, t::Real) -> Float64
+
+Evaluate PWL source at time t using linear interpolation.
+"""
+function pwl_value(src::PWLVoltageSource, t::Real)
+    ts, vs = src.times, src.values
+    n = length(ts)
+
+    # Before first point
+    if t <= ts[1]
+        return vs[1]
+    end
+
+    # After last point
+    if t >= ts[end]
+        return vs[end]
+    end
+
+    # Find interval and interpolate
+    for i in 1:(n-1)
+        if ts[i] <= t <= ts[i+1]
+            # Linear interpolation
+            dt = ts[i+1] - ts[i]
+            dv = vs[i+1] - vs[i]
+            return vs[i] + dv * (t - ts[i]) / dt
+        end
+    end
+
+    return vs[end]
+end
+
+function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
+    if mode == :dcop
+        # DC: use value at t=0
+        return pwl_value(src, 0.0)
+    else
+        return pwl_value(src, t)
+    end
+end
+
+export pwl_value
+
 """
     VCVS(gain::Float64; name::Symbol=:E)
 

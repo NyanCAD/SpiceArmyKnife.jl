@@ -397,6 +397,63 @@ Added comprehensive transient simulation with actual ODE/DAE solving:
 All tests validate against analytical solutions for first-order RC/RL response
 and second-order RLC oscillation. Total: **141 tests passing**.
 
+### Parameterization & Mode Switching (2024-12-21)
+
+Added ParamSim-style parameterization wrapper and mode switching:
+
+#### New Types
+- `MNASim{F,P}` - Parameterized simulation wrapper (similar to ParamSim)
+- `TimeDependentVoltageSource{F}` - Mode-aware voltage source with time function
+- `PWLVoltageSource` - Piecewise-linear voltage source
+
+#### New Functions
+- `alter(sim; kwargs...)` - Create new sim with modified parameters
+- `with_mode(sim, mode)` - Create new sim with different mode (:tran, :dcop, :tranop)
+- `get_source_value(src, t, mode)` - Get mode-aware source value
+- `pwl_value(src, t)` - Evaluate PWL source at time t
+- `make_dc_initialized_ode_problem(sys, tspan)` - ODE problem with DC steady-state ICs
+- `make_dc_initialized_dae_problem(sys, tspan)` - DAE problem with DC steady-state ICs
+
+#### MNASim Usage
+```julia
+# Define parameterized circuit builder
+function build_rc(p)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    # p.mode is automatically included in params
+    voltage = p.mode == :dcop ? p.Vdc : p.Vss
+    stamp!(VoltageSource(voltage), ctx, vcc, 0)
+    stamp!(Resistor(p.R), ctx, vcc, out)
+    stamp!(Capacitor(p.C), ctx, out, 0)
+    return ctx
+end
+
+# Create parameterized simulation
+sim = MNASim(build_rc; Vdc=0.0, Vss=5.0, R=1000.0, C=1e-6)
+
+# Alter parameters
+sim2 = alter(sim; R=2000.0)
+
+# Switch mode
+sim_dcop = with_mode(sim, :dcop)
+
+# Solve
+sol = solve_dc(sim)
+```
+
+#### Mode-Aware Initialization
+The typical SPICE initialization flow is now supported:
+1. Set mode to `:dcop`, solve for DC operating point
+2. Switch to `:tran`, use DC solution as initial conditions
+3. Run transient with time-dependent sources
+
+#### Tests Added (~220 LOC, 3 testsets)
+1. **Parameterized circuit with mode switching** - Tests `alter()`, `with_mode()`, chained alterations
+2. **Time-dependent source with mode** - Tests `TimeDependentVoltageSource`, `PWLVoltageSource`
+3. **Mode-aware parameterized simulation** - Tests full SPICE-style init flow (DC → transient)
+
 ### Next Steps
 
 Phase 4 (SPICE Codegen) will:

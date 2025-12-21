@@ -244,6 +244,9 @@ end
 
 end
 
+# Phase 0: Simulation-dependent tests - require DAECompiler
+if HAS_SIMULATION
+
 @testset "CircuitSweep" begin
     # Test construction of the `CircuitSweep` object
     cs = CircuitSweep(TwoResistorCircuit, Sweep(R1 = 1.0:10.0))
@@ -321,9 +324,6 @@ end
     @test Symbol("b.b.a") ∈ sweepvars(cs)
 end
 
-# Phase 0: Simulation-dependent tests - require DAECompiler
-if HAS_SIMULATION
-
 @testset "simple dc!" begin
     dc!(TwoResistorCircuit(100., 100.))
     dc!(ParamSim(TwoResistorCircuit; R1=100., R2=100.))
@@ -377,7 +377,7 @@ end
 end
 
 else
-    @info "Skipping dc! tests (Phase 0: simulation not available)"
+    @info "Skipping CircuitSweep and dc! tests (Phase 0: simulation not available)"
 end  # if HAS_SIMULATION
 
 @testset "find_param_ranges" begin

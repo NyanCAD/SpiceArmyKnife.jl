@@ -379,6 +379,24 @@ After initial implementation, testing with Julia 1.12 revealed several issues:
 
 All 92 MNA tests now pass on Julia 1.12.
 
+### Transient Analysis Enhancement (2024-12-21)
+
+Added comprehensive transient simulation with actual ODE/DAE solving:
+
+#### New Functions
+- `make_dae_function(sys)` - Create implicit DAE residual F(du,u,p,t)=0
+- `make_dae_problem(sys, tspan)` - Set up DAEProblem with consistent ICs
+
+#### Transient Tests Added (~320 LOC, 5 testsets)
+1. **RC Charging (Mass Matrix ODE)** - Validates exponential charging V(t)=Vcc*(1-exp(-t/τ))
+2. **RC Charging (Implicit DAE)** - Same circuit solved with Sundials IDA
+3. **RL Circuit** - Inductor current rise I(t)=I_ss*(1-exp(-t/τ))
+4. **RLC Oscillator** - Underdamped 2nd-order system demonstrating overshoot
+5. **ODE vs DAE Comparison** - Verifies both methods produce identical results
+
+All tests validate against analytical solutions for first-order RC/RL response
+and second-order RLC oscillation. Total: **141 tests passing**.
+
 ### Next Steps
 
 Phase 4 (SPICE Codegen) will:

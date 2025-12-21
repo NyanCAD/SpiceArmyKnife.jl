@@ -33,13 +33,6 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
-      - name: Add CedarEDA registry
-        run: |
-          julia -e '
-            using Pkg
-            Pkg.Registry.add(Pkg.RegistrySpec(url="https://github.com/CedarEDA/PublicRegistry.git"))
-          '
-
       - name: Install dependencies
         run: |
           julia --project=. -e '

@@ -9,8 +9,15 @@ import ForwardDiff
 import Compat
 import NaNMath
 import ChainRules
-import DAECompiler
-import DAECompiler: ddt
+
+# Phase 0: Use stubs instead of DAECompiler
+if CedarSim.USE_DAECOMPILER
+    import DAECompiler
+    import DAECompiler: ddt
+else
+    import ..CedarSim.DAECompilerStubs: ddt, observed!, epsilon
+    const DAECompiler = CedarSim.DAECompilerStubs
+end
 
 import Base:
     +, *, -, ==, !=, /, >, <,  <=, >=,

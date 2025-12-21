@@ -21,7 +21,14 @@ using VerilogAParser.VerilogATokenize:
 using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
-using DAECompiler
+
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler
+    using DAECompiler: variable, equation!, observed!
+else
+    using ..DAECompilerStubs: ddt, variable, equation!, observed!
+end
 
 const VAT = VerilogAParser.VerilogATokenize
 
@@ -30,8 +37,11 @@ struct SimTag; end
 ForwardDiff.:(≺)(::Type{<:ForwardDiff.Tag}, ::Type{SimTag}) = true
 ForwardDiff.:(≺)(::Type{SimTag}, ::Type{<:ForwardDiff.Tag}) = false
 
-function DAECompiler.ddt(dual::ForwardDiff.Dual{SimTag})
-    ForwardDiff.Dual{SimTag}(ddt(dual.value), map(ddt, dual.partials.values))
+# Phase 0: Guard DAECompiler.ddt extension
+@static if CedarSim.USE_DAECOMPILER
+    function DAECompiler.ddt(dual::ForwardDiff.Dual{SimTag})
+        ForwardDiff.Dual{SimTag}(ddt(dual.value), map(ddt, dual.partials.values))
+    end
 end
 
 function eisa(e::VANode{S}, T::Type) where {S}
@@ -783,9 +793,10 @@ function make_spice_device(vm::VANode{VerilogModule})
         end
     end
 
+    # Phase 0: Use local variable/equation!/observed! references (stubs or DAECompiler)
     internal_nodeset = map(enumerate(internal_nodes)) do (n, id)
         @nolines quote
-            $id = $(DAECompiler.variable)($DScope(dscope, $(QuoteNode(Symbol("V($id)")))))
+            $id = $(variable)($DScope(dscope, $(QuoteNode(Symbol("V($id)")))))
         end
     end
 
@@ -803,7 +814,7 @@ function make_spice_device(vm::VANode{VerilogModule})
 
     internal_currents_def = Expr(:block,
         (@nolines quote
-            $v = $(DAECompiler.variable)($DScope(dscope,$(QuoteNode(v))))
+            $v = $(variable)($DScope(dscope,$(QuoteNode(v))))
         end for v in internal_currents)...
     )
 
@@ -817,7 +828,7 @@ function make_spice_device(vm::VANode{VerilogModule})
     end
 
     internal_node_kcls = map(enumerate(internal_nodes)) do (n, node)
-        @nolines :($(DAECompiler.equation!)($(current_sum(node)),
+        @nolines :($(equation!)($(current_sum(node)),
             $DScope(dscope, $(QuoteNode(Symbol("KCL($node)"))))))
     end
 
@@ -825,10 +836,10 @@ function make_spice_device(vm::VANode{VerilogModule})
         svar = Symbol("branch_state_", a, "_", b)
         eqvar = Symbol("branch_value_", a, "_", b)
         if b == Symbol("0")
-            @nolines :($(DAECompiler.equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : $a - $eqvar,
+            @nolines :($(equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : $a - $eqvar,
                 $DScope(dscope, $(QuoteNode(Symbol("Branch($a)"))))))
         else
-            @nolines :($(DAECompiler.equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : ($a - $b) - $eqvar,
+            @nolines :($(equation!)($svar == $(CURRENT) ? $(internal_currents[n]) - $eqvar : ($a - $b) - $eqvar,
                 $DScope(dscope, $(QuoteNode(Symbol("Branch($a, $b)"))))))
         end
     end
@@ -839,7 +850,7 @@ function make_spice_device(vm::VANode{VerilogModule})
     end
 
     obs_def = (:($o = 0.0) for o in keys(observables))
-    obs_expr = (:($(DAECompiler.observed!)($var,
+    obs_expr = (:($(observed!)($var,
             $DScope(dscope, $(QuoteNode(name))))) for (var, name) in observables)
 
     arg_assign = map(ps, argnames) do p, a

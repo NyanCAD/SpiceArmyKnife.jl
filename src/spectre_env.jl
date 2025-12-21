@@ -1,5 +1,12 @@
 using ChainRulesCore, StaticArrays
 
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler: time_periodic_singularity!
+else
+    using ..DAECompilerStubs: time_periodic_singularity!
+end
+
 # This gets imported by all generated Spectre code. The function names
 # exported here should correspond to what is made available by Spectre
 
@@ -71,7 +78,8 @@ end
 @generated function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
     body = Expr(:block)
     for i in 1:length(ts) # length of the type!
-        push!(body.args, :(DAECompiler.time_periodic_singularity!(ts[$i], period, count)))
+        # Phase 0: Use imported time_periodic_singularity! instead of DAECompiler qualified name
+        push!(body.args, :(time_periodic_singularity!(ts[$i], period, count)))
     end
     return body
 end

@@ -22,14 +22,8 @@ LString(s::AbstractString) = lowercase(s)
 LString(s::Symbol) = lowercase(String(s))
 LSymbol(s) = Symbol(LString(s))
 
-function Base.LineNumberNode(n::SNode)
-    sf = n.ps.srcfile
-    lsf = sf.lineinfo
-    lno_first = SpectreNetlistParser.LineNumbers.compute_line(lsf, n.startof+n.expr.off)
-    # line 1 is at offset 0
-    offset = n.ps.srcline - 1
-    LineNumberNode(lno_first+offset, Symbol(sf.path))
-end
+# Phase 0: LineNumberNode is already defined in SpectreNetlistParser/src/parse/errors.jl
+# Removed duplicate definition to avoid method overwriting error
 
 
 struct SpcScope
@@ -423,27 +417,87 @@ function (to_julia::SpcScope)(n)
     n # already a Julia type
 end
 
-function (to_julia::SpcScope)(cs::SNode{SC.NumericValue})
-    to_julia(cs.val)
-end
+# Phase 0: Updated to use NumberLiteral (FloatLiteral, IntLiteral, NumericValue don't exist)
+# Spectre unit suffixes - strip these before processing magnitude prefix
+# Common patterns: _V, _A, pf, nF, mV, kHz, etc.
+# Note: In "23pf", 'p' is SI prefix (pico), 'f' is unit (farad)
+# Include both upper and lowercase: V (volt), A (amp), F (farad), H (henry), S (siemens), W (watt), Ω (ohm)
+const spectre_unit_chars = Set(['V', 'v', 'A', 'F', 'f', 'H', 'h', 'S', 'W', 'w', 'Ω'])
+const spectre_unit_regex = r"_[A-Za-z]+$"
 
-function (to_julia::SpcScope)(cs::SNode{SP.NumericValue})
-    to_julia(cs.val)
-end
-
-function (::SpcScope)(cs::SNode{SC.FloatLiteral})
-    txt = String(cs)
-    sf = 1
-    if txt[end] ∈ keys(spectre_magnitudes)
-        sf = spectre_magnitudes[txt[end]]
-        txt = txt[begin:end-1]
+function strip_spectre_unit(txt::String)
+    # First check for _Unit pattern
+    m = match(spectre_unit_regex, txt)
+    if m !== nothing
+        return String(txt[begin:prevind(txt, m.offset)])
     end
-    ret = Base.parse(Dec64, txt)
-    ret *= sf
-    return Float64(ret)
+
+    # Strip trailing unit character if present (but only single char units)
+    # This handles "23pf" -> "23p" (strip 'f' as Farad unit)
+    if !isempty(txt)
+        last_char = txt[end]
+        if last_char in spectre_unit_chars
+            # Check it's not also a magnitude - 'f' is both femto and Farad
+            # If preceded by another magnitude char, the last is a unit
+            if length(txt) >= 2
+                second_last_idx = prevind(txt, lastindex(txt))
+                second_last = txt[second_last_idx]
+                if haskey(spectre_magnitudes, second_last)
+                    # Pattern like "23pf" - strip 'f' (unit), keep 'p' (magnitude)
+                    return String(txt[1:second_last_idx])
+                end
+            end
+        end
+    end
+    return txt
 end
 
-function (::SpcScope)(cs::SNode{SP.FloatLiteral})
+function (::SpcScope)(cs::SNode{SC.NumberLiteral})
+    txt = String(strip(String(cs)))
+
+    # Strip Spectre unit suffix
+    txt = strip_spectre_unit(txt)
+
+    sf = d"1"
+    # Check for magnitude suffix (single character at end)
+    # Common Spectre magnitudes: T, G, M, K, k, m, u, n, p, f, a
+    if !isempty(txt)
+        last_idx = lastindex(txt)
+        last_char = txt[last_idx]
+        if haskey(spectre_magnitudes, last_char)
+            sf = spectre_magnitudes[last_char]
+            if last_idx == 1
+                txt = ""
+            else
+                txt = String(txt[1:prevind(txt, last_idx)])
+            end
+        end
+    end
+
+    # Handle empty string after stripping
+    if isempty(txt)
+        return Float64(sf)  # Just the scale factor (e.g., "p" alone = 1e-12)
+    end
+
+    # Try integer parse first, then float
+    int_val = tryparse(Int64, txt)
+    if int_val !== nothing && sf == d"1"
+        return int_val
+    end
+
+    # Try Dec64 first for precision, fallback to Float64
+    ret = tryparse(Dec64, txt)
+    if ret === nothing
+        float_val = tryparse(Float64, txt)
+        if float_val === nothing
+            error("Cannot parse number: $txt (from $(String(cs)))")
+        end
+        return float_val * Float64(sf)
+    end
+    return Float64(ret * sf)
+end
+
+function (::SpcScope)(cs::SNode{SP.NumberLiteral})
     txt = lowercase(String(cs))
     sf = 1
     m = match(spice_regex, txt)
@@ -451,14 +505,14 @@ function (::SpcScope)(cs::SNode{SP.FloatLiteral})
         sf = spice_magnitudes[m.match]
         txt = txt[begin:end-length(m.match)]
     end
+    # Try integer parse first, then float
+    int_val = tryparse(Int64, txt)
+    if int_val !== nothing && sf == 1
+        return int_val
+    end
     ret = Base.parse(Dec64, txt)
     ret *= sf
     return Float64(ret)
-end
-
-function (::SpcScope)(cs::Union{SNode{SC.IntLiteral}, SNode{SP.IntLiteral}})
-    txt = String(cs)
-    Base.parse(Int64, txt)
 end
 
 function (::SpcScope)(cs::SNode{SP.JuliaEscape})
@@ -1058,28 +1112,26 @@ function (to_julia::SpcScope)(stmt::SNode{SP.Behavioral})
     spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :bsource), stmt.params)
 end
 
-function (to_julia::SpcScope)(stmt::SNode{SP.VCVS})
-    if stmt.val === nothing
-        return spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :vcvs), stmt.params)
-    else
-        return spice_instance(to_julia, [stmt.pos, stmt.neg, stmt.cpos, stmt.cneg], stmt.name, GlobalRef(SpectreEnvironment, :vcvs), stmt.params; gain=stmt.val)
-    end
+# Phase 0: Updated to use ControlledSource{in, out} parameterized type
+# Old VCVS, VCCS, CCVS, CCCS are now ControlledSource{:V,:V}, etc.
+function (to_julia::SpcScope)(stmt::SNode{SP.ControlledSource{:V, :V}})
+    # VCVS - Voltage Controlled Voltage Source
+    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :vcvs), []; gain=stmt.val)
 end
 
-function (to_julia::SpcScope)(stmt::SNode{SP.VCCS})
-    if stmt.val === nothing
-        spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :vccs), stmt.params)
-    else
-        spice_instance(to_julia, [stmt.pos, stmt.neg, stmt.cpos, stmt.cneg], stmt.name, GlobalRef(SpectreEnvironment, :vccs), stmt.params; gain=stmt.val)
-    end
+function (to_julia::SpcScope)(stmt::SNode{SP.ControlledSource{:V, :C}})
+    # VCCS - Voltage Controlled Current Source
+    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :vccs), []; gain=stmt.val)
 end
 
-function (to_julia::SpcScope)(stmt::SNode{SP.CCVS})
-    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :ccvs), stmt.params; vnam=stmt.vnam, gain=stmt.val)
+function (to_julia::SpcScope)(stmt::SNode{SP.ControlledSource{:C, :V}})
+    # CCVS - Current Controlled Voltage Source
+    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :ccvs), []; gain=stmt.val)
 end
 
-function (to_julia::SpcScope)(stmt::SNode{SP.CCCS})
-    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :cccs), stmt.params; vnam=stmt.vnam, gain=stmt.val)
+function (to_julia::SpcScope)(stmt::SNode{SP.ControlledSource{:C, :C}})
+    # CCCS - Current Controlled Current Source
+    spice_instance(to_julia, [stmt.pos, stmt.neg], stmt.name, GlobalRef(SpectreEnvironment, :cccs), []; gain=stmt.val)
 end
 
 function (to_julia::SpcScope)(stmt::SNode{SP.Switch})
@@ -1406,10 +1458,12 @@ function extract_section_from_lib(p; section)
     return nothing
 end
 
+# Phase 0: Updated to use ControlledSource{in, out} parameterized types
 const AnyInstance = Union{SNode{SP.MOSFET}, SNode{SP.SubcktCall},
     SNode{SP.Capacitor}, SNode{SP.Diode}, SNode{SP.BipolarTransistor},
     SNode{SP.Voltage}, SNode{SP.Current}, SNode{SP.Behavioral},
-    SNode{SP.CCVS}, SNode{SP.CCCS}, SNode{SP.VCVS}, SNode{SP.VCCS},
+    SNode{SP.ControlledSource{:C, :V}}, SNode{SP.ControlledSource{:C, :C}},
+    SNode{SP.ControlledSource{:V, :V}}, SNode{SP.ControlledSource{:V, :C}},
     SNode{SP.Switch}, SNode{SP.Resistor}, SNode{SP.Inductor},
     SNode{SP.JuliaDevice}}
 
@@ -1849,7 +1903,8 @@ function get_default_parameterization(ast; to_julia=SpcScope(), params = Pair[])
             get_default_parameterization(stmt; to_julia, params)
         elseif isa(stmt, SNode{SP.ParamStatement})
             for par in stmt.params
-                if !isa(par.val, SNode{<:Union{SP.NumericValue, SC.NumericValue}})
+                # Phase 0: Changed from NumericValue to NumberLiteral
+                if !isa(par.val, SNode{<:Union{SP.NumberLiteral, SC.NumberLiteral}})
                     continue
                 end
                 push!(params, LSymbol(par.name) => to_julia(par.val))

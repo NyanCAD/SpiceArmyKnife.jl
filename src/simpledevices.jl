@@ -1,8 +1,14 @@
 # Just for demonstration. TODO: Replace by device in the full package
 # Positive currents flow out of devices
 
-using DAECompiler
-using DAECompiler.Intrinsics: variable, equation!, observed!, singularity_root!, sim_time, GenScope
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler
+    using DAECompiler.Intrinsics: variable, equation!, observed!, singularity_root!, sim_time, GenScope
+else
+    using ..DAECompilerStubs: variable, equation!, observed!, singularity_root!, sim_time, GenScope
+end
+
 using ExprTools: splitdef
 using Base.Meta: isexpr
 

@@ -1,6 +1,27 @@
 using OrdinaryDiffEq
-using OrdinaryDiffEq: get_tmp_cache, recursivecopy!, alg_extrapolates, default_nlsolve
-using OrdinaryDiffEq.LineSearches
+using OrdinaryDiffEq: get_tmp_cache
+
+# Phase 0: These are internal OrdinaryDiffEq functions that may not be exported in newer versions
+# Provide fallback implementations (simulation won't work in Phase 0 anyway)
+if isdefined(OrdinaryDiffEq, :recursivecopy!)
+    using OrdinaryDiffEq: recursivecopy!
+else
+    recursivecopy!(dest, src) = copyto!(dest, src)
+end
+
+if isdefined(OrdinaryDiffEq, :alg_extrapolates)
+    using OrdinaryDiffEq: alg_extrapolates
+else
+    alg_extrapolates(alg) = false  # Conservative default
+end
+
+if isdefined(OrdinaryDiffEq, :default_nlsolve)
+    using OrdinaryDiffEq: default_nlsolve
+else
+    default_nlsolve(args...; kwargs...) = nothing
+end
+# Phase 0: LineSearches is now a separate package, not part of OrdinaryDiffEq
+# using LineSearches
 using LinearAlgebra
 using NonlinearSolve
 using SciMLBase

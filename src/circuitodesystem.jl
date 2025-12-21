@@ -1,12 +1,22 @@
 using DiffEqBase
 import Random
 
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler: sim_time, default_parameters
+else
+    using ..DAECompilerStubs: sim_time, default_parameters
+end
+
 export CircuitIRODESystem, CircuitDynODESystem, DefaultSim, ParamSim
 
 abstract type AbstractSim{C} <: AbstractRecordVector{Float64} end
 
-function DAECompiler.default_parameters(::Type{T}) where {C, T<:AbstractSim{C}}
-    return T(DAECompiler.default_parameters(C))
+# Phase 0: Guard DAECompiler method extension
+@static if CedarSim.USE_DAECOMPILER
+    function DAECompiler.default_parameters(::Type{T}) where {C, T<:AbstractSim{C}}
+        return T(DAECompiler.default_parameters(C))
+    end
 end
 
 struct DefaultSim{T} <: AbstractSim{T}
@@ -19,7 +29,7 @@ DefaultSim{C}(circuit::C) where {C} = DefaultSim(circuit, :tran)
 
 function (sim::DefaultSim)()
     circuit′ = getfield(sim, :circuit)
-    with(spec=>SimSpec(time=DAECompiler.sim_time()), sim_mode=>sim.mode, debug_scope=>DScope()) do
+    with(spec=>SimSpec(time=sim_time()), sim_mode=>sim.mode, debug_scope=>DScope()) do
         return circuit′()
     end
 end
@@ -90,7 +100,7 @@ ParamSim(ps::ParamSim; kwargs...) = ParamSim(ps.circuit; mode=ps.mode, ps.spec..
 # If our `circuit` type is a function, we pass in a `ParamLens` of the
 # parameters as a first argument.
 function (sim::ParamSim)()
-    new_spec = SimSpec(;time=DAECompiler.sim_time(), sim.spec...)
+    new_spec = SimSpec(;time=sim_time(), sim.spec...)
     return with(spec => new_spec, sim_mode => sim.mode, debug_scope=>DScope()) do
         sim.circuit(ParamLens(sim.params))
     end

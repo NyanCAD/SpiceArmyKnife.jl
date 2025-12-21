@@ -1,7 +1,13 @@
 using DescriptorSystems
 using OrdinaryDiffEq
 using LinearAlgebra
-import DAECompiler: get_transformed_sys, IRODESystem
+
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    import DAECompiler: get_transformed_sys, IRODESystem
+else
+    using ..DAECompilerStubs: get_transformed_sys, IRODESystem
+end
 
 export ac!, acdec, freqresp, noise!
 
@@ -21,8 +27,11 @@ end
 
 # Convenience function to get our tsys from an `ACSol` object
 # this will also make `DAECompiler.get_sys` work to get the IRODESystem
-DAECompiler.get_transformed_sys(ac::ACSol) = ac.sol.prob.f.sys
-DAECompiler.get_transformed_sys(ac::NoiseSol) = ac.sol.prob.f.sys
+# Phase 0: Guard DAECompiler method extensions
+@static if CedarSim.USE_DAECOMPILER
+    DAECompiler.get_transformed_sys(ac::ACSol) = ac.sol.prob.f.sys
+    DAECompiler.get_transformed_sys(ac::NoiseSol) = ac.sol.prob.f.sys
+end
 
 
 

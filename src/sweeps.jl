@@ -3,6 +3,13 @@ using AxisKeys
 using OrdinaryDiffEq, SciMLBase
 using Base.Iterators
 
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler: arg1_from_sys
+else
+    using ..DAECompilerStubs: arg1_from_sys
+end
+
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
 
 # This `alter()` is to make it easy to apply directly to a struct or named tuple with the optics.
@@ -440,7 +447,8 @@ function dc!(circ; debug_config = (;), kwargs...)
     end
     dc!(CircuitIRODESystem(circ; debug_config), circ; kwargs...)
 end
-function dc!(sys::IRODESystem, circ=DAECompiler.arg1_from_sys(sys); kwargs...)
+# Phase 0: Use stub reference
+function dc!(sys::IRODESystem, circ=arg1_from_sys(sys); kwargs...)
     prob = DAEProblem(sys, nothing, nothing, (0., 1.), circ, initializealg=CedarDCOp())
     dc!(prob; kwargs...)
 end

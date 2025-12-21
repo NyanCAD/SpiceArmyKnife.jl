@@ -1,6 +1,13 @@
 # This file contains utility functions when writing netlists using the operadic
 # julia embedding.
 
+# Phase 0: Use stubs instead of DAECompiler
+@static if CedarSim.USE_DAECOMPILER
+    using DAECompiler.Intrinsics: _compute_new_nt_type
+else
+    using ..DAECompilerStubs.Intrinsics: _compute_new_nt_type
+end
+
 export ∥, ⋯, parallel, series, nets
 
 ## Diagrammatic Composition
@@ -111,7 +118,8 @@ Base.setproperty!(mv::nets, s::Symbol, @nospecialize(v)) = Base.setfield!(mv, s,
         return getfield(nt, s)
     else
         v = net(s)
-        NT = DAECompiler.Intrinsics._compute_new_nt_type(nt, s)
+        # Phase 0: Use imported _compute_new_nt_type
+        NT = _compute_new_nt_type(nt, s)
         tup = tuple(nt..., v)
         NT = NT{typeof(tup)}
         mv.ns = $(Expr(:splatnew, :NT, :tup))

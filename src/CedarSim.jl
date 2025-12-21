@@ -1,9 +1,27 @@
 module CedarSim
 
+# Phase 0: MNA Migration - DAECompiler is disabled, parsing/codegen works
+# Set to true to enable DAECompiler (requires DAECompiler package)
+const USE_DAECOMPILER = false
+
 using DiffEqBase
 using DynamicScope
 using VectorPrisms
-using Base: @with, with
+
+# MNA stubs for DAECompiler primitives (Phase 0)
+include("mna/stubs.jl")
+using .DAECompilerStubs
+
+# Conditionally use DAECompiler or stubs
+@static if USE_DAECOMPILER
+    using DAECompiler
+    using DAECompiler: IRODESystem
+    const DScope = DAECompiler.Intrinsics.Scope
+else
+    # Use stubs - simulation will error but parsing/codegen works
+    const IRODESystem = DAECompilerStubs.IRODESystem
+    const DScope = DAECompilerStubs.Scope
+end
 
 # re-exports
 export DAEProblem
@@ -20,8 +38,12 @@ include("circuitodesystem.jl")
 include("spectre.jl")
 include("va_env.jl")
 include("sweeps.jl")
-include("dcop.jl")
-include("ac.jl")
+# Phase 0: dcop.jl and ac.jl require DAECompiler simulation machinery
+# They use internal OrdinaryDiffEq functions that may not be available
+@static if USE_DAECOMPILER
+    include("dcop.jl")
+    include("ac.jl")
+end
 include("ModelLoader.jl")
 include("aliasextract.jl")
 include("netlist_utils.jl")

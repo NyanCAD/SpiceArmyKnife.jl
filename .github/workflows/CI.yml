@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-spectreparser:
+    name: SpectreNetlistParser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Develop local dependencies
+        run: |
+          julia --project=SpectreNetlistParser.jl -e '
+            using Pkg
+            Pkg.develop(path="Lexers.jl")
+          '
+      - name: Run tests
+        run: |
+          julia --project=SpectreNetlistParser.jl -e '
+            using Pkg
+            Pkg.test()
+          '
+
+  test-verilogaparser:
+    name: VerilogAParser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Develop local dependencies
+        run: |
+          julia --project=VerilogAParser.jl -e '
+            using Pkg
+            Pkg.develop(path="Lexers.jl")
+          '
+      - name: Run tests
+        run: |
+          julia --project=VerilogAParser.jl -e '
+            using Pkg
+            Pkg.test()
+          '
+
+  test-spicearmyknife:
+    name: SpiceArmyKnife
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Develop local dependencies
+        run: |
+          julia --project=SpiceArmyKnife.jl -e '
+            using Pkg
+            Pkg.develop(path="Lexers.jl")
+            Pkg.develop(path="SpectreNetlistParser.jl")
+            Pkg.develop(path="VerilogAParser.jl")
+          '
+      - name: Run tests
+        run: |
+          julia --project=SpiceArmyKnife.jl -e '
+            using Pkg
+            Pkg.test()
+          '

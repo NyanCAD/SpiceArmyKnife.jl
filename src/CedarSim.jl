@@ -12,6 +12,11 @@ using VectorPrisms
 include("mna/stubs.jl")
 using .DAECompilerStubs
 
+# MNA Phase 1: Core MNA engine (replaces DAECompiler for simulation)
+include("mna/MNA.jl")
+using .MNA
+export MNA
+
 # Conditionally use DAECompiler or stubs
 @static if USE_DAECOMPILER
     using DAECompiler

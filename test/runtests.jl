@@ -11,12 +11,20 @@ const PHASE0_MINIMAL = !isdefined(Main, :DAECompiler) &&
                        !@isdefined(Sky130PDK)
 
 if PHASE0_MINIMAL
-    @info "Running Phase 0 minimal tests (parsing/codegen only)"
+    @info "Running Phase 0/1 tests (parsing/codegen + MNA core)"
+
+    # Load CedarSim for MNA tests
+    using CedarSim
 
     # Tests that work with parsing only (no simulation required)
     @testset "Phase 0: Parsing Tests" begin
         @testset "spectre_expr.jl" include("spectre_expr.jl")
         @testset "sweep.jl" include("sweep.jl")
+    end
+
+    # Phase 1: MNA core tests (standalone, no DAECompiler required)
+    @testset "Phase 1: MNA Core" begin
+        @testset "mna/core.jl" include("mna/core.jl")
     end
 else
     @info "Running full test suite"

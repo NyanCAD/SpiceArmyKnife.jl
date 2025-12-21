@@ -55,7 +55,7 @@ jobs:
             Pkg.test()
           '
 
-      - name: Install test dependencies
+      - name: Install and precompile test dependencies
         run: |
           julia --project=test -e '
             using Pkg
@@ -67,11 +67,8 @@ jobs:
               PackageSpec(path="Lexers.jl")
             ])
             Pkg.instantiate()
+            Pkg.precompile()
           '
 
       - name: Run CedarSim tests
-        run: |
-          julia --project=test -e '
-            using Pkg
-            Pkg.test("CedarSim")
-          '
+        run: julia --project=test test/runtests.jl

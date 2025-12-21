@@ -393,20 +393,23 @@ I(out_p, out_n) = G_dev.gm * V(in_p, in_n)
 Current flows from out_n to out_p (into out_p).
 No current variable needed.
 
-Matrix pattern:
+Matrix pattern (MNA convention: current leaving is positive):
 ```
             out_p out_n in_p in_n
-out_p      [  .     .   +gm  -gm ]  I = +gm*Vin flows into out_p
-G = out_n  [  .     .   -gm  +gm ]  I = -gm*Vin flows into out_n
+out_p      [  .     .   -gm  +gm ]  Current leaving out_p = -gm*Vin
+G = out_n  [  .     .   +gm  -gm ]  Current leaving out_n = +gm*Vin
 ```
 """
 function stamp!(G_dev::VCCS, ctx::MNAContext, out_p::Int, out_n::Int, in_p::Int, in_n::Int)
     gm = G_dev.gm
-    # Current into out_p, out of out_n
-    stamp_G!(ctx, out_p, in_p,  gm)
-    stamp_G!(ctx, out_p, in_n, -gm)
-    stamp_G!(ctx, out_n, in_p, -gm)
-    stamp_G!(ctx, out_n, in_n,  gm)
+    # I = gm * V(in_p, in_n) flows INTO out_p (from out_n)
+    # MNA uses "current leaving is positive", so:
+    # - Current leaving out_p = -gm * V(in_p, in_n)
+    # - Current leaving out_n = +gm * V(in_p, in_n)
+    stamp_G!(ctx, out_p, in_p, -gm)
+    stamp_G!(ctx, out_p, in_n,  gm)
+    stamp_G!(ctx, out_n, in_p,  gm)
+    stamp_G!(ctx, out_n, in_n, -gm)
     return nothing
 end
 

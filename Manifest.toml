@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "0ea35d60bec197c0abf17ab5204571f23abf392a"
+project_hash = "cc7eaf8e2e526b80ed9218a2a790c5f0b389c6d4"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "8b2b045b22740e4be20654175cc38291d48539db"
@@ -264,7 +264,7 @@ uuid = "d78b62d4-37fa-4a6f-acd8-2f19986eb9ee"
 version = "0.2.5"
 
 [[deps.CedarSim]]
-deps = ["ADTypes", "AbstractAlgebra", "AbstractTrees", "Accessors", "AxisKeys", "CassetteOverlay", "ChainRules", "ChainRulesCore", "Combinatorics", "Compat", "DecFP", "DescriptorSystems", "DiffEqBase", "DiffEqCallbacks", "Distributions", "DynamicScope", "ExprTools", "ForwardDiff", "Lexers", "LinearAlgebra", "LinearSolve", "Logging", "NLsolve", "NaNMath", "NonlinearSolve", "OrderedCollections", "OrdinaryDiffEq", "PrecompileTools", "Random", "SciMLBase", "SciMLNLSolve", "SciMLSensitivity", "Scratch", "SpectreNetlistParser", "StateSelection", "StaticArrays", "StructArrays", "Sundials", "SymbolicIndexingInterface", "VT100", "VectorPrisms", "VerilogAParser"]
+deps = ["ADTypes", "AbstractAlgebra", "AbstractTrees", "Accessors", "AxisKeys", "CassetteOverlay", "ChainRules", "ChainRulesCore", "Combinatorics", "Compat", "DecFP", "DescriptorSystems", "DiffEqBase", "DiffEqCallbacks", "Distributions", "DynamicScope", "ExprTools", "ForwardDiff", "Lexers", "LinearAlgebra", "LinearSolve", "Logging", "NLsolve", "NaNMath", "NonlinearSolve", "OrderedCollections", "OrdinaryDiffEq", "PrecompileTools", "Printf", "Random", "SciMLBase", "SciMLNLSolve", "SciMLSensitivity", "Scratch", "SparseArrays", "SpectreNetlistParser", "StateSelection", "StaticArrays", "StructArrays", "Sundials", "SymbolicIndexingInterface", "VT100", "VectorPrisms", "VerilogAParser"]
 path = "."
 uuid = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
 version = "0.12.0"

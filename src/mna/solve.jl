@@ -15,6 +15,7 @@ using SparseArrays
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
 export make_ode_problem, make_ode_function
+export voltage, current, magnitude_db, phase_deg
 
 #==============================================================================#
 # Solution Types

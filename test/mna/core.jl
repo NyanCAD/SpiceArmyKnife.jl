@@ -15,8 +15,16 @@ using Test
 using LinearAlgebra
 using SparseArrays
 
-# Import MNA module
-using CedarSim.MNA
+# Import MNA module - use explicit imports to avoid conflicts with CedarSim types
+using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!
+using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
+using CedarSim.MNA: stamp!, system_size
+using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
+using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS
+using CedarSim.MNA: assemble!, assemble_G, assemble_C, get_rhs
+using CedarSim.MNA: DCSolution, ACSolution, solve_dc, solve_ac
+using CedarSim.MNA: voltage, current, magnitude_db, phase_deg
+using CedarSim.MNA: make_ode_problem, make_ode_function
 
 @testset "MNA Core Tests" begin
 
@@ -250,11 +258,12 @@ using CedarSim.MNA
         sys = assemble!(ctx)
         G = Matrix(sys.G)
 
-        # I(out) = gm * V(in)
-        @test G[1, 3] ≈ 0.01   # out_p, in_p
-        @test G[1, 4] ≈ -0.01  # out_p, in_n
-        @test G[2, 3] ≈ -0.01  # out_n, in_p
-        @test G[2, 4] ≈ 0.01   # out_n, in_n
+        # I(out) = gm * V(in), but MNA uses "current leaving is positive"
+        # So current INTO out_p means negative contribution to G row for out_p
+        @test G[1, 3] ≈ -0.01  # out_p, in_p: -gm (current enters out_p)
+        @test G[1, 4] ≈ 0.01   # out_p, in_n: +gm
+        @test G[2, 3] ≈ 0.01   # out_n, in_p: +gm (current leaves out_n)
+        @test G[2, 4] ≈ -0.01  # out_n, in_n: -gm
     end
 
     @testset "VCVS stamp" begin
@@ -474,7 +483,9 @@ using CedarSim.MNA
     end
 
     @testset "AC: RL high-pass filter" begin
-        # R = 1k, L = 1H (for easy math)
+        # For high-pass: R in series, L to ground
+        # Vout/Vin = jωL / (R + jωL)
+        # R = 1k, L = 1H
         # fc = R/(2*pi*L) ≈ 159.15 Hz
 
         ctx = MNAContext()
@@ -486,15 +497,15 @@ using CedarSim.MNA
         fc = R / (2π * L_val)
 
         stamp!(VoltageSource(1.0), ctx, inp, 0)
-        stamp!(Inductor(L_val), ctx, inp, out)
-        stamp!(Resistor(R), ctx, out, 0)
+        stamp!(Resistor(R), ctx, inp, out)  # R in series
+        stamp!(Inductor(L_val), ctx, out, 0)  # L to ground
 
         sys = assemble!(ctx)
 
         freqs = [fc/10, fc, fc*10]
         ac_sol = solve_ac(sys, freqs)
 
-        # At low frequency: Vout << Vin
+        # At low frequency: Vout << Vin (inductor is short)
         Vout_low = abs(voltage(ac_sol, :out, 1))
         @test Vout_low < 0.15
 
@@ -502,7 +513,7 @@ using CedarSim.MNA
         Vout_fc = abs(voltage(ac_sol, :out, 2))
         @test Vout_fc ≈ 1.0/sqrt(2) atol=0.01
 
-        # At high frequency: Vout ≈ Vin
+        # At high frequency: Vout ≈ Vin (inductor is open)
         Vout_high = abs(voltage(ac_sol, :out, 3))
         @test Vout_high > 0.99
     end

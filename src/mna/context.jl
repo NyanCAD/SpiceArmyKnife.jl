@@ -10,6 +10,7 @@
 export MNAContext, MNASystem
 export get_node!, alloc_current!
 export stamp_G!, stamp_C!, stamp_b!
+export stamp_conductance!, stamp_capacitance!
 export system_size
 
 """

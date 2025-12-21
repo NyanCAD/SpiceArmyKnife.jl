@@ -440,19 +440,26 @@ Verify against analytical solutions and ngspice where applicable.
 
 ### Phase 0: Dependency Cleanup
 
-**Goal:** Clean baseline on latest Julia with minimal dependencies.
+**Goal:** Clean baseline on Julia 1.12 with minimal dependencies. Simulation won't work yet, but parsing/codegen should.
 
 **Tasks:**
-- Update to latest Julia release (1.11+)
 - Aggressively prune unused dependencies from Project.toml
 - Update remaining dependencies to latest versions
-- Remove or isolate DAECompiler dependency
+- Comment out DAECompiler compile-time dependencies (imports, using statements)
 - Fix any segfaults or compatibility issues from updates
 
+**Tests that should pass (parsing/codegen only, no simulation):**
+- `spectre_expr.jl` - Spectre expression parsing
+- `params.jl` - ParamObserver, get_default_parameterization, nest/flatten param lists
+- `sweep.jl` - `nest_param_list`, `flatten_param_list` (the non-simulation parts)
+- `binning/bins.jl` - SPICE file parsing
+- `sky130/parse_unified.jl` - SKY130 model parsing
+- Portions of `basic.jl` that just test parsing (e.g., SPICENetlistParser.parse)
+
 **Exit criteria:**
-- `] test` runs without segfaults on latest Julia
-- Minimal dependency set identified
-- CI passes on latest Julia
+- Julia 1.12 loads the package without segfaults
+- Parsing tests pass (may need temporary test subset)
+- Minimal dependency set documented
 
 ---
 

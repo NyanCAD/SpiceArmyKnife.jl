@@ -526,6 +526,64 @@ Phase 4 (SPICE Codegen) will:
 - Connect parsed netlists to MNA stamping
 - Enable end-to-end SPICE simulation
 
+### CircuitSweep Integration (2024-12-22)
+
+Ported the high-level sweep API to work with MNA backend.
+
+#### Changes to `src/sweeps.jl`
+
+**Removed DAECompiler-specific code:**
+- Removed `IRODESystem` references
+- Removed `DAEProblem`, `ParamSim` patterns
+- Removed broadcast overrides for `dc!`/`tran!`
+
+**Simplified `CircuitSweep` struct:**
+```julia
+struct CircuitSweep{T<:Function}
+    builder::T       # Builder function (params, spec) -> MNAContext
+    sim::MNASim      # Base simulation for alter()
+    iterator::SweepLike
+end
+```
+
+**New methods:**
+- `CircuitSweep(builder, sweep; default_params...)` - Create sweep from builder
+- `dc!(cs::CircuitSweep)` - DC analysis over entire sweep
+- `tran!(cs::CircuitSweep, tspan)` - Transient analysis over entire sweep
+- Iteration returns `MNASim` objects via `alter()`
+
+**MNA `alter()` enhanced for nested params:**
+- Uses Accessors for lens-based path resolution
+- Supports var-strings like `var"inner.R1"` for nested NamedTuples
+- Auto-converts numeric types to Float64
+
+#### Test Changes (`test/sweep.jl`)
+
+**Converted to MNA:**
+- `build_two_resistor(params, spec)` builder function with defaults via `merge()`
+- All CircuitSweep tests use MNA backend
+- Nested params test demonstrates ParamLens pattern
+
+**ParamLens demonstration:**
+```julia
+function build_nested_resistor(params, spec)
+    lens = ParamLens(params)
+    p = lens.inner(; R1=1000.0, R2=1000.0)  # Defaults merged with overrides
+    # ... stamp circuit using p.R1, p.R2 ...
+end
+
+sweep = ProductSweep(var"inner.params.R1" = 100.0:200.0, ...)
+cs = CircuitSweep(build_nested_resistor, sweep;
+                  inner = (params = (R1=100.0, R2=100.0),))
+```
+
+**Disabled tests:**
+- SPICE codegen sweep test commented out (TODO: re-enable after Phase 4)
+
+#### Tests Passing
+- 555 sweep tests (Sweep types, CircuitSweep, dc! sweeps, nested params)
+- 246 MNA core tests
+
 ---
 
 ## Phase 2: Simple Device Stamps

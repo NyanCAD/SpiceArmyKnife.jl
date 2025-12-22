@@ -12,7 +12,7 @@ This document tracks progress on the MNA (Modified Nodal Analysis) migration as 
 | 1 | MNA Core | **Complete** | ~200 |
 | 2 | Simple Device Stamps | **Complete** (merged into Phase 1) | ~200 |
 | 3 | DC & Transient Solvers | **Complete** (merged into Phase 1) | ~300 |
-| 4 | SPICE Codegen | Not Started | ~300 |
+| 4 | SPICE Codegen | **In Progress** | ~300 |
 | 5 | VA Contribution Functions | Not Started | ~400 |
 | 6 | Complex VA & DAE | Not Started | ~400 |
 | 7 | Advanced Features | Not Started | ~300 |
@@ -604,11 +604,167 @@ See Phase 1 for solver implementations.
 
 ## Phase 4: SPICE Codegen
 
-**Status:** Not Started
-**LOC Target:** ~300
+**Status:** In Progress
+**Date Started:** 2024-12-22
+**Branch:** `claude/integrate-mna-code-generation-yOpfg`
+**LOC:** ~350 (implementation) + ~100 (tests)
 
 ### Goal
 Update spc/codegen.jl to emit stamp! calls instead of DAECompiler primitives.
+Connect parsed SPICE netlists to the MNA backend for simulation.
+
+### Implementation Summary
+
+#### Core Changes
+
+**`src/spc/codegen.jl`** (~280 LOC added)
+
+Added MNA-specific codegen functions that transform SPICE AST into MNA stamp! calls:
+
+1. **Device Instance Generation:**
+   - `cg_mna_instance!(state, instance)` - Dispatch for each device type
+   - Resistor: `stamp!(Resistor(r/m), ctx, p, n)` with multiplicity
+   - Capacitor: `stamp!(Capacitor(c*m), ctx, p, n)` with multiplicity
+   - Inductor: `stamp!(Inductor(l), ctx, p, n)`
+   - Voltage Source: `stamp!(VoltageSource(v), ctx, p, n)`
+   - Current Source: `stamp!(CurrentSource(i), ctx, p, n)`
+   - VCVS: `stamp!(VCVS(gain), ctx, out_p, out_n, in_p, in_n)`
+   - VCCS: `stamp!(VCCS(gm), ctx, out_p, out_n, in_p, in_n)`
+
+2. **Builder Function Generation:**
+   - `codegen_mna!(state)` - Generate MNA builder function body
+   - `make_mna_circuit(ast; circuit_name)` - Top-level code generation
+   - Returns code that creates a function: `(params, spec) -> MNAContext`
+
+3. **Expression Handling:**
+   - Reuses existing `cg_expr!` for parameter expressions
+   - Handles temperature option: updates spec if `.TEMP` specified
+   - Handles parameter dependencies via topological sort
+
+**`src/spc/sema.jl`** (~10 LOC)
+
+Added `sema_nets` methods for controlled sources:
+- `sema_nets(SNode{SP.VCVS})` - 4-terminal: (pos, neg, cpos, cneg)
+- `sema_nets(SNode{SP.VCCS})` - 4-terminal: (pos, neg, cpos, cneg)
+- `sema_nets(SNode{SP.CCVS})` - 2-terminal (current control separate)
+- `sema_nets(SNode{SP.CCCS})` - 2-terminal (current control separate)
+
+**`src/spc/interface.jl`** (~60 LOC)
+
+Added high-level MNA functions:
+- `parse_spice_to_mna(code; circuit_name)` - Parse and return MNA builder code
+- `solve_spice_mna(code; temp)` - Parse, build, and solve DC
+
+**`src/CedarSim.jl`**
+
+- Added includes for spc/*.jl files (Phase 4 integration)
+- Exported: `make_mna_circuit`, `parse_spice_to_mna`, `solve_spice_mna`
+
+#### Test Changes
+
+**`test/sweep.jl`** (~90 LOC added)
+
+Added MNA SPICE codegen tests:
+
+1. **Basic resistor circuit test:**
+   - Voltage divider: `V1 vcc 0 DC 5`, `R1 vcc out 1k`, `R2 out 0 1k`
+   - Validates `voltage(sol, :out) ≈ 2.5`
+
+2. **RLC circuit test:**
+   - DC analysis of series RLC
+   - Validates inductor=short, capacitor=open at DC
+
+3. **Current source test:**
+   - `I1 0 out DC 1m`, `R1 out 0 1k`
+   - Validates V = IR = 1V
+
+### Generated Code Pattern
+
+The MNA codegen generates builder functions like:
+
+```julia
+function circuit(params, spec::MNASpec=MNASpec())
+    ctx = MNAContext()
+
+    # Node allocation
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    # Parameter handling
+    var"*params#" = params isa ParamLens ? getfield(params, :nt) : params
+    r1 = getfield(var"*params#", :r1, 1000.0)
+
+    # Device stamps
+    stamp!(VoltageSource(5.0; name=:v1), ctx, vcc, 0)
+    stamp!(Resistor(r1; name=:r1), ctx, vcc, out)
+    stamp!(Resistor(1000.0; name=:r2), ctx, out, 0)
+
+    return ctx
+end
+```
+
+### Key Differences from DAECompiler Codegen
+
+| Aspect | DAECompiler (old) | MNA (new) |
+|--------|-------------------|-----------|
+| Output | `Named(spicecall(...))(nets...)` | `stamp!(Device(...), ctx, nodes...)` |
+| Node allocation | Implicit via `net()` call | Explicit via `get_node!(ctx, name)` |
+| Parameters | Via ScopedValue | Via function argument + ParamLens |
+| Result | Circuit function | MNAContext |
+
+### What Works
+
+- Basic device parsing (R, C, L, V, I)
+- Controlled sources (E, G)
+- Parameter expressions
+- Unit suffixes (k, m, u, n, p, f)
+- DC analysis of parsed circuits
+
+### What's Pending
+
+- Subcircuit support (`.SUBCKT` / `.ENDS`)
+- Model statements (`.MODEL`)
+- Transient sources (PWL, PULSE, SIN)
+- CCVS/CCCS (current-controlled sources - require reference to V source)
+- More comprehensive test coverage
+
+### Exit Criteria Status
+
+| Criterion | Status |
+|-----------|--------|
+| Basic device stamps (R, C, L, V, I) | ✅ |
+| Voltage-controlled sources (E, G) | ✅ |
+| Parameter expression evaluation | ✅ |
+| Unit suffix parsing | ✅ |
+| DC analysis of parsed circuits | ✅ |
+| Test infrastructure | ✅ |
+| Subcircuit support | 🔲 |
+| Transient source types | 🔲 |
+| Current-controlled sources | 🔲 |
+
+### Usage Example
+
+```julia
+using CedarSim
+using CedarSim.MNA: voltage
+
+spice_code = """
+V1 vcc 0 DC 5
+R1 vcc out 1k
+R2 out 0 1k
+"""
+
+# Parse and generate builder
+ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+code = make_mna_circuit(ast)
+
+# Evaluate and solve
+circuit_fn = eval(code)
+ctx = circuit_fn((;), MNASpec())
+sol = solve_dc(ctx)
+
+@assert voltage(sol, :out) ≈ 2.5  # Voltage divider
+```
 
 ---
 

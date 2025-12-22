@@ -339,35 +339,94 @@ end
     end
 end
 
-# TODO: Re-enable when SPICE codegen is ported to MNA backend
-# @testset "dc! sweep on spice code" begin
-#     spice_code =
-#     """
-#         * Parameter scoping test
-#
-#         .subckt subcircuit1 vss gnd
-#         .param r_load=1
-#         r1 vss gnd 'r_load'
-#         .ends
-#
-#         .param v_in=1
-#         x1 vss 0 subcircuit1
-#         v1 vss 0 'v_in'
-#     """
-#     circuit_code = CedarSim.make_spectre_circuit(
-#         CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
-#     );
-#     circuit = eval(circuit_code);
-#     cs = CircuitSweep(circuit, ProductSweep(v_in = 1.0:10.0, var"x1.r_load" = 1.0:10.0))
-#     solutions = dc!(cs; abstol=deftol, reltol=deftol)
-#
-#     for sol in solutions
-#         params = sol.prob.p.params
-#         v_in = params.params.v_in
-#         r_load = params.x1.params.r_load
-#         @test isapprox_deftol(v_in/r_load, sol[cs.sys.x1.r1.I][end])
-#     end
-# end
+# Phase 4: MNA-based SPICE codegen tests
+@testset "MNA SPICE codegen: basic resistor circuit" begin
+    using CedarSim.MNA: voltage, current
+
+    spice_code = """
+        * Simple voltage divider
+        V1 vcc 0 DC 5
+        R1 vcc out 1k
+        R2 out 0 1k
+    """
+
+    # Parse and generate MNA builder
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = CedarSim.make_mna_circuit(ast)
+
+    # Create a module to evaluate the code
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    circuit_fn = Base.eval(m, circuit_code)
+
+    # Build and solve
+    ctx = circuit_fn((;), CedarSim.MNA.MNASpec())
+    sys = CedarSim.MNA.assemble!(ctx)
+    sol = CedarSim.MNA.solve_dc(sys)
+
+    # Verify voltage divider: out = 5 * 1k/(1k+1k) = 2.5V
+    @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
+    @test isapprox(voltage(sol, :out), 2.5; atol=deftol)
+end
+
+@testset "MNA SPICE codegen: RLC circuit" begin
+    using CedarSim.MNA: voltage
+
+    spice_code = """
+        * RLC circuit
+        V1 in 0 DC 10
+        R1 in n1 100
+        L1 n1 n2 1m
+        C1 n2 0 1u
+    """
+
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = CedarSim.make_mna_circuit(ast)
+
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    circuit_fn = Base.eval(m, circuit_code)
+
+    ctx = circuit_fn((;), CedarSim.MNA.MNASpec())
+    sys = CedarSim.MNA.assemble!(ctx)
+    sol = CedarSim.MNA.solve_dc(sys)
+
+    # At DC, inductor is short, capacitor is open
+    # So n1 = 10V (after R, but L is short)
+    # n2 = 10V (capacitor open, no current)
+    @test isapprox(voltage(sol, :in), 10.0; atol=deftol)
+    # Inductor at DC is a short, so n1 ≈ n2 ≈ in (no resistor drop when no current)
+    # Actually with capacitor open, no current flows, so all nodes at 10V
+    @test isapprox(voltage(sol, :n1), 10.0; atol=deftol)
+    @test isapprox(voltage(sol, :n2), 10.0; atol=deftol)
+end
+
+@testset "MNA SPICE codegen: current source" begin
+    using CedarSim.MNA: voltage
+
+    spice_code = """
+        * Current source into resistor
+        I1 0 out DC 1m
+        R1 out 0 1k
+    """
+
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    circuit_code = CedarSim.make_mna_circuit(ast)
+
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    circuit_fn = Base.eval(m, circuit_code)
+
+    ctx = circuit_fn((;), CedarSim.MNA.MNASpec())
+    sys = CedarSim.MNA.assemble!(ctx)
+    sol = CedarSim.MNA.solve_dc(sys)
+
+    # V = I * R = 1mA * 1kΩ = 1V
+    @test isapprox(voltage(sol, :out), 1.0; atol=deftol)
+end
 
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration

@@ -33,6 +33,9 @@ export DAEProblem
 export @dyn, @requires, @provides, @isckt_or
 export solve
 
+# Phase 4: MNA SPICE codegen exports
+export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
+
 
 include("util.jl")
 include("vasim.jl")
@@ -41,6 +44,14 @@ include("simpledevices.jl")
 include("spectre_env.jl")
 include("circuitodesystem.jl")
 include("spectre.jl")
+
+# Phase 4: New SPC SPICE codegen (used by MNA backend)
+include("spc/sema.jl")
+include("spc/codegen.jl")
+include("spc/interface.jl")
+include("spc/cache.jl")
+include("spc/query.jl")
+include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
 # Phase 0: dcop.jl and ac.jl require DAECompiler simulation machinery

@@ -173,6 +173,68 @@ function codegen_hdl_imports!(mod::Module, hdl_imports)
     end
 end
 
+# MNA-based parsing: returns MNA builder function instead of DAECompiler code
+"""
+    parse_spice_to_mna(spice_code::String; circuit_name=:circuit)
+
+Parse SPICE code and return an MNA builder function.
+
+The returned function has signature:
+    function circuit_name(params, spec::MNASpec) -> MNAContext
+
+# Example
+```julia
+code = \"\"\"
+V1 vcc 0 5
+R1 vcc out 1k
+R2 out 0 1k
+\"\"\"
+build_fn = parse_spice_to_mna(code)
+ctx = build_fn((;), MNASpec())
+sys = MNA.assemble!(ctx)
+sol = MNA.solve_dc(sys)
+voltage(sol, :out)  # Returns 2.5
+```
+"""
+function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit)
+    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    return make_mna_circuit(ast; circuit_name)
+end
+
+"""
+    solve_spice_mna(spice_code::String; temp=27.0)
+
+Parse SPICE code, build MNA circuit, and solve DC operating point.
+Returns (MNASystem, DCSolution).
+
+# Example
+```julia
+code = \"\"\"
+V1 vcc 0 5
+R1 vcc out 1k
+R2 out 0 1k
+\"\"\"
+sys, sol = solve_spice_mna(code)
+voltage(sol, :out)  # Returns 2.5
+```
+"""
+function solve_spice_mna(spice_code::String; temp::Real=27.0)
+    ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = make_mna_circuit(ast)
+    # We need to evaluate the code in a temporary module
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    circuit_fn = Base.eval(m, code)
+
+    spec = MNA.MNASpec(temp=Float64(temp), mode=:dcop)
+    ctx = circuit_fn((;), spec)
+    sys = MNA.assemble!(ctx)
+    sol = MNA.solve_dc(sys)
+
+    return sys, sol
+end
+
 macro sp_str(str, flag="")
     include_paths = [dirname(String(__source__.file)), pwd()]
     enable_julia_escape = 'e' in flag

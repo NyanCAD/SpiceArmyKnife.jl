@@ -102,6 +102,13 @@ sema_nets(instance::TwoTerminal) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.MOSFET}) = (instance.d, instance.g, instance.s, instance.b)
 sema_nets(instance::SNode{SP.BipolarTransistor}) = (instance.c, instance.b, instance.e, instance.s)
 sema_nets(instance::Union{SNode{SP.SubcktCall}, SNode{SP.VAModelCall}}) = instance.nodes
+# Controlled sources: output nodes + control nodes
+# VCVS/VCCS: pos, neg are output; val.cpos, val.cneg are control (voltage)
+sema_nets(instance::SNode{SP.VCVS}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
+sema_nets(instance::SNode{SP.VCCS}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
+# CCVS/CCCS: pos, neg are output; control is via voltage source current (only 2 nets for now)
+sema_nets(instance::SNode{SP.CCVS}) = (instance.pos, instance.neg)
+sema_nets(instance::SNode{SP.CCCS}) = (instance.pos, instance.neg)
 
 """
     SPICE/Spectre codegen pass 1

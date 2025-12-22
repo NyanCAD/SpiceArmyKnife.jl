@@ -472,6 +472,53 @@ end
 
 DiffEqBase.solve(ps::ParsedCircuit) = tran!(ps)
 
+#==============================================================================#
+# MNA Backend Integration
+#==============================================================================#
+
+using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_dc_initialized_ode_problem
+
+"""
+    dc!(sim::MNASim)
+
+DC operating point analysis for MNA circuits.
+Returns a `DCSolution` with voltage/current accessors.
+"""
+function dc!(sim::MNASim)
+    return MNA.solve_dc(sim)
+end
+
+"""
+    tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
+
+Transient analysis for MNA circuits.
+Returns an ODESolution that can be indexed by time.
+
+# Example
+```julia
+sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
+sol = tran!(sim, (0.0, 1e-3))
+sol(0.5e-3)  # State at t=0.5ms
+```
+"""
+function tran!(sim::MNASim, tspan::Tuple{Real,Real};
+               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+    sys = MNA.assemble!(sim)
+    ode_data = MNA.make_dc_initialized_ode_problem(sys, tspan)
+
+    f = ODEFunction(ode_data.f;
+                    mass_matrix = ode_data.mass_matrix,
+                    jac = ode_data.jac,
+                    jac_prototype = ode_data.jac_prototype)
+    prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
+
+    if solver === nothing
+        solver = Rodas5P()
+    end
+
+    return solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+end
+
 # Helper function of `first()` that passes through `nothing`
 first_or_nothing(x) = first(x)
 first_or_nothing(::Nothing) = nothing

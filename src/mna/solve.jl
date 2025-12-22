@@ -883,3 +883,149 @@ function condition_number(sys::MNASystem)
         return norm(sys.G, 1) * norm(inv(Matrix(sys.G)), 1)
     end
 end
+
+# Note: dc! and tran! for MNASim are defined in sweeps.jl to integrate
+# with CedarSim's existing sweep API (CircuitSweep, ProductSweep, etc.)
+
+#==============================================================================#
+# Symbolic Solution Access
+#==============================================================================#
+
+"""
+    MNASolutionAccessor
+
+Provides symbolic access to ODE solution via node names.
+Wraps an ODESolution with the MNASystem for name resolution.
+
+# Example
+```julia
+sim = MNASim(build_circuit; Vcc=5.0, R=1000.0)
+sol = tran!(sim, (0.0, 1e-3))
+acc = MNASolutionAccessor(sol, assemble!(sim))
+acc[:out]  # Voltage trajectory at node :out
+```
+"""
+struct MNASolutionAccessor{S}
+    sol::S
+    sys::MNASystem
+end
+
+export MNASolutionAccessor
+
+# Symbolic indexing: acc[:node_name]
+function Base.getindex(acc::MNASolutionAccessor, name::Symbol)
+    (name === :gnd || name === Symbol("0")) && return zeros(length(acc.sol.t))
+    idx = findfirst(==(name), acc.sys.node_names)
+    if idx !== nothing
+        return [acc.sol(t)[idx] for t in acc.sol.t]
+    end
+    idx = findfirst(==(name), acc.sys.current_names)
+    if idx !== nothing
+        curr_idx = acc.sys.n_nodes + idx
+        return [acc.sol(t)[curr_idx] for t in acc.sol.t]
+    end
+    error("Unknown variable: $name")
+end
+
+# Time access
+Base.getproperty(acc::MNASolutionAccessor, s::Symbol) =
+    s === :t ? acc.sol.t : getfield(acc, s)
+
+# Interpolation
+(acc::MNASolutionAccessor)(t::Real) = acc.sol(t)
+
+"""
+    voltage(acc::MNASolutionAccessor, name::Symbol, t::Real)
+
+Get voltage at node at specific time.
+"""
+function voltage(acc::MNASolutionAccessor, name::Symbol, t::Real)
+    (name === :gnd || name === Symbol("0")) && return 0.0
+    idx = findfirst(==(name), acc.sys.node_names)
+    idx === nothing && error("Unknown node: $name")
+    return acc.sol(t)[idx]
+end
+
+"""
+    voltage(acc::MNASolutionAccessor, name::Symbol)
+
+Get voltage trajectory at node.
+"""
+voltage(acc::MNASolutionAccessor, name::Symbol) = acc[name]
+
+#==============================================================================#
+# Hierarchical Scope Access (for sol[sys.x1.r1] style)
+#==============================================================================#
+
+"""
+    NodeRef
+
+Reference to a node in the circuit hierarchy.
+Enables `sol[sys.subcircuit.node]` style access.
+"""
+struct NodeRef
+    path::Vector{Symbol}  # Hierarchical path
+    name::Symbol          # Final node name
+end
+
+NodeRef(name::Symbol) = NodeRef(Symbol[], name)
+
+export NodeRef
+
+"""
+    ScopedSystem
+
+Wrapper that enables hierarchical access like `sys.x1.r1.p`.
+Returns NodeRef objects that can be used to index solutions.
+
+# Example
+```julia
+sys = assemble!(sim)
+s = scope(sys)
+
+# Access nodes hierarchically (assuming node :x1_out exists)
+sol[s.x1.out]  # Accesses node :x1_out
+sol[s.vcc]     # Accesses node :vcc
+```
+"""
+struct ScopedSystem
+    sys::MNASystem
+    path::Vector{Symbol}
+end
+
+ScopedSystem(sys::MNASystem) = ScopedSystem(sys, Symbol[])
+
+function Base.getproperty(s::ScopedSystem, name::Symbol)
+    if name === :sys || name === :path
+        return getfield(s, name)
+    end
+    # Check if this is a terminal node
+    full_name = isempty(s.path) ? name : Symbol(join([s.path..., name], "_"))
+    if full_name in s.sys.node_names || full_name in s.sys.current_names
+        return NodeRef(s.path, name)
+    end
+    # Otherwise, extend the path for hierarchical access
+    return ScopedSystem(s.sys, [s.path..., name])
+end
+
+export ScopedSystem
+
+# Allow acc[NodeRef] access
+function Base.getindex(acc::MNASolutionAccessor, ref::NodeRef)
+    full_name = isempty(ref.path) ? ref.name : Symbol(join([ref.path..., ref.name], "_"))
+    return acc[full_name]
+end
+
+function voltage(acc::MNASolutionAccessor, ref::NodeRef, t::Real)
+    full_name = isempty(ref.path) ? ref.name : Symbol(join([ref.path..., ref.name], "_"))
+    return voltage(acc, full_name, t)
+end
+
+"""
+    scope(sys::MNASystem) -> ScopedSystem
+
+Create a scoped view of the system for hierarchical node access.
+"""
+scope(sys::MNASystem) = ScopedSystem(sys)
+
+export scope

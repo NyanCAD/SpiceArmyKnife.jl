@@ -1462,4 +1462,110 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test sys.n_nodes == 2
     end
 
+    #==========================================================================#
+    # High-Level dc!/tran! API (integration with CedarSim sweep API)
+    #==========================================================================#
+
+    # dc!/tran! are exported from CedarSim (via sweeps.jl), not MNA module
+    using CedarSim: dc!, tran!
+    using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
+
+    @testset "dc! and tran! API" begin
+        # Define a simple RC circuit
+        function build_rc_simple(params, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        sim = MNASim(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
+        τ = 1000.0 * 1e-6  # 1ms
+
+        # Test dc!(sim) - matches CedarSim API
+        dc_sol = dc!(sim)
+        @test dc_sol isa DCSolution
+        @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
+
+        # Test tran!(sim, tspan) - matches CedarSim API
+        ode_sol = tran!(sim, (0.0, 5τ))
+        @test ode_sol.retcode == ReturnCode.Success
+
+        # Wrap for symbolic access
+        sys = assemble!(sim)
+        acc = MNASolutionAccessor(ode_sol, sys)
+
+        # Test voltage access by name
+        v_out_final = voltage(acc, :out, 5τ)
+        @test v_out_final ≈ 5.0 rtol=1e-2  # Should stay at DC steady state
+
+        # Test voltage trajectory
+        v_trajectory = voltage(acc, :out)
+        @test length(v_trajectory) == length(acc.t)
+
+        # Test acc[:name] syntax
+        v_via_getindex = acc[:out]
+        @test v_via_getindex == v_trajectory
+
+        # Test acc.t access
+        @test acc.t[1] == 0.0
+        @test acc.t[end] ≈ 5τ rtol=1e-6
+
+        # Test acc(t) interpolation
+        state_at_tau = acc(τ)
+        @test length(state_at_tau) == 3  # vcc, out, I_V
+    end
+
+    @testset "Hierarchical scope access" begin
+        # Build a circuit with hierarchical-like node names
+        function build_hierarchical(params, spec)
+            ctx = MNAContext()
+            # Simulate subcircuit x1 with nodes x1_in and x1_out
+            x1_in = get_node!(ctx, :x1_in)
+            x1_out = get_node!(ctx, :x1_out)
+            vcc = get_node!(ctx, :vcc)
+
+            stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(params.R1), ctx, vcc, x1_in)
+            stamp!(Resistor(params.R2), ctx, x1_in, x1_out)
+            stamp!(Resistor(params.R3), ctx, x1_out, 0)
+
+            return ctx
+        end
+
+        sim = MNASim(build_hierarchical; Vcc=10.0, R1=1000.0, R2=1000.0, R3=1000.0)
+        sys = assemble!(sim)
+
+        # Test ScopedSystem
+        s = scope(sys)
+        @test s isa ScopedSystem
+
+        # Access hierarchical node
+        node_ref = s.x1.out
+        @test node_ref isa NodeRef
+        @test node_ref.name == :out
+        @test node_ref.path == [:x1]
+
+        # Test with tran!
+        ode_sol = tran!(sim, (0.0, 1e-3))
+        acc = MNASolutionAccessor(ode_sol, sys)
+
+        # Access via NodeRef
+        v_x1_out = acc[s.x1.out]
+        @test length(v_x1_out) == length(acc.t)
+
+        # Should equal direct access
+        v_direct = acc[:x1_out]
+        @test v_x1_out == v_direct
+
+        # Test voltage with NodeRef
+        v_at_t = voltage(acc, s.x1.out, 0.0)
+        @test v_at_t isa Float64
+    end
+
 end  # @testset "MNA Core Tests"

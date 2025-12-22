@@ -89,9 +89,12 @@ end
 const TwoTerminal = Union{SNode{SP.Resistor}, SNode{SP.Inductor}, SNode{SP.Capacitor},
     SNode{SP.Diode}, SNode{SP.Voltage}, SNode{SP.Current}}
 
-const AnySPInstance = Union{SNode{SP.MOSFET}, SNode{SP.SubcktCall}, SNode{SP.VAModelCall},
+# Controlled sources use parameterized ControlledSource{in, out} type
+# VCVS = ControlledSource{:V,:V}, VCCS = ControlledSource{:V,:C}, etc.
+const AnySPInstance = Union{SNode{SP.MOSFET}, SNode{SP.SubcktCall},
     SNode{SP.BipolarTransistor}, SNode{SP.Behavioral},
-    SNode{SP.CCVS}, SNode{SP.CCCS}, SNode{SP.VCVS}, SNode{SP.VCCS},
+    SNode{SP.ControlledSource{:C,:V}}, SNode{SP.ControlledSource{:C,:C}},
+    SNode{SP.ControlledSource{:V,:V}}, SNode{SP.ControlledSource{:V,:C}},
     SNode{SP.Switch}, SNode{SP.JuliaDevice}, TwoTerminal}
 
 function warn!(scope::SemaResult, warn)
@@ -101,14 +104,14 @@ end
 sema_nets(instance::TwoTerminal) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.MOSFET}) = (instance.d, instance.g, instance.s, instance.b)
 sema_nets(instance::SNode{SP.BipolarTransistor}) = (instance.c, instance.b, instance.e, instance.s)
-sema_nets(instance::Union{SNode{SP.SubcktCall}, SNode{SP.VAModelCall}}) = instance.nodes
+sema_nets(instance::SNode{SP.SubcktCall}) = instance.nodes
 # Controlled sources: output nodes + control nodes
-# VCVS/VCCS: pos, neg are output; val.cpos, val.cneg are control (voltage)
-sema_nets(instance::SNode{SP.VCVS}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
-sema_nets(instance::SNode{SP.VCCS}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
-# CCVS/CCCS: pos, neg are output; control is via voltage source current (only 2 nets for now)
-sema_nets(instance::SNode{SP.CCVS}) = (instance.pos, instance.neg)
-sema_nets(instance::SNode{SP.CCCS}) = (instance.pos, instance.neg)
+# ControlledSource{:V,:V} (VCVS) and ControlledSource{:V,:C} (VCCS): pos, neg are output; val.cpos, val.cneg are control
+sema_nets(instance::SNode{SP.ControlledSource{:V,:V}}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
+sema_nets(instance::SNode{SP.ControlledSource{:V,:C}}) = (instance.pos, instance.neg, instance.val.cpos, instance.val.cneg)
+# ControlledSource{:C,:V} (CCVS) and ControlledSource{:C,:C} (CCCS): pos, neg are output (current control via reference)
+sema_nets(instance::SNode{SP.ControlledSource{:C,:V}}) = (instance.pos, instance.neg)
+sema_nets(instance::SNode{SP.ControlledSource{:C,:C}}) = (instance.pos, instance.neg)
 
 """
     SPICE/Spectre codegen pass 1
@@ -177,7 +180,8 @@ function sema_visit_ids!(f, cs::SNode{SP.Condition})
 end
 
 
-sema_visit_ids!(f, expr::Union{SNode{SP.NumericValue}, SNode{SC.NumericValue}}) = nothing
+# NumericValue was renamed to NumberLiteral in the parser
+sema_visit_ids!(f, expr::Union{SNode{SP.NumberLiteral}, SNode{SC.NumberLiteral}}) = nothing
 sema_visit_ids!(f, ::Nothing) = nothing
 
 function sema_visit_expr!(scope::SemaResult, @nospecialize(expr))
@@ -332,7 +336,8 @@ function sema!(scope::SemaResult, n::Union{SNode{SPICENetlistSource}, SNode{SP.S
                     sema_visit_expr!(scope, param.val)
                 end
             end
-            if isa(stmt, SNode{SP.MOSFET}) || isa(stmt, SNode{SP.VAModelCall})
+            # Phase 0: VAModelCall doesn't exist in the parser
+            if isa(stmt, SNode{SP.MOSFET})
                 push!(scope.exposed_models, LSymbol(stmt.model))
             end
             if isa(stmt, SNode{SP.Resistor})

@@ -1574,7 +1574,6 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
     using CedarSim.MNA: SinVoltageSource, SinCurrentSource
     using CedarSim.MNA: PWLCurrentSource, sin_value
-    using CedarSim.MNA: make_ode_problem_timed, make_ode_function_timed
 
     @testset "SinVoltageSource evaluation" begin
         # SIN(vo, va, freq, [td, theta, phase])
@@ -1689,8 +1688,8 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (Vmax=5.0, ramp_time=1e-3, R=1000.0, C=1e-6)
         τ = params.R * params.C  # 1ms
 
-        # Create time-dependent ODE problem
-        prob_data = make_ode_problem_timed(build_pwl_rc, params, (0.0, 5e-3))
+        # Create ODE problem (time-dependent sources handled automatically)
+        prob_data = make_ode_problem(build_pwl_rc, params, (0.0, 5e-3))
 
         f = ODEFunction(prob_data.f;
                         mass_matrix = prob_data.mass_matrix,
@@ -1737,7 +1736,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (vo=0.0, va=5.0, freq=1000.0, R=1000.0, C=1e-6)
         fc = 1.0 / (2π * params.R * params.C)  # ~159 Hz
 
-        prob_data = make_ode_problem_timed(build_sin_rc, params, (0.0, 5e-3))
+        prob_data = make_ode_problem(build_sin_rc, params, (0.0, 5e-3))
 
         f = ODEFunction(prob_data.f;
                         mass_matrix = prob_data.mass_matrix,

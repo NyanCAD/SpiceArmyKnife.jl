@@ -236,15 +236,18 @@ function solve_spice_mna(spice_code::String; temp::Real=27.0)
 end
 
 """
-    sp"..."
+    mna_sp"..."
 
 Parse SPICE code and generate an MNA builder function.
 
 The result is a callable that takes (params, spec) and returns an MNAContext.
 
+Note: This is the MNA version of @sp_str (which uses DAECompiler).
+Use this during the Phase 4 transition period.
+
 # Example
 ```julia
-circuit = sp\"\"\"
+circuit = mna_sp\"\"\"
 V1 vcc 0 DC 5
 R1 vcc out 1k
 R2 out 0 1k
@@ -254,7 +257,7 @@ sol = solve_dc(ctx)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-macro sp_str(str, flag="")
+macro mna_sp_str(str, flag="")
     enable_julia_escape = 'e' in flag
     inline = 'i' in flag
     sa = SpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,

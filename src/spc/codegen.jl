@@ -4,29 +4,9 @@ struct CodegenState
     sema::SemaResult
 end
 
-LString(s::SNode{<:SP.Terminal}) = lowercase(String(s))
-LString(s::SNode{<:SP.AbstractASTNode}) = lowercase(String(s))
-LString(s::SNode{<:SC.Terminal}) = String(s)
-LString(s::SNode{<:SC.AbstractASTNode}) = String(s)
-LString(s::AbstractString) = lowercase(s)
-LString(s::Symbol) = lowercase(String(s))
-LSymbol(s) = Symbol(LString(s))
-
-function Base.LineNumberNode(n::SNode)
-    sf = n.ps.srcfile
-    lsf = sf.lineinfo
-    lno_first = SpectreNetlistParser.LineNumbers.compute_line(lsf, n.startof+n.expr.off)
-    LineNumberNode(lno_first, Symbol(sf.path))
-end
-
-function hasparam(params, name)
-    for p in params
-        if LString(p.name) == name
-            return true
-        end
-    end
-    return false
-end
+# LString and LSymbol are defined in spectre.jl
+# LineNumberNode is defined in SpectreNetlistCSTParser
+# hasparam is defined in spectre.jl
 
 function cg_net_name!(state::CodegenState, net)
     return LSymbol(net)
@@ -56,13 +36,18 @@ Codegen a SPICE or Spectre expression `expr` to julia.
 """
 function cg_expr! end
 
-cg_expr!(state::CodegenState, cs::Union{SNode{SP.NumericValue}, SNode{SC.NumericValue}}) = cg_expr!(state, cs.val)
-function cg_expr!(state::CodegenState, cs::SNode{SC.FloatLiteral})
+# Phase 0: NumberLiteral is now the leaf node (FloatLiteral/IntLiteral don't exist)
+function cg_expr!(state::CodegenState, cs::SNode{SC.NumberLiteral})
     txt = String(cs)
-    sf = 1
-    if txt[end] ∈ keys(spectre_magnitudes)
+    sf = d"1"
+    if !isempty(txt) && txt[end] ∈ keys(spectre_magnitudes)
         sf = spectre_magnitudes[txt[end]]
         txt = txt[begin:end-1]
+    end
+    # Try to parse as integer first, then as float
+    ret = tryparse(Int64, txt)
+    if ret !== nothing
+        return ret * Float64(sf)
     end
     ret = Base.parse(Dec64, txt)
     ret *= sf
@@ -104,22 +89,23 @@ const spice_regex = Regex("($(join(keys(spice_magnitudes), "|")))\$")
 
 const binning_rx = r"(.*)\.([0-9]+)"
 
-function cg_expr!(state::CodegenState, cs::SNode{SP.FloatLiteral})
+# Phase 0: NumberLiteral is now the leaf node (FloatLiteral/IntLiteral don't exist)
+function cg_expr!(state::CodegenState, cs::SNode{SP.NumberLiteral})
     txt = lowercase(String(cs))
-    sf = 1
+    sf = d"1"
     m = match(spice_regex, txt)
     if m !== nothing && haskey(spice_magnitudes, m.match)
         sf = spice_magnitudes[m.match]
         txt = txt[begin:end-length(m.match)]
     end
+    # Try to parse as integer first, then as float
+    ret = tryparse(Int64, txt)
+    if ret !== nothing
+        return ret * Float64(sf)
+    end
     ret = Base.parse(Dec64, txt)
     ret *= sf
     return Float64(ret)
-end
-
-function cg_expr!(state::CodegenState, cs::Union{SNode{SC.IntLiteral}, SNode{SP.IntLiteral}})
-    txt = String(cs)
-    Base.parse(Int64, txt)
 end
 
 function cg_expr!(state::CodegenState, cs::SNode{SP.JuliaEscape})
@@ -247,10 +233,7 @@ function cg_instance!(state::CodegenState, instance::SNode{SP.SubcktCall})
     ret
 end
 
-function cg_instance!(state::CodegenState, instance::SNode{SP.VAModelCall})
-    model = cg_model_name!(state, LSymbol(instance.model))
-    return cg_spice_instance!(state, sema_nets(instance), instance.name, model, cg_params!(state, instance.params))
-end
+# Phase 0: VAModelCall doesn't exist in the parser
 
 function cg_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     # if params contains r or l, val is the model or nothing
@@ -316,18 +299,7 @@ function cg_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltage, S
     return cg_spice_instance!(state, [instance.pos, instance.neg], instance.name, constructor, kws)
 end
 
-function devtype_param(model_kind, mosfet_kind)
-    if model_kind.name === :bsim4
-        return :TYPE => (mosfet_kind == :pmos ? -1 : 1)
-    elseif startswith(String(model_kind.name), "bsimcmg")
-        return :DEVTYPE => (mosfet_kind == :pmos ? 0 : 1)
-    elseif model_kind == :UnimplementedDevice
-        # skip
-        return nothing
-    else
-        error("Needs to be filled in per model")
-    end
-end
+# devtype_param is defined in spectre.jl
 
 function cg_model_def!(state::CodegenState, (model, modelref)::Pair{<:SNode, GlobalRef}, bins::Dict{Symbol, Vector{Symbol}})
     params = Any[]
@@ -692,9 +664,9 @@ function cg_mna_instance!(state::CodegenState, ::Val{:mna}, instance::SNode{SP.C
 end
 
 """
-Generate stamp! call for a VCVS (E element).
+Generate stamp! call for a VCVS (E element) - ControlledSource{:V,:V}.
 """
-function cg_mna_instance!(state::CodegenState, instance::SNode{SP.VCVS})
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:V}})
     nets = sema_nets(instance)
     out_p = cg_net_name!(state, nets[1])
     out_n = cg_net_name!(state, nets[2])
@@ -718,9 +690,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.VCVS})
 end
 
 """
-Generate stamp! call for a VCCS (G element).
+Generate stamp! call for a VCCS (G element) - ControlledSource{:V,:C}.
 """
-function cg_mna_instance!(state::CodegenState, instance::SNode{SP.VCCS})
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSource{:V,:C}})
     nets = sema_nets(instance)
     out_p = cg_net_name!(state, nets[1])
     out_n = cg_net_name!(state, nets[2])

@@ -534,12 +534,15 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
 end
 
 """
-    make_ode_problem_timed(builder, params, tspan; temp=27.0, dc_for_ic=true)
+    make_ode_problem(builder, params, tspan; temp=27.0, dc_for_ic=true)
 
-Create an ODE problem for circuits with time-dependent sources (PWL, SIN, etc.).
+Create an ODE problem from a circuit builder function.
 
-This version rebuilds b(t) at each timestep by calling the circuit builder
-with updated time in the spec. G and C matrices are assumed constant.
+This is the primary API for transient simulation. Time-dependent sources
+(PWL, SIN, PULSE) are handled automatically by passing `spec.time` to stamps.
+
+The builder is called at each timestep to update b(t), while G and C
+matrices are assumed constant (linear circuit topology).
 
 # Arguments
 - `builder`: Circuit builder function `(params, spec) -> MNAContext`
@@ -549,7 +552,14 @@ with updated time in the spec. G and C matrices are assumed constant.
 - `dc_for_ic`: Use DC operating point for initial condition (default: true)
 
 # Returns
-NamedTuple with fields for ODEProblem construction, same as `make_ode_problem`.
+NamedTuple with fields for ODEProblem construction:
+- `f`: RHS function
+- `u0`: Initial condition
+- `tspan`: Time span
+- `mass_matrix`: C matrix
+- `jac`: Jacobian function
+- `jac_prototype`: Sparsity pattern
+- `sys`: Reference MNASystem
 
 # Example
 ```julia
@@ -566,11 +576,16 @@ function build_pwl_circuit(params, spec)
     return ctx
 end
 
-prob_data = make_ode_problem_timed(build_pwl_circuit, (R=1e3, C=1e-6), (0.0, 10e-3))
+prob_data = make_ode_problem(build_pwl_circuit, (R=1e3, C=1e-6), (0.0, 10e-3))
+
+using OrdinaryDiffEq
+f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix)
+prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+sol = solve(prob, Rodas5P())
 ```
 """
-function make_ode_problem_timed(builder::F, params::P, tspan::Tuple{Real,Real};
-                                temp::Real=27.0, dc_for_ic::Bool=true) where {F,P}
+function make_ode_problem(builder::F, params::P, tspan::Tuple{Real,Real};
+                          temp::Real=27.0, dc_for_ic::Bool=true) where {F,P}
     base_spec = MNASpec(temp=Float64(temp), mode=:tran, time=0.0)
 
     # Get ODE function components
@@ -597,6 +612,9 @@ function make_ode_problem_timed(builder::F, params::P, tspan::Tuple{Real,Real};
         sys = ode_funcs.sys0
     )
 end
+
+# Alias for backwards compatibility
+const make_ode_problem_timed = make_ode_problem
 
 export make_ode_problem_timed
 

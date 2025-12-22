@@ -220,14 +220,16 @@ end
 ```
 
 When called with `IdentityLens()` or an empty `ParamLens()`:
+- Julia specializes on the lens **type**
+- Since `IdentityLens` always returns defaults, the compiler sees through it
 - All values use the in-function literals → **all constants**
 
 When called with `ParamLens((params=(R=2000.0,),))`:
-- `R` comes from the lens → **not constant**
+- `R` is loaded from the lens struct at runtime → **not constant**
 - `C` and `Vcc` use literals → **still constants**
 
-This is why the pattern is "defaults in function, overrides in lens" rather than
-"pass all parameters as arguments".
+The type specialization is key: `IdentityLens` as a type guarantees defaults are used,
+so even when passed as an argument, the compiler can constant-fold.
 
 ### The Closure Boxing Problem
 
@@ -333,9 +335,10 @@ end
 | Category | Optimized? | Reason |
 |----------|------------|--------|
 | Literal `R = 1000.0` in function | ✅ Yes | Compiler sees the literal |
-| `lens(; R=1000.0)` when lens doesn't override R | ✅ Yes | Falls through to literal |
-| `lens(; R=1000.0)` when lens overrides R | ❌ No | Value comes from lens |
-| Any value passed as function argument | ❌ No | Julia specializes on types, not values |
+| `IdentityLens()(; R=1000.0)` | ✅ Yes | Type guarantees defaults used |
+| `ParamLens(...)(; R=1000.0)` when lens overrides R | ❌ No | Value loaded from lens at runtime |
+| `ParamLens(...)(; R=1000.0)` when lens doesn't override R | ✅ Yes | Falls through to literal |
+| Scalar argument (e.g. `f(R::Float64)`) | ❌ No | Julia specializes on types, not values |
 | Time `t` | ❌ No | Changes each ODE step |
 | Solution `u` | ❌ No | Changes each Newton iteration |
 

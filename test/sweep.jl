@@ -297,6 +297,80 @@ end
     end
 end
 
+# Test nested parameter access with var-strings
+# Builder that uses nested params: params.inner.R1, params.inner.R2
+function build_nested_resistor(params, spec)
+    ctx = MNAContext()
+    vcc = get_node!(ctx, :vcc)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(1.0; name=:V), ctx, vcc, 0)
+    stamp!(Resistor(params.inner.R1), ctx, vcc, out)
+    stamp!(Resistor(params.inner.R2), ctx, out, 0)
+
+    return ctx
+end
+
+@testset "nested params in CircuitSweep" begin
+    # Test that var-strings reach into nested parameter structures
+    sweep = ProductSweep(
+        TandemSweep(var"inner.R1" = 100.0:100.0:200.0,
+                    var"inner.R2" = 100.0:100.0:200.0),
+    )
+
+    # Default params provide the nested structure
+    cs = CircuitSweep(build_nested_resistor, sweep;
+                      inner = (R1 = 100.0, R2 = 100.0))
+
+    @test length(cs) == 2
+    @test first(cs).params.inner.R1 == 100.0
+    @test first(cs).params.inner.R2 == 100.0
+    @test last(collect(cs)).params.inner.R1 == 200.0
+    @test last(collect(cs)).params.inner.R2 == 200.0
+
+    @test length(sweepvars(cs)) == 2
+    @test Symbol("inner.R1") ∈ sweepvars(cs)
+    @test Symbol("inner.R2") ∈ sweepvars(cs)
+
+    # Verify the circuit works
+    solutions = dc!(cs)
+    for (sol, sim) in zip(solutions, cs)
+        R1 = sim.params.inner.R1
+        R2 = sim.params.inner.R2
+        @test isapprox(current(sol, :I_V), -1/(R1 + R2); atol=deftol)
+    end
+end
+
+# TODO: Re-enable when SPICE codegen is ported to MNA backend
+# @testset "dc! sweep on spice code" begin
+#     spice_code =
+#     """
+#         * Parameter scoping test
+#
+#         .subckt subcircuit1 vss gnd
+#         .param r_load=1
+#         r1 vss gnd 'r_load'
+#         .ends
+#
+#         .param v_in=1
+#         x1 vss 0 subcircuit1
+#         v1 vss 0 'v_in'
+#     """
+#     circuit_code = CedarSim.make_spectre_circuit(
+#         CedarSim.SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_code),
+#     );
+#     circuit = eval(circuit_code);
+#     cs = CircuitSweep(circuit, ProductSweep(v_in = 1.0:10.0, var"x1.r_load" = 1.0:10.0))
+#     solutions = dc!(cs; abstol=deftol, reltol=deftol)
+#
+#     for sol in solutions
+#         params = sol.prob.p.params
+#         v_in = params.params.v_in
+#         r_load = params.x1.params.r_load
+#         @test isapprox_deftol(v_in/r_load, sol[cs.sys.x1.r1.I][end])
+#     end
+# end
+
 @testset "find_param_ranges" begin
     # Create a nasty complicated parameter exploration
     params = ProductSweep(

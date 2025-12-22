@@ -11,6 +11,7 @@
 
 using LinearAlgebra
 using SparseArrays
+using Accessors
 
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
@@ -693,8 +694,27 @@ function with_temp(sim::MNASim, temp::Real)
 end
 
 # Create a new sim with altered circuit parameters
+# Supports nested paths via var-strings: alter(sim; var"inner.R1" = 100.0)
 function alter(sim::MNASim; kwargs...)
-    new_params = merge(sim.params, NamedTuple(kwargs))
+    # Helper to convert symbol to lens (handles nested paths like "a.b.c")
+    function to_lens(selector::Symbol)
+        parts = Symbol.(split(string(selector), "."))
+        return Accessors.opticcompose(PropertyLens.(parts)...)
+    end
+
+    new_params = sim.params
+    for (selector, value) in pairs(kwargs)
+        if value === nothing
+            continue  # Skip nothing values (sentinel for "use default")
+        end
+        lens = to_lens(selector)
+        # Auto-convert numeric types to Float64 if the target is Float64
+        if isa(value, Number) && isa(lens(new_params), Float64)
+            value = Float64(value)
+        end
+        new_params = Accessors.set(new_params, lens, value)
+    end
+
     return MNASim(sim.builder; spec=sim.spec, new_params...)
 end
 

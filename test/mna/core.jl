@@ -1317,6 +1317,81 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test sol(5τ)[2] ≈ 5.0 rtol=1e-2  # ~5V at t=5τ
     end
 
+    @testset "ParamLens with unmodified parameters" begin
+        # Import CedarSim's actual ParamLens infrastructure
+        using CedarSim: ParamLens, IdentityLens
+
+        # Test 1: IdentityLens returns defaults unchanged
+        ident = IdentityLens()
+        defaults = ident(; R=1000.0, C=1e-6, Vcc=5.0)
+        @test defaults.R == 1000.0
+        @test defaults.C == 1e-6
+        @test defaults.Vcc == 5.0
+
+        # Test 2: ParamLens with no overrides (empty) acts like IdentityLens
+        empty_lens = ParamLens()
+        defaults2 = empty_lens(; R=1000.0, C=1e-6)
+        @test defaults2.R == 1000.0
+        @test defaults2.C == 1e-6
+
+        # Test 3: ParamLens with partial overrides - unmodified params use defaults
+        # This is the key test: only override R, leave C at default
+        partial_lens = ParamLens((params=(R=2000.0,),))
+        merged = partial_lens(; R=1000.0, C=1e-6)
+        @test merged.R == 2000.0  # Overridden
+        @test merged.C == 1e-6    # Uses default (unmodified)
+
+        # Test 4: Use ParamLens in a circuit builder
+        function build_with_lens(lens, spec)
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # lens(; defaults...) returns params with lens overrides merged
+            p = lens(; Vcc=5.0, R1=1000.0, R2=1000.0)
+
+            stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
+            stamp!(Resistor(p.R1), ctx, vcc, out)
+            stamp!(Resistor(p.R2), ctx, out, 0)
+
+            return ctx
+        end
+
+        # With identity lens: all defaults
+        ctx_default = build_with_lens(IdentityLens(), MNASpec())
+        sys_default = assemble!(ctx_default)
+        sol_default = solve_dc(sys_default)
+        @test voltage(sol_default, :out) ≈ 2.5  # 5V * 1k/(1k+1k)
+
+        # With partial override: only R1 changed
+        override_lens = ParamLens((params=(R1=3000.0,),))
+        ctx_override = build_with_lens(override_lens, MNASpec())
+        sys_override = assemble!(ctx_override)
+        sol_override = solve_dc(sys_override)
+        # Vout = 5V * R2/(R1+R2) = 5 * 1000/4000 = 1.25V
+        @test voltage(sol_override, :out) ≈ 1.25 rtol=1e-6
+
+        # Verify R2 and Vcc still at defaults (unmodified)
+        # We can check by computing what voltage would be with different values
+        # If R2=2000: Vout = 5 * 2000/5000 = 2.0V (not what we see)
+        # So R2 must be at default 1000
+        @test voltage(sol_override, :vcc) ≈ 5.0  # Vcc at default
+
+        # Test 5: Hierarchical lens traversal
+        # lens.subcircuit returns a new lens for that subcircuit
+        hier_lens = ParamLens((sub1=(params=(R=500.0,),),))
+        sub_lens = getproperty(hier_lens, :sub1)
+        sub_params = sub_lens(; R=1000.0, C=1e-6)
+        @test sub_params.R == 500.0  # Override from sub1
+        @test sub_params.C == 1e-6   # Default (unmodified)
+
+        # Accessing undefined subcircuit returns IdentityLens
+        other_lens = getproperty(hier_lens, :sub2)
+        @test other_lens isa IdentityLens
+        other_params = other_lens(; R=1000.0)
+        @test other_params.R == 1000.0  # All defaults
+    end
+
     @testset "MNASpec and temperature" begin
         # Test MNASpec creation and manipulation
         spec = MNASpec()

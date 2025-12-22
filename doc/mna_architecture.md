@@ -166,6 +166,183 @@ For single large circuits:
 - Iterative solvers via Krylov.jl
 - Direct solvers via CUDSS.jl
 
+## Parameterization and Constant Folding
+
+This section documents the careful design of the parameterization system to enable
+Julia's JIT compiler to optimize parameters as constants.
+
+### The Optimization Goal
+
+Circuit simulation performance depends critically on the compiler recognizing that
+certain values (like resistor values) are constant during a simulation run. When
+the compiler knows a value is constant, it can:
+
+1. **Inline the value** directly into machine code
+2. **Eliminate dead branches** (e.g., `mode == :dcop` becomes `true` or `false`)
+3. **Fold arithmetic** at compile time
+4. **Unroll loops** with known bounds
+
+### Why Explicit Passing Matters
+
+Julia's JIT specializes functions on **argument types**, not values. However, when
+arguments are **immutable structs with concrete types**, the values become available
+for constant propagation.
+
+```julia
+# This enables optimization:
+struct MNASpec
+    temp::Float64   # Concrete type
+    mode::Symbol    # Concrete type
+end
+
+function build_circuit(params::NamedTuple{(:R,:C), Tuple{Float64,Float64}}, spec::MNASpec)
+    # Julia specializes on the *types* of params and spec
+    # Since NamedTuple and MNASpec are immutable, values propagate
+    R = params.R  # Compiler knows this is Float64, can inline if constant
+    ...
+end
+```
+
+### The Closure Boxing Problem
+
+Julia implements closures as structs, but captured variables that might be reassigned
+are "boxed" in `Core.Box`, preventing optimization:
+
+```julia
+# BAD: Closure captures boxed variable
+function make_circuit_fn(R)
+    return (G, b) -> begin
+        stamp!(G, R)  # R is in a Core.Box - NOT optimized
+    end
+end
+
+# GOOD: Pass as argument
+function circuit_fn!(G, b, params)
+    stamp!(G, params.R)  # params is an argument - optimized
+end
+```
+
+This is why MNASim passes `(params, spec)` as arguments rather than capturing them.
+
+### Type Specialization Strategy
+
+The parameterization system uses several techniques to enable constant folding:
+
+#### 1. Concrete NamedTuple Types
+
+Parameters are stored in NamedTuples with concrete field types:
+
+```julia
+params = (R=1000.0, C=1e-6)  # typeof: NamedTuple{(:R,:C), Tuple{Float64,Float64}}
+```
+
+Each unique set of parameter **names** creates a new type. The JIT specializes
+the circuit function for each parameter set, enabling field access optimization.
+
+#### 2. Immutable Structs for Spec
+
+MNASpec is an immutable struct:
+
+```julia
+struct MNASpec
+    temp::Float64
+    mode::Symbol
+end
+```
+
+When passed to a function, the fields can be inlined. Mode checks like
+`spec.mode == :dcop` can be eliminated if the mode is known.
+
+#### 3. SSA-Style Parameter Updates
+
+Using Accessors.jl `@set` creates new bindings rather than mutating:
+
+```julia
+spec1 = MNASpec(temp=27.0, mode=:tran)
+spec2 = @set spec1.temp = 50.0  # New binding, spec1 unchanged
+# After this, spec2.temp is known to be 50.0
+```
+
+This maintains SSA (Static Single Assignment) form, which compilers optimize well.
+
+### ParamLens Integration
+
+For hierarchical circuits, ParamLens provides type-specialized parameter lookup:
+
+```julia
+struct ParamLens{NT<:NamedTuple}
+    nt::NT
+end
+
+# Accessing a subcircuit returns a new, typed lens
+Base.getproperty(lens::ParamLens{T}, sym::Symbol) where T = ...
+
+# Calling the lens merges defaults with overrides
+(lens::ParamLens)(; defaults...) = merge(defaults, lens.nt.params)
+```
+
+The key insight: each `getproperty` call returns a **new lens type**, specialized
+on the remaining parameter structure. This enables the compiler to see through
+the lens abstraction.
+
+Example:
+```julia
+function build_subcircuit(lens, spec)
+    # lens(; R=1000.0) returns params with R defaulting to 1000.0
+    # but overridden if lens contains R
+    p = lens(; R=1000.0, C=1e-6)
+
+    # If lens doesn't override R, compiler sees p.R as constant 1000.0
+    stamp!(Resistor(p.R), ctx, n1, n2)
+end
+```
+
+### Verifying Optimization
+
+To verify that parameters are being constant-folded, use `@code_llvm` or `@code_native`:
+
+```julia
+function stamp_test(params)
+    G = zeros(2, 2)
+    g = 1.0 / params.R
+    G[1,1] = g
+    G[1,2] = -g
+    G[2,1] = -g
+    G[2,2] = g
+    return G
+end
+
+# Check that R=1000.0 is inlined:
+@code_llvm stamp_test((R=1000.0,))
+# Should show: 0.001 (1/1000) as a constant, no division at runtime
+```
+
+### What Gets Optimized vs. What Doesn't
+
+| Category | Optimized? | Reason |
+|----------|------------|--------|
+| Resistor value `params.R` | ✅ Yes | Immutable NamedTuple field |
+| Temperature `spec.temp` | ✅ Yes | Immutable struct field |
+| Mode check `spec.mode == :dcop` | ✅ Yes | Symbol comparison, branch eliminated |
+| Time `t` | ❌ No | Changes each ODE step |
+| Solution `u` | ❌ No | Changes each Newton iteration |
+| PWL interpolation | ❌ No | Depends on runtime `t` |
+
+### MNASim vs ParamSim
+
+| Feature | MNASim | ParamSim |
+|---------|--------|----------|
+| Parameter passing | Explicit `(params, spec)` | Via `ParamLens` + `ScopedValue` |
+| Spec access | `spec.temp` | `spec[].temp` (ScopedValue) |
+| Mode access | `spec.mode` | `sim_mode[]` (ScopedValue) |
+| Constant folding | Via JIT on arguments | Via DAECompiler magic |
+| Closure safety | ✅ No boxing | Requires DAECompiler |
+| Hierarchical params | Manual lens passing | Automatic via ParamLens |
+
+MNASim is designed for the non-DAECompiler path where we rely purely on Julia's
+JIT for optimization. ParamSim uses DAECompiler's ability to treat ScopedValue
+reads as constants during compilation.
+
 ## Comparison with OpenVAF/OSDI
 
 OpenVAF's OSDI interface separates:

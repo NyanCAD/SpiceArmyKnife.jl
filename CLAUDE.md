@@ -5,9 +5,10 @@
 - **Julia is NOT pre-installed** - install juliaup first:
   - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
   - Then source the profile: `. ~/.bashrc`
+  - Set Julia 1.11 as default: `~/.juliaup/bin/juliaup default 1.11`
   - Use `~/.juliaup/bin/julia` to run Julia
-  - Example: `~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test()'`
-- **Use Julia 1.12** (default from juliaup) - this is what CI uses
+- **Use Julia 1.11** - this is what CI uses and what the Manifest.toml is locked to
+  - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
   - Don't add compatibility hacks for older Julia versions
 
 ## Development Guidelines
@@ -40,12 +41,12 @@ Read these files in `doc/` for detailed design information:
 
 ## Testing
 
-Run MNA tests directly to avoid Enzyme precompilation issues:
+Run MNA tests directly:
 ```bash
 ~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
 ```
 
-Or run specific test files:
+Or run specific test files directly:
 ```bash
 ~/.juliaup/bin/julia --project=. test/mna/core.jl
 ~/.juliaup/bin/julia --project=. test/sweep.jl

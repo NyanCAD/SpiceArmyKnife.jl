@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.12'
+          - '1.11'
         os:
           - ubuntu-latest
 
@@ -33,11 +33,7 @@ jobs:
       - uses: julia-actions/cache@v2
 
       - name: Install dependencies
-        run: |
-          julia --project=. -e '
-            using Pkg
-            Pkg.instantiate()
-          '
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
 
       - name: Run SpectreNetlistParser tests
         run: |
@@ -59,7 +55,6 @@ jobs:
         run: |
           julia --project=test -e '
             using Pkg
-            # Develop the main package and subpackages in test environment
             Pkg.develop([
               PackageSpec(path="."),
               PackageSpec(path="SpectreNetlistParser.jl"),

@@ -14,6 +14,9 @@ Lexers = "8fc43420-9e17-4e89-a998-f4e9593a1dfc"
 SnoopPrecompile = "66db9d55-30c0-4569-8b51-7e840670fc0c"
 VT100 = "7774df62-37c0-5c21-b34d-f6d7f98f54bc"
 
+[sources]
+Lexers = {path = "../Lexers.jl"}
+
 [compat]
 AbstractTrees = "v0.4.1"
 julia = "1"

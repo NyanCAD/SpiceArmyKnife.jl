@@ -275,7 +275,7 @@ function cg_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     if hasparam(instance.params, "l") || hasparam(instance.params, "r")
         model = GlobalRef(SpectreEnvironment, :resistor)
         if instance.val !== nothing
-            model = cg_model_name!(state, isntance.val)
+            model = cg_model_name!(state, instance.val)
         end
         return cg_spice_instance!(state, sema_nets(instance), instance.name, model, cg_params!(state, instance.params))
     else
@@ -1090,8 +1090,34 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
         end
 
     else
-        # Unknown master type - skip with warning comment
-        return :(nothing)  # TODO: handle $(master)
+        # Check if this is a user-defined subcircuit
+        master_sym = Symbol(lowercase(String(instance.master)))
+        if haskey(state.sema.subckts, master_sym)
+            # User-defined subcircuit - generate call to subcircuit builder
+            instance_name = Symbol(LString(instance.name))
+            builder_name = Symbol(master_sym, "_mna_builder")
+
+            # Port expressions - the nodes connected to this instance
+            port_exprs = [cg_net_name!(state, net) for net in nets]
+
+            # Extract explicit parameters from instance
+            explicit_kwargs = Expr[]
+            for p in instance.params
+                param_name = LSymbol(p.name)
+                param_val = cg_expr!(state, p.val)
+                push!(explicit_kwargs, Expr(:kw, param_name, param_val))
+            end
+
+            # Generate subcircuit call similar to SPICE SubcktCall
+            return quote
+                let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
+                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
+                end
+            end
+        else
+            # Unknown master type - skip with warning comment
+            return :(nothing)  # TODO: handle $(master)
+        end
     end
 end
 
@@ -1301,8 +1327,19 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     # Parameters from lens - set up lens for parameter access
     # For subcircuits, lens is a function argument named `lens`
     # For top-level, we wrap the `params` argument
+    # Check for SPICE SubcktCall or Spectre Instance calls to user-defined subcircuits
     has_subcircuit_calls = any(state.sema.instances) do (name, insts)
-        any(inst -> inst[2].val isa SNode{SP.SubcktCall}, insts)
+        any(insts) do inst
+            instance = inst[2].val
+            if instance isa SNode{SP.SubcktCall}
+                return true
+            elseif instance isa SNode{SC.Instance}
+                # Check if master is a user-defined subcircuit
+                master_sym = Symbol(lowercase(String(instance.master)))
+                return haskey(state.sema.subckts, master_sym)
+            end
+            return false
+        end
     end
     needs_lens = !isempty(state.sema.formal_parameters) || !isempty(state.sema.exposed_parameters) ||
                  !isempty(state.sema.params) || has_subcircuit_calls
@@ -1418,15 +1455,30 @@ end
     extract_subcircuit_ports(sema::SemaResult) -> Vector{Symbol}
 
 Extract port names from a subcircuit's AST.
-Ports are the HierarchialNode children of the Subckt AST node.
+Handles both SPICE (.SUBCKT) and Spectre (subckt) syntax.
 """
 function extract_subcircuit_ports(sema::SemaResult)
     ports = Symbol[]
     subckt_ast = sema.ast
-    for child in SpectreNetlistParser.RedTree.children(subckt_ast)
-        if child !== nothing && isa(child, SNode{SP.HierarchialNode})
-            port_name = LSymbol(child)
-            push!(ports, port_name)
+
+    # Check if this is a Spectre subcircuit
+    if subckt_ast isa SNode{SC.Subckt}
+        # Spectre: ports are in subckt_nodes.nodes
+        subckt_nodes = subckt_ast.subckt_nodes
+        if subckt_nodes !== nothing && subckt_nodes.nodes !== nothing
+            for snode in subckt_nodes.nodes
+                # Each snode has a .node field (Identifier or NumberLiteral)
+                port_name = LSymbol(snode.node)
+                push!(ports, port_name)
+            end
+        end
+    else
+        # SPICE: ports are HierarchialNode children
+        for child in SpectreNetlistParser.RedTree.children(subckt_ast)
+            if child !== nothing && isa(child, SNode{SP.HierarchialNode})
+                port_name = LSymbol(child)
+                push!(ports, port_name)
+            end
         end
     end
     return ports

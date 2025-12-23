@@ -109,12 +109,33 @@ const c_val = 1e-6
     @test isapprox(c_i_end, 0.0; atol=1e-6)  # Nearly zero current
 end
 
-#=
 @testset "Simple Spectre sources" begin
-    # TODO: Spectre parsing needs MNA codegen support
-    # Original test used solve_spectre_file
+    # Simple resistor divider in Spectre format
+    spectre_code = """
+    // Simple Spectre voltage divider
+    v1 (vcc 0) vsource dc=5
+    r1 (vcc out) resistor r=1k
+    r2 (out 0) resistor r=1k
+    """
+
+    ctx, sol = solve_mna_spectre_code(spectre_code)
+    # Voltage divider: 5V * (1k / (1k + 1k)) = 2.5V
+    @test isapprox_deftol(voltage(sol, :out), 2.5)
+    @test isapprox_deftol(voltage(sol, :vcc), 5.0)
 end
-=#
+
+@testset "Spectre current source" begin
+    # Current source with resistor in Spectre format
+    spectre_code = """
+    // Spectre current source test
+    i1 (vcc 0) isource dc=1m
+    r1 (vcc 0) resistor r=1k
+    """
+
+    ctx, sol = solve_mna_spectre_code(spectre_code)
+    # V = I * R = 1mA * 1kΩ = 1V
+    @test isapprox_deftol(voltage(sol, :vcc), 1.0)
+end
 
 @testset "Simple SPICE sources" begin
     # Original SPICE code (same as original test)

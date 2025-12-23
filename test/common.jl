@@ -175,6 +175,42 @@ function solve_mna_spice_code(spice_code::String; temp::Real=27.0)
 end
 
 """
+    solve_mna_spectre_code(spectre_code::String; temp=27.0) -> (ctx, sol)
+
+Parse Spectre code and solve DC operating point using MNA backend.
+Returns (MNAContext, DCSolution).
+
+# Example
+```julia
+code = \"\"\"
+v1 (vcc 0) vsource dc=5
+r1 (vcc out) resistor r=1k
+r2 (out 0) resistor r=1k
+\"\"\"
+ctx, sol = solve_mna_spectre_code(code)
+voltage(sol, :out)  # Returns 2.5
+```
+"""
+function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0)
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
+    code = CedarSim.make_mna_circuit(ast)
+
+    # Evaluate in temporary module
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    circuit_fn = Base.eval(m, code)
+
+    spec = MNASpec(temp=Float64(temp), mode=:dcop)
+    ctx = Base.invokelatest(circuit_fn, (;), spec)
+    sys = assemble!(ctx)
+    sol = solve_dc(sys)
+
+    return ctx, sol
+end
+
+"""
     solve_mna_circuit(builder; params=(;), temp=27.0) -> (ctx, sol)
 
 Build and solve a circuit using MNA backend.

@@ -8,3 +8,7 @@ docs/Manifest.toml
 docs/build
 test/Manifest.toml
 refs/
+
+# Downloaded reference documentation (not committed due to copyright)
+doc/*.pdf
+doc/*.txt

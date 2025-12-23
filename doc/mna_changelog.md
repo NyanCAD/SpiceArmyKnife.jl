@@ -1035,21 +1035,25 @@ end
 
 ### Remaining Work (Phase 4)
 
-**Medium Priority:**
-1. **Unit suffix parsing** - SPICE unit suffixes like `mAmp`, `MegQux` not fully supported
-2. **.LIB include handling** - Library file includes not implemented (requires sema caching for self-referential includes)
-3. **SPICE functions** - Built-in functions (int, floor, ceil, etc.) not implemented in expression evaluator
-4. **Spectre source MNA codegen** - Requires sema support for Instance nodes
+**High Priority:**
+1. **.LIB include handling** - Library file includes not implemented (requires sema caching for self-referential includes)
+
+**Low Priority:**
+2. **Spectre subcircuit codegen** - Native Spectre subcircuits (`subckt`/`ends`) not yet supported
+3. **Edge case testing** - Verify all device types and parameter combinations work correctly
 
 **Completed:**
 - ~~Subcircuit port handling~~ ✅
 - ~~Subcircuit parameter passing~~ ✅
 - ~~.if/.else conditionals~~ ✅
 - ~~ParamObserver support~~ ✅
+- ~~Unit suffix parsing~~ ✅ (mAmp, MegQux, Mil, etc. - implemented in `cg_expr!` for `SP.NumberLiteral`)
+- ~~SPICE functions~~ ✅ (int, nint, floor, ceil, pow, ln - implemented in `SpectreEnvironment`)
+- ~~Spectre basic device codegen~~ ✅ (resistor, capacitor, inductor, vsource, isource, vcvs, vccs)
 
 **Next Steps:**
+- .LIB handling requires sema caching for self-referential includes
 - Phase 5 (VA Contribution Functions) can begin in parallel
-- .LIB handling requires architectural changes to sema caching
 
 ---
 
@@ -1095,6 +1099,11 @@ Remove dead code, DAECompiler remnants, and unused stubs.
 ## References
 
 - `doc/mna_design.md` - Main design document
+- `doc/mna_architecture.md` - Detailed architecture and parameterization patterns
 - `doc/mna_ad_stamping.md` - AD-based stamping approach (if exists)
 - DAECompiler.jl - Original backend (for reference)
 - ngspice - Validation reference
+
+### External Documentation
+- [Virtuoso Spectre Circuit Simulator Reference](https://amarketplaceofideas.com/wp-content/uploads/2015/09/Virtuoso-Spectre-Circuit-Simulator-Reference.pdf) - Cadence Spectre 11.1 manual (see Chapter 4 for syntax)
+- [SPICE Quick Reference](https://web.stanford.edu/class/ee133/handouts/general/spice_ref.pdf) - Stanford EE133 reference

@@ -920,6 +920,181 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     end
 end
 
+#==============================================================================#
+# Spectre Instance Codegen
+#==============================================================================#
+
+"""
+Generate MNA stamp! call for a Spectre instance.
+
+Spectre syntax: name (node1 node2 ...) master param1=val1 param2=val2 ...
+
+Supported masters:
+- resistor: r=value
+- capacitor: c=value
+- inductor: l=value
+- vsource: dc=value, type=pwl/pulse/sine
+- isource: dc=value, type=pwl/pulse/sine
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
+    master = lowercase(String(instance.master))
+    nets = sema_nets(instance)
+    name = LString(instance.name)
+
+    if master == "resistor"
+        length(nets) >= 2 || error("resistor requires 2 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+
+        r_expr = if hasparam(instance.params, "r")
+            cg_expr!(state, getparam(instance.params, "r"))
+        else
+            1000.0  # Default 1k
+        end
+
+        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+
+        return quote
+            let r_val = $r_expr, m_val = $m_expr
+                stamp!(Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+
+    elseif master == "capacitor"
+        length(nets) >= 2 || error("capacitor requires 2 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+
+        c_expr = if hasparam(instance.params, "c")
+            cg_expr!(state, getparam(instance.params, "c"))
+        else
+            1e-12  # Default 1pF
+        end
+
+        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+
+        return quote
+            let c_val = $c_expr, m_val = $m_expr
+                stamp!(Capacitor(c_val * m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+
+    elseif master == "inductor"
+        length(nets) >= 2 || error("inductor requires 2 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+
+        l_expr = if hasparam(instance.params, "l")
+            cg_expr!(state, getparam(instance.params, "l"))
+        else
+            1e-6  # Default 1uH
+        end
+
+        m_expr = hasparam(instance.params, "m") ? cg_expr!(state, getparam(instance.params, "m")) : 1
+
+        return quote
+            let l_val = $l_expr, m_val = $m_expr
+                stamp!(Inductor(l_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+
+    elseif master == "vsource"
+        length(nets) >= 2 || error("vsource requires 2 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+
+        dc_val = if hasparam(instance.params, "dc")
+            cg_expr!(state, getparam(instance.params, "dc"))
+        else
+            0.0
+        end
+
+        # Check for transient source types
+        src_type = hasparam(instance.params, "type") ? lowercase(String(getparam(instance.params, "type"))) : nothing
+
+        if src_type == "pwl" && hasparam(instance.params, "wave")
+            # PWL source with wave parameter
+            wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
+            return quote
+                stamp!(PWLVoltageSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        elseif src_type == "sine" || src_type == "sin"
+            # Sinusoidal source
+            vo = hasparam(instance.params, "vo") ? cg_expr!(state, getparam(instance.params, "vo")) : 0.0
+            va = hasparam(instance.params, "va") ? cg_expr!(state, getparam(instance.params, "va")) : 1.0
+            freq = hasparam(instance.params, "freq") ? cg_expr!(state, getparam(instance.params, "freq")) : 1e3
+            return quote
+                stamp!(SinVoltageSource($vo, $va, $freq; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        else
+            # DC source
+            return quote
+                stamp!(VoltageSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+
+    elseif master == "isource"
+        length(nets) >= 2 || error("isource requires 2 nodes")
+        # Spectre convention: isource (p n) means current flows from p to n internally
+        # MNA convention: CurrentSource stamps into p and out of n
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+
+        dc_val = if hasparam(instance.params, "dc")
+            cg_expr!(state, getparam(instance.params, "dc"))
+        else
+            0.0
+        end
+
+        # Check for transient source types
+        src_type = hasparam(instance.params, "type") ? lowercase(String(getparam(instance.params, "type"))) : nothing
+
+        if src_type == "pwl" && hasparam(instance.params, "wave")
+            wave_expr = cg_expr!(state, getparam(instance.params, "wave"))
+            return quote
+                stamp!(PWLCurrentSource($wave_expr; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        else
+            # DC source
+            return quote
+                stamp!(CurrentSource($dc_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+
+    elseif master == "vcvs"
+        # Voltage-controlled voltage source
+        length(nets) >= 4 || error("vcvs requires 4 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+        cp = cg_net_name!(state, nets[3])
+        cn = cg_net_name!(state, nets[4])
+
+        gain = hasparam(instance.params, "gain") ? cg_expr!(state, getparam(instance.params, "gain")) : 1.0
+
+        return quote
+            stamp!(VCVS($gain; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+        end
+
+    elseif master == "vccs"
+        # Voltage-controlled current source
+        length(nets) >= 4 || error("vccs requires 4 nodes")
+        p = cg_net_name!(state, nets[1])
+        n = cg_net_name!(state, nets[2])
+        cp = cg_net_name!(state, nets[3])
+        cn = cg_net_name!(state, nets[4])
+
+        gm = hasparam(instance.params, "gm") ? cg_expr!(state, getparam(instance.params, "gm")) : 1.0
+
+        return quote
+            stamp!(VCCS($gm; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $cp, $cn)
+        end
+
+    else
+        # Unknown master type - skip with warning comment
+        return :(nothing)  # TODO: handle $(master)
+    end
+end
+
 # Fallback for unhandled instance types - generate nothing
 function cg_mna_instance!(state::CodegenState, instance)
     return :(nothing)  # Skip unimplemented devices

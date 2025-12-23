@@ -7,7 +7,15 @@ using Random
 # Phase 0: Conditional imports - simulation packages only if available
 using OrdinaryDiffEq
 using SciMLBase
-using Sundials
+
+# Sundials is optional - needed for DAE solvers but artifacts may fail to download
+const HAS_SUNDIALS = try
+    @eval using Sundials
+    true
+catch e
+    @warn "Sundials not available (artifact download may have failed)" exception=e
+    false
+end
 
 # Phase 0: DAECompiler may not be available
 const HAS_DAECOMPILER = CedarSim.USE_DAECOMPILER

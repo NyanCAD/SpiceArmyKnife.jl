@@ -13,7 +13,7 @@ This document tracks progress on the MNA (Modified Nodal Analysis) migration as 
 | 2 | Simple Device Stamps | **Complete** (merged into Phase 1) | ~200 |
 | 3 | DC & Transient Solvers | **Complete** (merged into Phase 1) | ~300 |
 | 4 | SPICE Codegen | **In Progress** | ~300 |
-| 5 | VA Contribution Functions | Not Started | ~400 |
+| 5 | VA Contribution Functions | **Planning Complete** | ~400 |
 | 6 | Complex VA & DAE | Not Started | ~400 |
 | 7 | Advanced Features | Not Started | ~300 |
 | 8 | Cleanup | Not Started | - |
@@ -1056,11 +1056,75 @@ end
 
 ## Phase 5: VA Contribution Functions
 
-**Status:** Not Started
+**Status:** Planning Complete
+**Date:** 2024-12-23
 **LOC Target:** ~400
+**Design Document:** `doc/phase5_implementation_plan.md`
 
 ### Goal
 Update vasim.jl to emit contribution functions with s-dual ddt().
+
+### Research Completed
+
+1. **Studied existing vasim.jl (940 LOC):**
+   - Generates device structs with call operators
+   - Uses SimTag tagged duals for ddx() functionality
+   - Emits `branch!/kcl!/equation!` primitives from DAECompiler stubs
+
+2. **Studied MNA backend (context, devices, solve):**
+   - Uses stamp! functions with MNAContext
+   - Separates G (resistive) and C (reactive) matrices
+   - MNASpec for mode/temp/time parameters
+
+3. **Explored OpenVAF/OSDI interface:**
+   - Separate `load_residual_resist()`/`load_residual_react()` functions
+   - `JACOBIAN_ENTRY_*_CONST` flags for constant vs variable Jacobian entries
+   - Temperature at setup, abstime at each evaluation
+
+4. **Studied SciML DifferentialEquations.jl patterns:**
+   - Mass matrix ODE: `M * du/dt = f(u,p,t)` with singular M for DAE
+   - ODEFunction with `mass_matrix`, `jac`, `jac_prototype`
+   - DAEProblem with `differential_vars` for initialization
+
+### Key Design Decisions
+
+1. **S-Dual approach for resist/react separation:**
+   - `va_s = Dual(0.0, 1.0)` represents Laplace variable s
+   - `va_ddt(x) = va_s * x` automatically separates contributions
+   - `value(result)` → resistive part (G matrix)
+   - `partials(result, 1)` → reactive part (C matrix via charge)
+
+2. **Nested duals for Jacobian extraction:**
+   - Outer dual: s for resist/react
+   - Inner dual: V for ∂I/∂V (conductance)
+   - ForwardDiff handles nested differentiation automatically
+
+3. **Code generation strategy:**
+   - Transform `make_spice_device(vm)` to `make_mna_device(vm)`
+   - Replace `branch!/kcl!/equation!` with `stamp_*` calls
+   - Generate contribution functions that return duals
+
+### Files to Create/Modify
+
+| File | Change | LOC |
+|------|--------|-----|
+| `src/mna/contrib.jl` | Contribution stamping primitives | ~100 |
+| `src/mna/MNA.jl` | Include contrib.jl | ~5 |
+| `src/vasim.jl` | Add `make_mna_device()` function | ~200 |
+| `src/CedarSim.jl` | Conditional VA codegen path | ~10 |
+| `test/mna/va.jl` | VA MNA integration tests | ~100 |
+
+### Exit Criteria
+
+| Criterion | Test |
+|-----------|------|
+| Simple VA resistor works | `I(p,n) <+ V(p,n)/R` stamps correctly |
+| VA capacitor works | `I(p,n) <+ C*ddt(V(p,n))` stamps into C |
+| VA RC parallel works | Mixed resist/react contribution |
+| VA diode works | Nonlinear `Is*(exp(V/Vt)-1)` |
+| ddx() works | `ddx(expr, V(a,b))` computes partials |
+| DC analysis matches | Compare with ngspice |
+| Transient analysis works | RC charging with VA cap |
 
 ---
 

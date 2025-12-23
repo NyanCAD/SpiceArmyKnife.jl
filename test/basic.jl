@@ -157,10 +157,6 @@ end
     @test isapprox(voltage(sol, Symbol("7")), -2000.0; atol=deftol*10)
 end
 
-#=
-# TODO: Subcircuit parameter handling needs more work for MNA codegen
-# The issue is that parameter references inside subcircuits ('r') aren't
-# being resolved correctly through the params/ParamLens system
 @testset "Simple SPICE subcircuit" begin
     # Same SPICE code as original
     spice_code = """
@@ -179,7 +175,6 @@ end
     @test isapprox_deftol(voltage(sol, :vcc), 1.0)
     @test isapprox_deftol(current(sol, :I_v1), -0.5e-3)  # 1V / 2kΩ
 end
-=#
 
 #=
 # TODO: .LIB include handling needs to be implemented for MNA codegen
@@ -205,6 +200,7 @@ end
         m = Module()
         Base.eval(m, :(using CedarSim.MNA))
         Base.eval(m, :(using CedarSim: ParamLens))
+        Base.eval(m, :(using CedarSim.SpectreEnvironment))
         circuit_fn = Base.eval(m, code)
         spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
         ctx = Base.invokelatest(circuit_fn, (;), spec)
@@ -217,10 +213,9 @@ end
 end
 =#
 
-#=
-# TODO: Subcircuit parameter scoping needs work for MNA codegen
 @testset "SPICE parameter scope" begin
     # Same SPICE code as original
+    # Sema provides topologically sorted parameter_order, so par_leff can reference l and par_l
     spice_code = """
     * Parameter scoping test
 
@@ -240,7 +235,6 @@ end
     # I = V/R = 1/10 = 0.1A
     @test isapprox_deftol(current(sol, :I_v1), -0.1)
 end
-=#
 
 @testset "SPICE multiplicities" begin
     # Same SPICE code as original
@@ -259,10 +253,8 @@ end
     @test isapprox(voltage(sol, Symbol("1")), 10/11; atol=deftol*10)
 end
 
-#=
-# TODO: SPICE unit suffix parsing (mAmp, MegQux, Mil) needs work for MNA codegen
 @testset "units and magnitudes" begin
-    # Same SPICE code as original
+    # Same SPICE code as original - tests mAmp (milli) and MegQux (mega) suffixes
     spice_code = """
     * units and magnitudes
     i1 vcc 0 DC -1mAmp
@@ -283,7 +275,6 @@ end
     # 1 mil = 25.4e-6 (25.4 micrometers)
     @test isapprox(voltage(sol, :vcc), 2.54e-5; atol=1e-8)
 end
-=#
 
 @testset ".option" begin
     # Same SPICE code as original - just test parsing doesn't error
@@ -298,10 +289,9 @@ end
     @test code !== nothing
 end
 
-#=
-# TODO: SPICE parameter functions (int, nint, floor, ceil, pow, ln) need implementation in MNA codegen
 @testset "functions" begin
     # Same SPICE code as original - test parameter functions
+    # These work because SpectreEnvironment exports int, nint, floor, ceil, pow, ln
     spice_ckt = """
     * functions
     .param
@@ -323,7 +313,6 @@ end
     # intp=1, intn=-1, floorp=1 -> V = 1 + (-1) + 1 = 1V
     @test isapprox(voltage(sol, :vcc), 1.0; atol=deftol)
 end
-=#
 
 #=
 # TODO: .if/.else/.endif conditional handling needs work for MNA codegen

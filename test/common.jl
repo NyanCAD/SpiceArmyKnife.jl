@@ -163,6 +163,7 @@ function solve_mna_spice_code(spice_code::String; temp::Real=27.0)
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, code)
 
     spec = MNASpec(temp=Float64(temp), mode=:dcop)

@@ -54,16 +54,20 @@ jobs:
 
       - name: Run SpectreNetlistParser tests
         run: |
+          # Lexers.jl is a local dependency not in registry
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
+            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '
 
       - name: Run VerilogAParser tests
         run: |
+          # Lexers.jl is a local dependency not in registry
           julia --project=VerilogAParser.jl -e '
             using Pkg
+            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '

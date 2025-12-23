@@ -144,37 +144,6 @@ Base.getproperty(lens::ValLens, ::Symbol; type=:unknown) = cedarerror("Reached t
 (lens::ValLens)(val) = getfield(lens, :val)
 
 """
-    MergedLens(primary, secondary)
-
-A lens that merges two lenses: primary takes precedence, but secondary
-is also called (important for ParamObserver recording).
-
-Used when calling subcircuits with explicit parameters:
-- primary: ParamLens with explicit params from subcircuit call
-- secondary: Navigated lens (e.g., ParamObserver for that subcircuit)
-"""
-struct MergedLens{P<:AbstractParamLens, S<:AbstractParamLens} <: AbstractParamLens
-    primary::P
-    secondary::S
-end
-
-function Base.getproperty(lens::MergedLens, sym::Symbol; type=:unknown)
-    p = getproperty(getfield(lens, :primary), sym; type)
-    s = getproperty(getfield(lens, :secondary), sym; type)
-    MergedLens(p, s)
-end
-
-function (lens::MergedLens)(; kwargs...)
-    # Get result from primary (explicit params take precedence)
-    primary_result = getfield(lens, :primary)(; kwargs...)
-    # Call secondary with the actual values used (for ParamObserver recording)
-    # Convert primary result to kwargs for secondary
-    getfield(lens, :secondary)(; primary_result...)
-    # Return primary result
-    return primary_result
-end
-
-"""
     ParamLens(::NamedTuple)
 
 Takes a nested named tuple to override arguments.

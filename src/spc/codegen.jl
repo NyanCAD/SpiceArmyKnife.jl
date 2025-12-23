@@ -851,24 +851,24 @@ end
 """
 Generate MNA subcircuit call.
 
-For ParamObserver support, we navigate the lens hierarchy using getproperty
-to get the subcircuit's portion of the lens. Explicit parameters from the
-subcircuit call are wrapped in ParamLens structure for merging.
+Explicit params from the netlist (e.g., `X1 vcc 0 myres factor=2`) become
+kwargs to the builder call. The builder then passes these to the lens,
+which merges them with any sweep overrides.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
     ssema = resolve_subckt(state.sema, LSymbol(instance.model))
 
     callee_codegen = CodegenState(ssema)
 
-    # Build params NamedTuple from explicit parameters passed to the subcircuit call
-    params = Expr[]
+    # Build kwargs from explicit parameters passed to the subcircuit call
+    explicit_kwargs = Expr[]
 
     # Find Parameter children in the AST (SubcktCall exposes params as children)
     for child in SpectreNetlistParser.RedTree.children(instance)
         if child !== nothing && isa(child, SNode{SP.Parameter})
             name = LSymbol(child.name)
             def = cg_expr!(callee_codegen, child.val)
-            push!(params, Expr(:kw, name, def))
+            push!(explicit_kwargs, Expr(:kw, name, def))
         end
     end
 
@@ -879,20 +879,43 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
 
-    # Wrap explicit params in (params=(...),) for ParamLens compatibility
-    inner_params = Expr(:tuple, Expr(:parameters, params...))
-    explicit_params_expr = :((params = $inner_params,))
-
     # Generate code that:
-    # 1. Gets subcircuit's portion of the lens via getproperty (for ParamObserver)
-    # 2. Creates a ParamLens with explicit params that wraps the subcircuit lens
-    # The MergedLens pattern: explicit params take precedence, fallback to subcircuit lens
+    # 1. Navigates to subcircuit's portion of the lens via getproperty
+    # 2. Calls builder with navigated lens and explicit params as kwargs
+    # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
         let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            # Create merged lens: explicit params + subcircuit lens hierarchy
-            # The subcircuit builder will use this lens for parameter access
-            merged_params = $(MergedLens)($(ParamLens)($explicit_params_expr), subckt_lens)
-            $builder_name(merged_params, spec, ctx, $(port_exprs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
+        end
+    end
+end
+
+# Version for use in subcircuit context (lens is named `lens`)
+function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
+    ssema = resolve_subckt(state.sema, LSymbol(instance.model))
+
+    callee_codegen = CodegenState(ssema)
+
+    # Build kwargs from explicit parameters passed to the subcircuit call
+    explicit_kwargs = Expr[]
+
+    for child in SpectreNetlistParser.RedTree.children(instance)
+        if child !== nothing && isa(child, SNode{SP.Parameter})
+            name = LSymbol(child.name)
+            def = cg_expr!(callee_codegen, child.val)
+            push!(explicit_kwargs, Expr(:kw, name, def))
+        end
+    end
+
+    port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
+
+    subckt_name = LSymbol(instance.model)
+    instance_name = LSymbol(instance.name)
+    builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
+
+    return quote
+        let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
         end
     end
 end
@@ -1076,8 +1099,11 @@ Returns code that builds an MNAContext with all devices stamped.
 
 `skip_nets` specifies nets that should NOT have get_node! generated
 (used for subcircuit ports which are passed in as arguments).
+
+When `is_subcircuit=true`, params are function kwargs and lens is named `lens`.
+When `is_subcircuit=false` (top-level), params come from the `params` argument.
 """
-function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
+function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false)
     block = Expr(:block)
     ret = block
 
@@ -1097,15 +1123,20 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
         push!(block.args, :($net_name = get_node!(ctx, $(QuoteNode(net_name)))))
     end
 
-    # Parameters from lens/params - set up lens for parameter access
-    # This supports ParamLens, ParamObserver, and plain NamedTuples
-    # Also needed if there are subcircuit calls (for lens navigation)
+    # Parameters from lens - set up lens for parameter access
+    # For subcircuits, lens is a function argument named `lens`
+    # For top-level, we wrap the `params` argument
     has_subcircuit_calls = any(state.sema.instances) do (name, insts)
         any(inst -> inst[2].val isa SNode{SP.SubcktCall}, insts)
     end
     needs_lens = !isempty(state.sema.formal_parameters) || !isempty(state.sema.exposed_parameters) ||
                  !isempty(state.sema.params) || has_subcircuit_calls
-    if needs_lens
+
+    # The lens variable name differs between subcircuit and top-level
+    lens_var = is_subcircuit ? :lens : :var"*lens#"
+
+    if needs_lens && !is_subcircuit
+        # Top-level: wrap params argument in lens
         push!(block.args, :(var"*lens#" = params isa $(AbstractParamLens) ? params : $(ParamLens)(params)))
     end
 
@@ -1132,9 +1163,15 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
                 def_expr = cg_expr!(state, cd.val.val)
                 # In SPICE, any .param can be overridden from outside the subcircuit call
                 # Use lens callable interface for ParamObserver support and parameter overrides
-                # If we have a lens set up, use it for all params (it returns defaults if no override)
                 if needs_lens
-                    expr = :($name = var"*lens#"(; $(Expr(:kw, name, def_expr))).$name)
+                    if is_subcircuit
+                        # Subcircuit: params are function kwargs, use variable name in lens call
+                        # lens(; name=name) where `name` is the function kwarg
+                        expr = :($name = $lens_var(; $(Expr(:kw, name, name))).$name)
+                    else
+                        # Top-level: use default expression as kwarg to lens call
+                        expr = :($name = $lens_var(; $(Expr(:kw, name, def_expr))).$name)
+                    end
                 else
                     expr = :($name = $def_expr)
                 end
@@ -1162,20 +1199,29 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
     end
 
     # Codegen device instances using MNA stamps
+    # For SubcktCall, we need to use the appropriate function based on context
+    function codegen_instance(inst)
+        if inst isa SNode{SP.SubcktCall} && is_subcircuit
+            cg_mna_instance_subcircuit!(state, inst, Dict{Symbol, Symbol}())
+        else
+            cg_mna_instance!(state, inst)
+        end
+    end
+
     for (name, instances) in state.sema.instances
         if length(instances) == 1 && only(instances)[2].cond == 0
             (_, instance) = only(instances)
             instance = instance.val
-            push!(block.args, cg_mna_instance!(state, instance))
+            push!(block.args, codegen_instance(instance))
         else
             # Handle conditional instances
             for (_, instance) in instances
                 if instance.cond != 0
                     cond = cond_syms[abs(instance.cond)]
                     instance.cond < 0 && (cond = :(!$cond))
-                    push!(block.args, Expr(:if, cond, cg_mna_instance!(state, instance.val)))
+                    push!(block.args, Expr(:if, cond, codegen_instance(instance.val)))
                 else
-                    push!(block.args, cg_mna_instance!(state, instance.val))
+                    push!(block.args, codegen_instance(instance.val))
                 end
             end
         end
@@ -1217,18 +1263,16 @@ end
 Generate an MNA subcircuit builder function from semantic analysis.
 
 The generated function has signature:
-    function subckt_name_mna_builder(params, spec, ctx, port1, port2, ...) -> nothing
+    function subckt_name_mna_builder(lens, spec, ctx, port1, port2, ...; param1=default1, ...) -> nothing
 
-It stamps devices directly into the passed context.
+Explicit params from the subcircuit call are passed as kwargs. The builder
+calls `lens(; param1=param1, ...)` to merge with any sweep overrides.
 """
 function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
     state = CodegenState(sema)
 
     # Extract ports from AST
     subckt_ports = extract_subcircuit_ports(sema)
-
-    # Generate body, skipping get_node! for ports (they're passed as args)
-    body = codegen_mna!(state; skip_nets=subckt_ports)
 
     # Build port arguments - subcircuit ports become function parameters
     port_args = [Symbol("port_", i) for i in 1:length(subckt_ports)]
@@ -1237,10 +1281,28 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
     port_mappings = Expr[:($internal_name = $arg)
         for (internal_name, arg) in zip(subckt_ports, port_args)]
 
+    # Build kwargs for subcircuit params with their defaults
+    # These allow the caller to override via kwargs, then lens merges with sweep params
+    param_kwargs = Expr[]
+    for (name, defs) in sema.params
+        if !isempty(defs)
+            # Use the first definition's default value
+            def = first(defs)[2]
+            if def.cond == 0  # non-conditional
+                def_expr = cg_expr!(state, def.val.val)
+                push!(param_kwargs, Expr(:kw, name, def_expr))
+            end
+        end
+    end
+
+    # Generate body, skipping get_node! for ports (they're passed as args)
+    # is_subcircuit=true means params are function kwargs and lens is named `lens`
+    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true)
+
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(params, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...))
+        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...); $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             $body

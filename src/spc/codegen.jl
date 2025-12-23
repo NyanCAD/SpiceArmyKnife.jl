@@ -566,6 +566,27 @@ Returns an expression that stamps the device into the context.
 function cg_mna_instance! end
 
 """
+Check if a resistor instance references a model (vs a direct value).
+Returns true if the val field is a model name.
+"""
+function is_resistor_model_ref(state::CodegenState, instance::SNode{SP.Resistor})
+    # If val is present and there's l= in params, it's a model reference
+    # Or if val is a HierarchialNode that matches a model name
+    if instance.val === nothing
+        return false
+    end
+
+    # Check if params has l= or r= which indicates model usage
+    if hasparam(instance.params, "l") || hasparam(instance.params, "r")
+        return true
+    end
+
+    # Check if val is a known model name
+    val_sym = LSymbol(instance.val)
+    return haskey(state.sema.models, val_sym)
+end
+
+"""
 Generate stamp! call for a resistor.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
@@ -574,10 +595,19 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     n = cg_net_name!(state, nets[2])
     name = LString(instance.name)
 
+    # Check if this resistor uses a model
+    has_model = is_resistor_model_ref(state, instance)
+
     # Get resistance value
     r_expr = if hasparam(instance.params, "r")
+        # Instance-level R parameter overrides model
         cg_expr!(state, getparam(instance.params, "r"))
-    elseif instance.val !== nothing
+    elseif has_model && instance.val !== nothing
+        # Using a model - reference the model's R parameter
+        model_name = cg_model_name!(state, instance.val)
+        :($model_name.R)
+    elseif instance.val !== nothing && !has_model
+        # Direct resistance value
         cg_expr!(state, instance.val)
     else
         # Calculate from rsh, l, w if present
@@ -586,6 +616,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
             w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
             rsh_expr = cg_expr!(state, getparam(instance.params, "rsh"))
             :($rsh_expr * $l_expr / $w_expr)
+        elseif has_model && hasparam(instance.params, "l")
+            # Model with l parameter - use model's rsh if available
+            model_name = cg_model_name!(state, instance.val)
+            l_expr = cg_expr!(state, getparam(instance.params, "l"))
+            w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
+            :(getproperty($model_name, :rsh, 0.0) * $l_expr / $w_expr)
         else
             1000.0  # Default
         end
@@ -845,6 +881,151 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
             I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
             stamp!(CCCS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
+    end
+end
+
+#==============================================================================#
+# Behavioral Source (B-source) Codegen
+#==============================================================================#
+
+"""
+    extract_linear_vcvs_params(expr) -> Union{Nothing, (node, gain)}
+
+Analyze an expression to see if it's a simple linear VCVS expression like:
+- V(node) -> gain=1
+- V(node)*gain -> gain
+- gain*V(node) -> gain
+
+Returns (control_node, gain) if it's a simple VCVS, nothing otherwise.
+"""
+function extract_linear_vcvs_params(state::CodegenState, expr)
+    # Case 1: Just V(node)
+    if expr isa SNode{SP.FunctionCall}
+        fname = lowercase(String(expr.id))
+        if fname == "v" && length(expr.args) >= 1
+            # V(node) with implicit ground reference
+            node = cg_net_name!(state, expr.args[1].item)
+            if length(expr.args) == 1
+                return (node, :gnd, 1.0)
+            elseif length(expr.args) == 2
+                node2 = cg_net_name!(state, expr.args[2].item)
+                return (node, node2, 1.0)
+            end
+        end
+    end
+
+    # Case 2: V(node)*gain or gain*V(node)
+    if expr isa SNode{SP.BinaryExpression}
+        op = Symbol(expr.op)
+        if op == :*
+            lhs = expr.lhs
+            rhs = expr.rhs
+
+            # Try V(node) * gain
+            if lhs isa SNode{SP.FunctionCall} && lowercase(String(lhs.id)) == "v"
+                gain = cg_expr!(state, rhs)
+                if length(lhs.args) == 1
+                    node = cg_net_name!(state, lhs.args[1].item)
+                    return (node, :gnd, gain)
+                elseif length(lhs.args) == 2
+                    node1 = cg_net_name!(state, lhs.args[1].item)
+                    node2 = cg_net_name!(state, lhs.args[2].item)
+                    return (node1, node2, gain)
+                end
+            end
+
+            # Try gain * V(node)
+            if rhs isa SNode{SP.FunctionCall} && lowercase(String(rhs.id)) == "v"
+                gain = cg_expr!(state, lhs)
+                if length(rhs.args) == 1
+                    node = cg_net_name!(state, rhs.args[1].item)
+                    return (node, :gnd, gain)
+                elseif length(rhs.args) == 2
+                    node1 = cg_net_name!(state, rhs.args[1].item)
+                    node2 = cg_net_name!(state, rhs.args[2].item)
+                    return (node1, node2, gain)
+                end
+            end
+        end
+    end
+
+    return nothing
+end
+
+"""
+Generate stamp! call for a Behavioral source (B element).
+
+B-sources can specify either:
+- v=expr for a behavioral voltage source
+- i=expr or cur=expr for a behavioral current source
+
+For simple linear expressions like V(node)*gain, we convert to VCVS/VCCS.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
+    nets = sema_nets(instance)
+    p = cg_net_name!(state, nets[1])
+    n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Check for v= parameter (voltage source)
+    v_expr = nothing
+    if hasparam(instance.params, "v")
+        v_expr = getparam(instance.params, "v")
+    end
+
+    # Check for i= or cur= parameter (current source)
+    i_expr = nothing
+    if hasparam(instance.params, "i")
+        i_expr = getparam(instance.params, "i")
+    elseif hasparam(instance.params, "cur")
+        i_expr = getparam(instance.params, "cur")
+    end
+
+    if v_expr !== nothing
+        # Try to extract linear VCVS pattern
+        vcvs_params = extract_linear_vcvs_params(state, v_expr)
+        if vcvs_params !== nothing
+            (ctrl_p, ctrl_n, gain) = vcvs_params
+            # For V() with single arg, ctrl_n is :gnd which means node 0 (ground)
+            ctrl_n_expr = ctrl_n === :gnd ? 0 : ctrl_n
+            return quote
+                let gain = $gain
+                    stamp!(VCVS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $ctrl_p, $ctrl_n_expr)
+                end
+            end
+        else
+            # General expression - for now, just evaluate it and create a fixed voltage source
+            # (This won't handle nonlinear expressions correctly, but works for constants)
+            v_val = cg_expr!(state, v_expr)
+            return quote
+                stamp!(VoltageSource($v_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            end
+        end
+    elseif i_expr !== nothing
+        # Try to extract linear VCCS pattern
+        vccs_params = extract_linear_vcvs_params(state, i_expr)
+        if vccs_params !== nothing
+            (ctrl_p, ctrl_n, gm) = vccs_params
+            ctrl_n_expr = ctrl_n === :gnd ? 0 : ctrl_n
+            # Note: VCCS output convention - positive current from p to n
+            # SPICE B-source i=expr means current flows from n+ to n- through source
+            # which is opposite to VCCS convention, so swap p and n
+            return quote
+                let gm = $gm
+                    stamp!(VCCS(gm; name=$(QuoteNode(Symbol(name)))), ctx, $n, $p, $ctrl_p, $ctrl_n_expr)
+                end
+            end
+        else
+            # General expression
+            i_val = cg_expr!(state, i_expr)
+            return quote
+                stamp!(CurrentSource($i_val; name=$(QuoteNode(Symbol(name)))), ctx, $n, $p)
+            end
+        end
+    else
+        # No recognized parameter - skip
+        @warn "B-source $name has no recognized v= or i= parameter"
+        return :(nothing)
     end
 end
 
@@ -1407,6 +1588,43 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 end
             end
             push!(block.args, :($s = $expr))
+        end
+    end
+
+    # Codegen model definitions for MNA
+    # For each model, extract parameters and create a NamedTuple
+    for (model_name, defs) in state.sema.models
+        if !isempty(defs)
+            (_, def) = last(defs)  # Use most recent definition
+            model_ast = def.val[1]  # The model SNode
+            model_ref = def.val[2]  # The GlobalRef
+
+            # Check if this is a resistor model
+            typ = LSymbol(model_ast.typ)
+            if typ == :r
+                # Extract model parameters into a NamedTuple
+                model_params = Expr[]
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Skip meta-parameters
+                    if pname in (:level, :version, :type)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use uppercase for R parameter (SPICE convention)
+                    # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
+                    if pname == :r
+                        push!(model_params, Expr(:(=), :R, pval))
+                    elseif pname == :rsh
+                        push!(model_params, Expr(:(=), :rsh, pval))
+                    else
+                        push!(model_params, Expr(:(=), pname, pval))
+                    end
+                end
+                model_var = cg_model_name!(state, model_name)
+                push!(block.args, :($model_var = ($(model_params...),)))
+            end
+            # TODO: Add support for other model types (capacitor, etc.)
         end
     end
 

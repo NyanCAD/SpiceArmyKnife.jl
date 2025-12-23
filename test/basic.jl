@@ -309,9 +309,6 @@ end
     @test isapprox(voltage(sol, Symbol("7")), -2000.0; atol=deftol*10)
 end
 
-# TODO: B-source support (behavioral voltage/current source)
-# Currently errors at sema stage - needs sema_nets method for Behavioral type
-#=
 @testset "SPICE B-source" begin
     # Test B-source with voltage expression referencing another node
     spice_code = """
@@ -327,7 +324,6 @@ end
     # B5: v = V(1)*2 = -1*2 = -2V, but B5 has + at 0, - at 5, so node 5 = 2V
     @test isapprox(voltage(sol, Symbol("5")), 2.0; atol=deftol*10)
 end
-=#
 
 # TODO: Alternate E/G forms with vol=/cur= syntax
 # Currently errors at sema stage - LString(nothing) error on vol=/cur= parsing
@@ -651,9 +647,6 @@ end
 end
 =#
 
-# TODO: .model resistor with m= and l=
-# Currently errors at runtime - model reference not resolved (rm / 1.0)
-#=
 @testset "SPICE multiplicities (.model)" begin
     spice_code = """
     * multiplicities with .model
@@ -666,11 +659,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     @test isapprox(voltage(sol, Symbol("6")), 10/11; atol=deftol*10)
 end
-=#
 
-# TODO: .model case sensitivity
-# Currently errors at runtime - model reference not resolved
-#=
 @testset ".model case sensitivity" begin
     spice_code = """
     * .model case sensitivity
@@ -684,7 +673,6 @@ end
     # Total resistance = 1 + 2 = 3, V at node 1 = 1 * 2/3
     @test isapprox(voltage(sol, Symbol("1")), 2/3; atol=deftol*10)
 end
-=#
 
 @testset "units and magnitudes" begin
     # Same SPICE code as original - tests mAmp (milli) and MegQux (mega) suffixes

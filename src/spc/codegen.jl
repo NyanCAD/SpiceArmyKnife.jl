@@ -275,7 +275,7 @@ function cg_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     if hasparam(instance.params, "l") || hasparam(instance.params, "r")
         model = GlobalRef(SpectreEnvironment, :resistor)
         if instance.val !== nothing
-            model = cg_model_name!(state, isntance.val)
+            model = cg_model_name!(state, instance.val)
         end
         return cg_spice_instance!(state, sema_nets(instance), instance.name, model, cg_params!(state, instance.params))
     else

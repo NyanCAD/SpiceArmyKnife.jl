@@ -358,6 +358,7 @@ end
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
     # Build and solve
@@ -387,6 +388,7 @@ end
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
     ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
@@ -418,6 +420,7 @@ end
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
     ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())

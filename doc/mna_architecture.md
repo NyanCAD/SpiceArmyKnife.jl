@@ -274,10 +274,10 @@ struct ParamLens{NT<:NamedTuple}
     nt::NT
 end
 
-# Accessing a subcircuit returns a new, typed lens
+# Accessing a subcircuit returns a new, typed lens for that subcircuit
 Base.getproperty(lens::ParamLens{T}, sym::Symbol) where T = ...
 
-# Calling the lens merges defaults with overrides
+# Calling the lens merges defaults (kwargs) with overrides (from lens)
 (lens::ParamLens)(; defaults...) = merge(defaults, lens.nt.params)
 ```
 
@@ -285,16 +285,139 @@ The key insight: each `getproperty` call returns a **new lens type**, specialize
 on the remaining parameter structure. This enables the compiler to see through
 the lens abstraction.
 
-Example:
-```julia
-function build_subcircuit(lens, spec)
-    # lens(; R=1000.0) returns params with R defaulting to 1000.0
-    # but overridden if lens contains R
-    p = lens(; R=1000.0, C=1e-6)
+### Lens Structure and Navigation
 
-    # If lens doesn't override R, compiler sees p.R as constant 1000.0
-    stamp!(Resistor(p.R), ctx, n1, n2)
+The lens parameter structure mirrors the circuit hierarchy:
+
+```julia
+# Top-level lens structure for a circuit with subcircuit "amp"
+lens_params = (
+    params = (R1=1000.0, R2=2000.0),      # Top-level params
+    amp = (                                 # Subcircuit namespace
+        params = (gain=10.0, Rbias=5000.0), # Subcircuit params
+    ),
+)
+lens = ParamLens(lens_params)
+```
+
+Navigation through the hierarchy:
+- `lens.amp` → Returns `ParamLens((params=(gain=10.0, Rbias=5000.0),))`
+- `lens.amp(; gain=5.0)` → Merges kwargs with lens, returns `(gain=10.0, ...)` (lens wins)
+- `lens(; R1=500.0)` → Returns `(R1=1000.0, R2=2000.0)` (lens.params overrides kwarg)
+
+### Lens Merge Semantics (Critical for Optimization)
+
+The lens merge operation has **specific precedence rules** designed to enable constant folding:
+
+```
+Priority (highest to lowest):
+1. Sweep overrides (in lens.params) - runtime values
+2. Netlist explicit params (passed as kwargs to lens call) - can be literals
+3. Subcircuit defaults (defined in subcircuit definition) - literals in function body
+```
+
+This means:
+- **kwargs are the circuit's concrete defaults** (literals that can be constant-folded)
+- **lens.params are sweep overrides** (runtime values that prevent constant folding)
+- When a param is NOT in the sweep, the literal default is used → **optimizable**
+
+### Subcircuit Builder Pattern
+
+Subcircuit builders receive the lens for their portion of the hierarchy:
+
+```julia
+# Generated subcircuit builder - note kwargs with defaults
+function amp_mna_builder(lens, spec::MNASpec, ctx::MNAContext, inp, out;
+                          gain=10.0, Rbias=5000.0)  # Defaults from subcircuit definition
+    # Merge: lens overrides take precedence over kwargs
+    # The kwarg value (e.g., gain=10.0) is a literal in the function body
+    gain = (lens(; gain=gain)).gain
+    Rbias = (lens(; Rbias=Rbias)).Rbias
+
+    # Now gain/Rbias are either:
+    # - The literal default (if not in sweep) → constant-foldable
+    # - From lens (if in sweep) → runtime value
+
+    stamp!(Resistor(Rbias), ctx, inp, 0)
+    # ... rest of subcircuit
 end
+```
+
+The key pattern: `param = (lens(; param=param)).param`
+- The **kwarg** `param=param` uses the function argument (which has a literal default)
+- The **lens call** merges with any sweep overrides
+- The **field access** `.param` extracts the final value
+
+### Top-Level vs Subcircuit Parameter Handling
+
+At the **top level**, parameters come from the netlist with literal defaults:
+
+```julia
+function circuit(var"*lens#", spec::MNASpec=MNASpec())
+    ctx = MNAContext()
+
+    # Top-level params: default is a literal expression from netlist
+    R1 = (var"*lens#"(; R1=1000.0)).R1  # Literal 1000.0 in function body
+
+    # Call subcircuit with explicit params from netlist as kwargs
+    let subckt_lens = getproperty(var"*lens#", :amp)
+        amp_mna_builder(subckt_lens, spec, ctx, n1, n2;
+                        gain=20.0, Rbias=10000.0)  # Explicit from instantiation
+    end
+
+    return ctx
+end
+```
+
+At the **subcircuit level**, the lens is navigated and explicit params become kwargs:
+
+```julia
+function amp_mna_builder(lens, spec, ctx, inp, out; gain=10.0, Rbias=5000.0)
+    # gain/Rbias kwargs are from instantiation (or subcircuit defaults)
+    # lens(; ...) merges with sweep overrides
+    gain = (lens(; gain=gain)).gain
+    # ...
+end
+```
+
+### ParamObserver for Debugging and Recording
+
+ParamObserver wraps a lens to record which parameters are accessed:
+
+```julia
+observer = ParamObserver(lens)
+ctx = circuit(observer, spec)
+# observer.accessed now contains all parameter accesses with their values
+```
+
+This works because the lens call pattern goes through `(lens)(; kwargs...)`,
+which ParamObserver intercepts to record the merge operation.
+
+### Example: Full Hierarchy with Sweep
+
+```julia
+# Circuit with nested subcircuit
+spice_code = """
+.subckt myres p n r=1000
+R1 p n r={r}
+.ends
+
+X1 vcc out myres r=2000
+V1 vcc 0 DC 5
+R2 out 0 1k
+"""
+
+# Create sweep over subcircuit parameter
+sweep = ProductSweep(var"myres.params.r" = [1000.0, 2000.0, 5000.0])
+cs = CircuitSweep(circuit_builder, sweep;
+    myres = (params = (r=1000.0,),)  # Base params for lens structure
+)
+
+# For each sweep point:
+# - lens.myres.params.r has the sweep value
+# - The subcircuit builder does: r = (lens(; r=2000.0)).r
+# - lens(; r=2000.0) returns (r=<sweep_value>,) because lens.params overrides
+# - Final r = <sweep_value> (from sweep, not the netlist's 2000.0)
 ```
 
 ### Verifying Optimization

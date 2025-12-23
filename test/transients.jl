@@ -48,6 +48,7 @@ const r_val_pwl = 2
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     builder = Base.eval(m, code)
 
     # Solve for 10ms
@@ -159,6 +160,7 @@ const ω_val = 1
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
     builder = Base.eval(m, code)
 
     # This is a very low-frequency circuit; simulate for a long enough time

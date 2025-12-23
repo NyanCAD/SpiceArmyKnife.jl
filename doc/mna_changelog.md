@@ -941,25 +941,115 @@ sol = solve_dc(ctx)
 @assert voltage(sol, :out) ≈ 2.5  # Voltage divider
 ```
 
+### Subcircuit Parameter Handling Fix (2024-12-23)
+
+Fixed subcircuit parameter handling to properly use ParamLens merge semantics.
+
+#### The Problem
+
+The initial implementation created a `MergedLens` type that merged explicit subcircuit
+parameters with the lens hierarchy. This was incorrect because:
+- Merging is already what a lens does via the function call pattern
+- MergedLens broke the optimization path for constant folding
+- Parameter precedence was inverted
+
+#### The Solution: Proper Lens Semantics
+
+Refactored to use the correct lens pattern:
+
+1. **Subcircuit builders accept explicit params as function kwargs with defaults:**
+   ```julia
+   function myres_mna_builder(lens, spec::MNASpec, ctx::MNAContext, p, n;
+                               r=1000.0)  # Default from subcircuit definition
+       r = (lens(; r=r)).r  # Merge: lens overrides take precedence
+       stamp!(Resistor(r), ctx, p, n)
+   end
+   ```
+
+2. **Subcircuit calls pass explicit params as kwargs:**
+   ```julia
+   let subckt_lens = getproperty(var"*lens#", :myres)
+       myres_mna_builder(subckt_lens, spec, ctx, vcc, out; r=2000.0)
+   end
+   ```
+
+3. **Parameter precedence (highest to lowest):**
+   - Sweep overrides (in `lens.params`)
+   - Netlist explicit params (kwargs at call site)
+   - Subcircuit defaults (kwargs with defaults in function signature)
+
+#### Changes Made
+
+**`src/spc/codegen.jl`:**
+- `codegen_mna_subcircuit()`: Build kwargs for subcircuit params with defaults
+- `cg_mna_instance!()`: Pass explicit params as kwargs to subcircuit builder
+- `codegen_mna!()`: Added `is_subcircuit` flag to distinguish contexts
+- Top-level: params use literal default in lens call
+- Subcircuit: params are function kwargs, use variable name in lens call
+
+**`src/spectre.jl`:**
+- Removed `MergedLens` type entirely
+
+#### Tests Enabled
+
+- ParamObserver test now passes
+- `.if/.else/.endif` conditionals test now passes
+
+See `doc/mna_architecture.md` for detailed documentation of the lens pattern.
+
+### .if/.else/.endif Conditionals (2024-12-23)
+
+Added support for conditional blocks in SPICE netlists.
+
+#### Implementation
+
+**`src/spc/codegen.jl`:**
+- Added `cg_mna_if_else!()` to handle conditional blocks
+- Generates Julia `if`/`elseif`/`else` blocks
+- Condition expressions evaluated via `cg_expr!`
+
+**`src/spc/interface.jl` - `make_mna_circuit()`:**
+- Changed to use `sema()` instead of `sema_file_or_section()`
+- `sema()` calls `resolve_scopes!()` which populates `parameter_order`
+- This is required for conditional parameter handling
+
+#### Example
+
+```spice
+.param mode=1
+.if (mode==1)
+R1 out 0 1k
+.else
+R1 out 0 2k
+.endif
+```
+
+Generates:
+```julia
+if mode == 1
+    stamp!(Resistor(1000.0), ctx, out, 0)
+else
+    stamp!(Resistor(2000.0), ctx, out, 0)
+end
+```
+
 ### Remaining Work (Phase 4)
 
-**High Priority:**
-1. **Subcircuit port handling** - Subcircuit builder functions redefine ports with `get_node!` instead of using passed-in port indices. Need to preserve port mapping.
-2. **Subcircuit parameter passing** - Parameters passed to subcircuit instances aren't properly merged with defaults.
-
 **Medium Priority:**
-3. **Unit suffix parsing** - SPICE unit suffixes like `mAmp`, `MegQux` not fully supported
-4. **.LIB include handling** - Library file includes not implemented
-5. **SPICE functions** - Built-in functions (int, floor, ceil, etc.) not implemented in expression evaluator
+1. **Unit suffix parsing** - SPICE unit suffixes like `mAmp`, `MegQux` not fully supported
+2. **.LIB include handling** - Library file includes not implemented (requires sema caching for self-referential includes)
+3. **SPICE functions** - Built-in functions (int, floor, ceil, etc.) not implemented in expression evaluator
+4. **Spectre source MNA codegen** - Requires sema support for Instance nodes
 
-**Low Priority:**
-6. **.if/.else conditionals** - Conditional blocks in netlists
-7. **Parameter scoping** - Complex parameter scoping across subcircuit hierarchies
+**Completed:**
+- ~~Subcircuit port handling~~ ✅
+- ~~Subcircuit parameter passing~~ ✅
+- ~~.if/.else conditionals~~ ✅
+- ~~ParamObserver support~~ ✅
 
 **Next Steps:**
 - Phase 5 (VA Contribution Functions) can begin in parallel
-- Subcircuit issues are blocking for complex real-world netlists
-- Consider moving subcircuit fixes to a follow-up PR
+- .LIB handling requires architectural changes to sema caching
 
 ---
 

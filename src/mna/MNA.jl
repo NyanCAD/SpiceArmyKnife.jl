@@ -55,4 +55,7 @@ include("devices.jl")
 # Analysis solvers
 include("solve.jl")
 
+# VA contribution function support (Phase 5)
+include("contrib.jl")
+
 end # module MNA

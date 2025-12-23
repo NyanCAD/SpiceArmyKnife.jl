@@ -1130,10 +1130,10 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[])
             for def in defs
                 cd = def[2]
                 def_expr = cg_expr!(state, cd.val.val)
-                # Allow override for both formal_parameters and exposed_parameters
-                # In SPICE, any .param can be overridden from outside the subcircuit
-                # Use lens callable interface for ParamObserver support
-                if name in state.sema.formal_parameters || name in state.sema.exposed_parameters
+                # In SPICE, any .param can be overridden from outside the subcircuit call
+                # Use lens callable interface for ParamObserver support and parameter overrides
+                # If we have a lens set up, use it for all params (it returns defaults if no override)
+                if needs_lens
                     expr = :($name = var"*lens#"(; $(Expr(:kw, name, def_expr))).$name)
                 else
                     expr = :($name = $def_expr)
@@ -1268,13 +1268,13 @@ sol = MNA.solve_dc(sys)
 ```
 """
 function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
-    # Run semantic analysis
-    sema = sema_file_or_section(ast)
-    state = CodegenState(sema)
+    # Run semantic analysis (use sema() not sema_file_or_section to get parameter_order)
+    sema_result = sema(ast)
+    state = CodegenState(sema_result)
 
     # Generate subcircuit builders first
     subckt_defs = Expr[]
-    for (name, subckt_list) in sema.subckts
+    for (name, subckt_list) in sema_result.subckts
         if !isempty(subckt_list)
             # Take the first (non-conditional) subcircuit definition
             _, subckt_sema = first(subckt_list)

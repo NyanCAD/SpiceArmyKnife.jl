@@ -370,8 +370,6 @@ end
     @test isapprox(voltage(sol, :vcc), 2000.0; rtol=1e-6)
 end
 
-#=
-# TODO: .if/.else/.endif conditional handling needs work for MNA codegen
 @testset "ifelse" begin
     # Same SPICE code as original
     spice_code = """
@@ -388,7 +386,6 @@ end
     # With switch=1, R1=1Ω, I = V/R = 1A
     @test isapprox(current(sol, :I_v1), -1.0; atol=deftol*10)
 end
-=#
 
 @testset "SPICE CCVS (H element)" begin
     # Current-controlled voltage source

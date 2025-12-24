@@ -96,6 +96,11 @@ function flicker_noise(dscope, pwr, exp, name)
     DAECompiler.epsilon(CedarSim.DScope(dscope, Symbol(name)))
 end
 
+# MNA-compatible stubs for noise functions (no dscope parameter)
+# These return 0 since MNA doesn't do noise analysis during DC/transient
+white_noise(pwr, name) = 0.0
+flicker_noise(pwr, exp, name) = 0.0
+
 vaconvert(T::Type{<:Number}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
 vaconvert(T::Type{<:Number}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
 vaconvert(T::Type{<:Number}, x::Integer) = Base.convert(T, x)

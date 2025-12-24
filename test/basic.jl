@@ -309,9 +309,6 @@ end
     @test isapprox(voltage(sol, Symbol("7")), -2000.0; atol=deftol*10)
 end
 
-# TODO: B-source support (behavioral voltage/current source)
-# Currently errors at sema stage - needs sema_nets method for Behavioral type
-#=
 @testset "SPICE B-source" begin
     # Test B-source with voltage expression referencing another node
     spice_code = """
@@ -327,7 +324,37 @@ end
     # B5: v = V(1)*2 = -1*2 = -2V, but B5 has + at 0, - at 5, so node 5 = 2V
     @test isapprox(voltage(sol, Symbol("5")), 2.0; atol=deftol*10)
 end
-=#
+
+@testset "SPICE B-source (nonlinear current)" begin
+    # Test nonlinear B-source with i=V(1)**2 (current proportional to voltage squared)
+    # Circuit: V1(2V) -> R1(1Ω) -> node 1 <- B1(i=V(1)^2) <- GND
+    # At DC equilibrium: I_R1 = (V1 - V_node1) / R1 = I_B1 = V_node1^2
+    # So: (2 - V) / 1 = V^2  =>  2 - V = V^2  =>  V^2 + V - 2 = 0
+    # Solutions: V = (-1 ± 3) / 2 = 1 or -2
+    # Physical solution (forward-biased): V = 1V
+    spice_code = """
+    * Nonlinear B-source test
+    V1 vcc 0 DC 2
+    R1 vcc 1 1
+    B1 1 0 i=V(1)**2
+    """
+    # Use the builder-based solver for Newton iteration
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = CedarSim.make_mna_circuit(ast)
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    circuit_fn = Base.eval(m, code)
+
+    spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
+    sol = CedarSim.MNA.solve_dc(circuit_fn, (;), spec)
+
+    # Node 1 should be 1V (the positive solution to V^2 + V - 2 = 0)
+    @test isapprox(voltage(sol, Symbol("1")), 1.0; atol=1e-6)
+    # V_vcc = 2V
+    @test isapprox(voltage(sol, :vcc), 2.0; atol=1e-6)
+end
 
 # TODO: Alternate E/G forms with vol=/cur= syntax
 # Currently errors at sema stage - LString(nothing) error on vol=/cur= parsing
@@ -651,9 +678,6 @@ end
 end
 =#
 
-# TODO: .model resistor with m= and l=
-# Currently errors at runtime - model reference not resolved (rm / 1.0)
-#=
 @testset "SPICE multiplicities (.model)" begin
     spice_code = """
     * multiplicities with .model
@@ -666,11 +690,7 @@ end
     ctx, sol = solve_mna_spice_code(spice_code)
     @test isapprox(voltage(sol, Symbol("6")), 10/11; atol=deftol*10)
 end
-=#
 
-# TODO: .model case sensitivity
-# Currently errors at runtime - model reference not resolved
-#=
 @testset ".model case sensitivity" begin
     spice_code = """
     * .model case sensitivity
@@ -684,7 +704,6 @@ end
     # Total resistance = 1 + 2 = 3, V at node 1 = 1 * 2/3
     @test isapprox(voltage(sol, Symbol("1")), 2/3; atol=deftol*10)
 end
-=#
 
 @testset "units and magnitudes" begin
     # Same SPICE code as original - tests mAmp (milli) and MegQux (mega) suffixes

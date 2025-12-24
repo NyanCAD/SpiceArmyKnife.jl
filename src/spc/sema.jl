@@ -114,6 +114,8 @@ sema_nets(instance::SNode{SP.ControlledSource{:V,:C}}) = (instance.pos, instance
 # ControlledSource{:C,:V} (CCVS) and ControlledSource{:C,:C} (CCCS): pos, neg are output (current control via reference)
 sema_nets(instance::SNode{SP.ControlledSource{:C,:V}}) = (instance.pos, instance.neg)
 sema_nets(instance::SNode{SP.ControlledSource{:C,:C}}) = (instance.pos, instance.neg)
+# Behavioral source (B-source): pos and neg terminals
+sema_nets(instance::SNode{SP.Behavioral}) = (instance.pos, instance.neg)
 
 """
     SPICE/Spectre codegen pass 1

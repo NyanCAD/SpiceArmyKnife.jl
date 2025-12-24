@@ -566,6 +566,27 @@ Returns an expression that stamps the device into the context.
 function cg_mna_instance! end
 
 """
+Check if a resistor instance references a model (vs a direct value).
+Returns true if the val field is a model name.
+"""
+function is_resistor_model_ref(state::CodegenState, instance::SNode{SP.Resistor})
+    # If val is present and there's l= in params, it's a model reference
+    # Or if val is a HierarchialNode that matches a model name
+    if instance.val === nothing
+        return false
+    end
+
+    # Check if params has l= or r= which indicates model usage
+    if hasparam(instance.params, "l") || hasparam(instance.params, "r")
+        return true
+    end
+
+    # Check if val is a known model name
+    val_sym = LSymbol(instance.val)
+    return haskey(state.sema.models, val_sym)
+end
+
+"""
 Generate stamp! call for a resistor.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
@@ -574,10 +595,19 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     n = cg_net_name!(state, nets[2])
     name = LString(instance.name)
 
+    # Check if this resistor uses a model
+    has_model = is_resistor_model_ref(state, instance)
+
     # Get resistance value
     r_expr = if hasparam(instance.params, "r")
+        # Instance-level R parameter overrides model
         cg_expr!(state, getparam(instance.params, "r"))
-    elseif instance.val !== nothing
+    elseif has_model && instance.val !== nothing
+        # Using a model - reference the model's R parameter
+        model_name = cg_model_name!(state, instance.val)
+        :($model_name.R)
+    elseif instance.val !== nothing && !has_model
+        # Direct resistance value
         cg_expr!(state, instance.val)
     else
         # Calculate from rsh, l, w if present
@@ -586,6 +616,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
             w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
             rsh_expr = cg_expr!(state, getparam(instance.params, "rsh"))
             :($rsh_expr * $l_expr / $w_expr)
+        elseif has_model && hasparam(instance.params, "l")
+            # Model with l parameter - use model's rsh if available
+            model_name = cg_model_name!(state, instance.val)
+            l_expr = cg_expr!(state, getparam(instance.params, "l"))
+            w_expr = hasparam(instance.params, "w") ? cg_expr!(state, getparam(instance.params, "w")) : 1e-6
+            :(getproperty($model_name, :rsh, 0.0) * $l_expr / $w_expr)
         else
             1000.0  # Default
         end
@@ -845,6 +881,282 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.ControlledSour
             I_in_idx = get_current_idx(ctx, $(QuoteNode(vname_sym)))
             stamp!(CCCS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $out_p, $out_n, I_in_idx)
         end
+    end
+end
+
+#==============================================================================#
+# Behavioral Source (B-source) Codegen
+#==============================================================================#
+
+"""
+    extract_linear_vcvs_params(expr) -> Union{Nothing, (node, gain)}
+
+Analyze an expression to see if it's a simple linear VCVS expression like:
+- V(node) -> gain=1
+- V(node)*gain -> gain
+- gain*V(node) -> gain
+
+Returns (control_node, gain) if it's a simple VCVS, nothing otherwise.
+"""
+function extract_linear_vcvs_params(state::CodegenState, expr)
+    # Case 1: Just V(node)
+    if expr isa SNode{SP.FunctionCall}
+        fname = lowercase(String(expr.id))
+        if fname == "v" && length(expr.args) >= 1
+            # V(node) with implicit ground reference
+            node = cg_net_name!(state, expr.args[1].item)
+            if length(expr.args) == 1
+                return (node, :gnd, 1.0)
+            elseif length(expr.args) == 2
+                node2 = cg_net_name!(state, expr.args[2].item)
+                return (node, node2, 1.0)
+            end
+        end
+    end
+
+    # Case 2: V(node)*gain or gain*V(node)
+    if expr isa SNode{SP.BinaryExpression}
+        op = Symbol(expr.op)
+        if op == :*
+            lhs = expr.lhs
+            rhs = expr.rhs
+
+            # Try V(node) * gain
+            if lhs isa SNode{SP.FunctionCall} && lowercase(String(lhs.id)) == "v"
+                gain = cg_expr!(state, rhs)
+                if length(lhs.args) == 1
+                    node = cg_net_name!(state, lhs.args[1].item)
+                    return (node, :gnd, gain)
+                elseif length(lhs.args) == 2
+                    node1 = cg_net_name!(state, lhs.args[1].item)
+                    node2 = cg_net_name!(state, lhs.args[2].item)
+                    return (node1, node2, gain)
+                end
+            end
+
+            # Try gain * V(node)
+            if rhs isa SNode{SP.FunctionCall} && lowercase(String(rhs.id)) == "v"
+                gain = cg_expr!(state, lhs)
+                if length(rhs.args) == 1
+                    node = cg_net_name!(state, rhs.args[1].item)
+                    return (node, :gnd, gain)
+                elseif length(rhs.args) == 2
+                    node1 = cg_net_name!(state, rhs.args[1].item)
+                    node2 = cg_net_name!(state, rhs.args[2].item)
+                    return (node1, node2, gain)
+                end
+            end
+        end
+    end
+
+    return nothing
+end
+
+"""
+    transform_bsource_expr(state::CodegenState, expr, p_node, n_node) -> (contrib_expr, uses_other_nodes)
+
+Transform a B-source expression for use with stamp_current_contribution!.
+
+For the branch voltage V(p,n), we use the Vpn parameter passed to the contribution function.
+For other voltage references like V(other_node), we look up from the solution vector x.
+
+Returns (transformed_expr, uses_other_nodes) where:
+- transformed_expr: Expression with V() calls replaced
+- uses_other_nodes: true if the expression references nodes other than p,n
+"""
+function transform_bsource_expr(state::CodegenState, expr, p_node, n_node)
+    uses_other_nodes = Ref(false)
+
+    function transform(e)
+        if e isa SNode{SP.FunctionCall}
+            fname = lowercase(String(e.id))
+            if fname == "v"
+                if length(e.args) == 1
+                    # V(node) - voltage relative to ground
+                    node = cg_net_name!(state, e.args[1].item)
+                    if node == p_node
+                        return :Vpn  # V(p) when n=gnd
+                    elseif node == n_node
+                        return :(0.0)  # V(n) when n is the negative terminal
+                    else
+                        uses_other_nodes[] = true
+                        return :(_get_voltage(x, $node))
+                    end
+                elseif length(e.args) == 2
+                    # V(a, b) - differential voltage
+                    node1 = cg_net_name!(state, e.args[1].item)
+                    node2 = cg_net_name!(state, e.args[2].item)
+                    if node1 == p_node && node2 == n_node
+                        return :Vpn  # V(p, n) is the branch voltage
+                    elseif node1 == n_node && node2 == p_node
+                        return :(-Vpn)  # V(n, p) is negated branch voltage
+                    else
+                        uses_other_nodes[] = true
+                        return :(_get_voltage(x, $node1) - _get_voltage(x, $node2))
+                    end
+                end
+            elseif fname == "i"
+                # I(branch) - current through a branch (not supported yet)
+                @warn "B-source I() references not yet supported"
+                return :(0.0)
+            else
+                # Other function - transform arguments recursively
+                transformed_args = [transform(a.item) for a in e.args]
+                # Map SPICE function names to Julia
+                jfname = get(Dict(
+                    "exp" => :exp, "log" => :log, "log10" => :log10,
+                    "sqrt" => :sqrt, "abs" => :abs,
+                    "sin" => :sin, "cos" => :cos, "tan" => :tan,
+                    "sinh" => :sinh, "cosh" => :cosh, "tanh" => :tanh,
+                    "asin" => :asin, "acos" => :acos, "atan" => :atan,
+                    "pow" => :^, "min" => :min, "max" => :max,
+                ), fname, Symbol(fname))
+                if jfname == :^
+                    return Expr(:call, :^, transformed_args...)
+                else
+                    return Expr(:call, jfname, transformed_args...)
+                end
+            end
+        elseif e isa SNode{SP.BinaryExpression}
+            lhs = transform(e.lhs)
+            rhs = transform(e.rhs)
+            op = Symbol(e.op)
+            # Map ** to ^
+            if op == Symbol("**")
+                op = :^
+            end
+            return Expr(:call, op, lhs, rhs)
+        elseif e isa SNode{SP.UnaryOp}
+            arg = transform(e.expr)
+            op = Symbol(e.op)
+            if op == :-
+                return Expr(:call, :-, arg)
+            elseif op == :+
+                return arg
+            else
+                return Expr(:call, op, arg)
+            end
+        elseif e isa Union{SNode{SP.Parens}, SNode{SP.Prime}, SNode{SP.Brace}}
+            return transform(e.inner)
+        elseif e isa SNode{SP.NumberLiteral}
+            return cg_expr!(state, e)
+        elseif e isa SNode{SP.Identifier}
+            # Parameter reference
+            return cg_expr!(state, e)
+        else
+            # Fallback - use cg_expr!
+            return cg_expr!(state, e)
+        end
+    end
+
+    transformed = transform(expr)
+    return (transformed, uses_other_nodes[])
+end
+
+"""
+Generate stamp! call for a Behavioral source (B element).
+
+B-sources can specify either:
+- v=expr for a behavioral voltage source
+- i=expr or cur=expr for a behavioral current source
+
+For simple linear expressions like V(node)*gain, we convert to VCVS/VCCS.
+For nonlinear expressions, we use stamp_current_contribution! with ForwardDiff AD.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
+    nets = sema_nets(instance)
+    p = cg_net_name!(state, nets[1])
+    n = cg_net_name!(state, nets[2])
+    name = LString(instance.name)
+
+    # Check for v= parameter (voltage source)
+    v_expr = nothing
+    if hasparam(instance.params, "v")
+        v_expr = getparam(instance.params, "v")
+    end
+
+    # Check for i= or cur= parameter (current source)
+    i_expr = nothing
+    if hasparam(instance.params, "i")
+        i_expr = getparam(instance.params, "i")
+    elseif hasparam(instance.params, "cur")
+        i_expr = getparam(instance.params, "cur")
+    end
+
+    # Helper to get voltage from solution vector
+    # (defined here to be available in generated code)
+    get_voltage_helper = quote
+        _get_voltage(x, node) = node == 0 ? 0.0 : (isempty(x) ? 0.0 : x[node])
+    end
+
+    if v_expr !== nothing
+        # Try to extract linear VCVS pattern
+        vcvs_params = extract_linear_vcvs_params(state, v_expr)
+        if vcvs_params !== nothing
+            (ctrl_p, ctrl_n, gain) = vcvs_params
+            # For V() with single arg, ctrl_n is :gnd which means node 0 (ground)
+            ctrl_n_expr = ctrl_n === :gnd ? 0 : ctrl_n
+            return quote
+                let gain = $gain
+                    stamp!(VCVS(gain; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n, $ctrl_p, $ctrl_n_expr)
+                end
+            end
+        else
+            # Nonlinear voltage expression - use stamp_voltage_contribution!
+            # Transform expression to use Vpn for branch voltage
+            (contrib_expr, uses_other_nodes) = transform_bsource_expr(state, v_expr, p, n)
+
+            return quote
+                $get_voltage_helper
+                # Voltage contribution: V(p,n) = expr
+                # Uses an auxiliary current variable to enforce the voltage constraint
+                function _v_contrib_fn(Vpn)
+                    return $contrib_expr
+                end
+                # When x is empty (structure determination phase), use zeros
+                _x_eff = isempty(x) ? zeros(max($p, $n, 1)) : x
+                $(MNA).stamp_voltage_contribution!(ctx, $p, $n, _v_contrib_fn, _x_eff,
+                    $(QuoteNode(Symbol(:I_, name))))
+            end
+        end
+    elseif i_expr !== nothing
+        # Try to extract linear VCCS pattern
+        vccs_params = extract_linear_vcvs_params(state, i_expr)
+        if vccs_params !== nothing
+            (ctrl_p, ctrl_n, gm) = vccs_params
+            ctrl_n_expr = ctrl_n === :gnd ? 0 : ctrl_n
+            # Note: VCCS output convention - positive current from p to n
+            # SPICE B-source i=expr means current flows from n+ to n- through source
+            # which is opposite to VCCS convention, so swap p and n
+            return quote
+                let gm = $gm
+                    stamp!(VCCS(gm; name=$(QuoteNode(Symbol(name)))), ctx, $n, $p, $ctrl_p, $ctrl_n_expr)
+                end
+            end
+        else
+            # Nonlinear current expression - use stamp_current_contribution!
+            # Transform expression to use Vpn for branch voltage
+            (contrib_expr, uses_other_nodes) = transform_bsource_expr(state, i_expr, p, n)
+
+            # SPICE convention: i=expr means current flows from + to - through the source
+            # stamp_current_contribution stamps I(p,n) from p to n
+            # So we use (p, n) directly: current flows from p (+) to n (-)
+            return quote
+                $get_voltage_helper
+                # Current contribution: I(p,n) = expr
+                # Vpn = V(p) - V(n), which equals V(+) - V(-) for the B-source branch
+                function _i_contrib_fn(Vpn)
+                    return $contrib_expr
+                end
+                # When x is empty (structure determination phase), use zeros
+                _x_eff = isempty(x) ? zeros(max($n, $p, 1)) : x
+                $(MNA).stamp_current_contribution!(ctx, $p, $n, _i_contrib_fn, _x_eff)
+            end
+        end
+    else
+        # No recognized parameter - skip
+        @warn "B-source $name has no recognized v= or i= parameter"
+        return :(nothing)
     end
 end
 
@@ -1410,6 +1722,43 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
+    # Codegen model definitions for MNA
+    # For each model, extract parameters and create a NamedTuple
+    for (model_name, defs) in state.sema.models
+        if !isempty(defs)
+            (_, def) = last(defs)  # Use most recent definition
+            model_ast = def.val[1]  # The model SNode
+            model_ref = def.val[2]  # The GlobalRef
+
+            # Check if this is a resistor model
+            typ = LSymbol(model_ast.typ)
+            if typ == :r
+                # Extract model parameters into a NamedTuple
+                model_params = Expr[]
+                for p in model_ast.parameters
+                    pname = LSymbol(p.name)
+                    # Skip meta-parameters
+                    if pname in (:level, :version, :type)
+                        continue
+                    end
+                    pval = cg_expr!(state, p.val)
+                    # Use uppercase for R parameter (SPICE convention)
+                    # Use :(=) for NamedTuple syntax, not :kw (which is for function kwargs)
+                    if pname == :r
+                        push!(model_params, Expr(:(=), :R, pval))
+                    elseif pname == :rsh
+                        push!(model_params, Expr(:(=), :rsh, pval))
+                    else
+                        push!(model_params, Expr(:(=), pname, pval))
+                    end
+                end
+                model_var = cg_model_name!(state, model_name)
+                push!(block.args, :($model_var = ($(model_params...),)))
+            end
+            # TODO: Add support for other model types (capacitor, etc.)
+        end
+    end
+
     # Codegen device instances using MNA stamps
     # For SubcktCall, we need to use the appropriate function based on context
     function codegen_instance(inst)
@@ -1581,7 +1930,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
         $(subckt_defs...)
 
         # Main circuit builder
-        function $(circuit_name)(params, spec::$(MNASpec)=$(MNASpec)())
+        # x is the current solution vector for nonlinear Newton iteration
+        function $(circuit_name)(params, spec::$(MNASpec)=$(MNASpec)(); x::AbstractVector=Float64[])
             ctx = $(MNAContext)()
             $body
             return ctx

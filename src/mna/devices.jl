@@ -944,3 +944,144 @@ function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinV
                 ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, mode::Symbol=:dcop)
     stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, mode=mode)
 end
+
+#==============================================================================#
+# Behavioral Sources (B-sources)
+#==============================================================================#
+
+"""
+    BehavioralVoltageSource{F}
+
+A behavioral voltage source where V(p,n) is determined by evaluating an expression
+that can reference other node voltages.
+
+The `value_fn` is a function `(get_voltage) -> voltage` where `get_voltage(node)` returns
+the voltage at a node by its symbol name.
+
+# Example
+```julia
+# B-source: v=V(1)*2 makes V(p,n) = 2 * V(node_1)
+bsrc = BehavioralVoltageSource(
+    get_v -> 2.0 * get_v(Symbol("1")),
+    name = :B5
+)
+```
+"""
+struct BehavioralVoltageSource{F}
+    value_fn::F      # Function (get_voltage) -> value
+    name::Symbol
+end
+
+function BehavioralVoltageSource(value_fn::F; name::Symbol=:B) where {F}
+    BehavioralVoltageSource{F}(value_fn, name)
+end
+
+export BehavioralVoltageSource
+
+"""
+    BehavioralCurrentSource{F}
+
+A behavioral current source where I(p,n) is determined by evaluating an expression
+that can reference other node voltages.
+
+The `value_fn` is a function `(get_voltage) -> current` where `get_voltage(node)` returns
+the voltage at a node by its symbol name.
+
+# Example
+```julia
+# B-source: i=V(1)*0.001 makes I(p,n) = V(node_1) / 1000
+bsrc = BehavioralCurrentSource(
+    get_v -> get_v(Symbol("1")) * 0.001,
+    name = :B1
+)
+```
+"""
+struct BehavioralCurrentSource{F}
+    value_fn::F      # Function (get_voltage) -> value
+    name::Symbol
+end
+
+function BehavioralCurrentSource(value_fn::F; name::Symbol=:B) where {F}
+    BehavioralCurrentSource{F}(value_fn, name)
+end
+
+export BehavioralCurrentSource
+
+#------------------------------------------------------------------------------#
+# Behavioral Voltage Source Stamping
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(B::BehavioralVoltageSource, ctx::MNAContext, p::Int, n::Int;
+           get_voltage=nothing) -> Int
+
+Stamp a behavioral voltage source. The source voltage is computed by calling
+`B.value_fn(get_voltage)` where `get_voltage(node_name)` returns the voltage at that node.
+
+For DC analysis, this requires an iterative Newton solver since the source value
+depends on other node voltages.
+
+In the linear approximation (first Newton iteration), we evaluate the expression
+at the current solution estimate and stamp as a fixed voltage source.
+
+Returns the index of the source current variable.
+"""
+function stamp!(B::BehavioralVoltageSource, ctx::MNAContext, p::Int, n::Int;
+                get_voltage=nothing)
+    # Allocate current variable
+    I_idx = alloc_current!(ctx, Symbol(:I_, B.name))
+
+    # KCL: current I flows from p through source to n
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+
+    # Voltage equation: Vp - Vn = V_behavioral
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    # Compute the behavioral voltage value
+    v = if get_voltage !== nothing
+        B.value_fn(get_voltage)
+    else
+        # If no voltage accessor provided, use 0 (will be updated in Newton iteration)
+        0.0
+    end
+    stamp_b!(ctx, I_idx, v)
+
+    return I_idx
+end
+
+#------------------------------------------------------------------------------#
+# Behavioral Current Source Stamping
+#------------------------------------------------------------------------------#
+
+"""
+    stamp!(B::BehavioralCurrentSource, ctx::MNAContext, p::Int, n::Int;
+           get_voltage=nothing)
+
+Stamp a behavioral current source. The source current is computed by calling
+`B.value_fn(get_voltage)` where `get_voltage(node_name)` returns the voltage at that node.
+
+Positive current flows from n to p (into the positive terminal p).
+"""
+function stamp!(B::BehavioralCurrentSource, ctx::MNAContext, p::Int, n::Int;
+                get_voltage=nothing)
+    # Compute the behavioral current value
+    i = if get_voltage !== nothing
+        B.value_fn(get_voltage)
+    else
+        # If no voltage accessor provided, use 0 (will be updated in Newton iteration)
+        0.0
+    end
+
+    # Current flows from n to p (into positive terminal)
+    stamp_b!(ctx, p,  i)
+    stamp_b!(ctx, n, -i)
+    return nothing
+end
+
+# Convenience for behavioral sources with symbol nodes
+function stamp!(B::Union{BehavioralVoltageSource, BehavioralCurrentSource},
+                ctx::MNAContext, p::Symbol, n::Symbol; get_voltage=nothing)
+    stamp!(B, ctx, get_node!(ctx, p), get_node!(ctx, n); get_voltage=get_voltage)
+end

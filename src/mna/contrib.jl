@@ -120,7 +120,8 @@ function stamp_contribution!(
     ctx::MNAContext,
     p::Int, n::Int,
     I_val::Real, I_jac_p::Real, I_jac_n::Real,
-    q_val::Real, q_jac_p::Real, q_jac_n::Real
+    q_val::Real, q_jac_p::Real, q_jac_n::Real;
+    Vp::Real=0.0, Vn::Real=0.0
 )
     # Stamp conductance (Jacobian of resistive current)
     stamp_G!(ctx, p, p,  I_jac_p)
@@ -134,13 +135,17 @@ function stamp_contribution!(
     stamp_C!(ctx, n, p, -q_jac_p)
     stamp_C!(ctx, n, n, -q_jac_n)
 
-    # Stamp RHS (companion model: b = I - J*V at operating point)
-    # For Newton iteration, residual = I(V) - I_linear where I_linear = J*V
-    # b contains the constant part after linearization
-    # Actually for standard MNA, we stamp current directly into b
-    # The Jacobian in G handles the linearization
-    stamp_b!(ctx, p, -I_val)
-    stamp_b!(ctx, n,  I_val)
+    # Stamp RHS using Newton companion model
+    # For nonlinear I = f(V), the linearization at operating point V0 is:
+    #   I_linear = f(V0) + f'(V0) * (V - V0)
+    #            = f'(V0) * V + (f(V0) - f'(V0) * V0)
+    # In matrix form: G * V = b, where:
+    #   G = f'(V0) (Jacobian, already stamped above)
+    #   b = I(V0) - dI/dVp * Vp - dI/dVn * Vn
+    # This is the Newton companion model for nonlinear elements
+    b_companion = I_val - I_jac_p * Vp - I_jac_n * Vn
+    stamp_b!(ctx, p, -b_companion)
+    stamp_b!(ctx, n,  b_companion)
 
     return nothing
 end
@@ -323,10 +328,11 @@ function stamp_current_contribution!(
     # Evaluate contribution and extract all derivatives
     result = evaluate_contribution(contrib_fn, Vp, Vn)
 
-    # Stamp into matrices
+    # Stamp into matrices with operating point voltages for companion model
     stamp_contribution!(ctx, p, n,
         result.I, result.dI_dVp, result.dI_dVn,
-        result.q, result.dq_dVp, result.dq_dVn)
+        result.q, result.dq_dVp, result.dq_dVn;
+        Vp=Vp, Vn=Vn)
 
     return nothing
 end

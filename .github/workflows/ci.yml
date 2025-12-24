@@ -52,7 +52,7 @@ jobs:
         run: |
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path="Lexers.jl"))
+            Pkg.develop(PackageSpec(path="../Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '
@@ -61,7 +61,7 @@ jobs:
         run: |
           julia --project=VerilogAParser.jl -e '
             using Pkg
-            Pkg.develop(PackageSpec(path="Lexers.jl"))
+            Pkg.develop(PackageSpec(path="../Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '

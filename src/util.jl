@@ -108,7 +108,10 @@ end
 
 macro kwdef(expr)
     expr = macroexpand(__module__, expr) # to expand @static
-    expr isa Expr && expr.head === :struct || error("Invalid usage of @kwdef")
+    if !(expr isa Expr && expr.head === :struct)
+        @error "Invalid @kwdef expression" typeof(expr) expr_head=(expr isa Expr ? expr.head : nothing) expr
+        error("Invalid usage of @kwdef")
+    end
     expr = expr::Expr
     T = expr.args[2]
     if T isa Expr && T.head === :<:

@@ -1607,70 +1607,21 @@ Generate an MNA-compatible module from a parsed Verilog-A file.
 function make_mna_module(va::VANode)
     vamod = va.stmts[end]
     s = Symbol(String(vamod.id), "_module")
+    typename = Symbol(vamod.id)
 
     # Get the device definition (returns Expr(:toplevel, struct_def, constructor, stamp_method))
     device_expr = CedarSim.make_mna_device(vamod)
-    # Extract the contents to splice into the module body
-    device_contents = device_expr.args
 
-    # Build module body entirely with Expr() to avoid any hygiene transformations
-    # using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
-    using_base = Expr(:using, Expr(:(:),
-        Expr(:., :Base),
-        Expr(:., :AbstractVector),
-        Expr(:., :Real),
-        Expr(:., :Symbol),
-        Expr(:., :Float64),
-        Expr(:., :Int),
-        Expr(:., :isempty),
-        Expr(:., :max),
-        Expr(:., :zeros),
-        Expr(:., :zero)))
-
-    # import ..CedarSim
-    import_cedarsim = Expr(:import, Expr(:., :., :., :CedarSim))
-
-    # using ..CedarSim.VerilogAEnvironment
-    using_vaenv = Expr(:using, Expr(:., :., :., :CedarSim, :VerilogAEnvironment))
-
-    # using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
-    using_mna = Expr(:using, Expr(:(:),
-        Expr(:., :., :., :CedarSim, :MNA),
-        Expr(:., :va_ddt),
-        Expr(:., :stamp_current_contribution!),
-        Expr(:., :MNAContext)))
-
-    # using ForwardDiff: Dual, value, partials
-    using_fd = Expr(:using, Expr(:(:),
-        Expr(:., :ForwardDiff),
-        Expr(:., :Dual),
-        Expr(:., :value),
-        Expr(:., :partials)))
-
-    # import ForwardDiff
-    import_fd = Expr(:import, Expr(:., :ForwardDiff))
-
-    # export TypeName
-    export_stmt = Expr(:export, Symbol(vamod.id))
-
-    module_body = Expr(:block,
-        using_base,
-        import_cedarsim,
-        using_vaenv,
-        using_mna,
-        using_fd,
-        import_fd,
-        export_stmt,
-        device_contents...
-    )
-
-    # Build baremodule expression: Expr(:module, false, name, body)
-    baremod = Expr(:module, false, s, module_body)
-
-    # Build using statement without quoting
-    using_stmt = Expr(:using, Expr(:., :., s))
-
-    Expr(:toplevel, baremod, using_stmt)
+    Expr(:toplevel, :(baremodule $s
+        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+        import ..CedarSim
+        using ..CedarSim.VerilogAEnvironment
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+        using ForwardDiff: Dual, value, partials
+        import ForwardDiff
+        export $typename
+        $(device_expr.args...)
+    end), :(using .$s))
 end
 
 struct VAFile
@@ -1715,11 +1666,10 @@ macro va_str(str)
     if va.ps.errored
         cedarthrow(LoadError("va_str", 0, VAParseError(va)))
     else
-        # Use Core.eval to bypass macro hygiene issues
-        # The expression contains symbols that get mangled if returned from macro
+        # Use runtime eval to handle module definitions which must be at top level.
+        # QuoteNode prevents any hygiene transformations on the AST.
         expr = make_mna_module(va)
-        Core.eval(__module__, expr)
-        nothing
+        :(Core.eval($__module__, $(QuoteNode(expr))))
     end
 end
 

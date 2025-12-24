@@ -207,9 +207,13 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test isapprox(sys.G[p, p], expected_G; rtol=1e-6)
         @test isapprox(sys.G[p, n], -expected_G; rtol=1e-6)
 
-        # Current stamped as -I into b[p] (current leaving node p)
+        # RHS uses Newton companion model: b = I - G*V at operating point
+        # This ensures Newton iteration converges correctly for nonlinear elements
         expected_I = Is * (exp(0.6 / Vt) - 1)
-        @test isapprox(sys.b[p], -expected_I; rtol=1e-6)
+        Vp, Vn = 0.6, 0.0
+        dI_dVp, dI_dVn = expected_G, -expected_G
+        expected_b = expected_I - dI_dVp * Vp - dI_dVn * Vn
+        @test isapprox(sys.b[p], -expected_b; rtol=1e-6)
     end
 
     # VA→MNA integration tests using va_str macro

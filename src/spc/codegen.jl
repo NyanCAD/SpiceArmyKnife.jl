@@ -1433,6 +1433,49 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
     end
 end
 
+"""
+Generate stamp! call for a MOSFET.
+
+For MNA, MOSFETs are VA-generated devices. The model (e.g., nmos_lvt from BSIMCMG)
+is a type with a `stamp!` method. Instance parameters (W, L, etc.) are passed
+as keyword arguments to construct the device.
+"""
+function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
+    nets = sema_nets(instance)
+    # MOSFET ports: drain, gate, source, bulk (4 terminals)
+    d = cg_net_name!(state, nets[1])
+    g = cg_net_name!(state, nets[2])
+    s = cg_net_name!(state, nets[3])
+    b = cg_net_name!(state, nets[4])
+    name = LString(instance.name)
+
+    # Get the model reference
+    model_name = cg_model_name!(state, instance.model)
+
+    # Build instance parameter kwargs
+    param_kwargs = Expr[]
+    for p in instance.params
+        param_name = LSymbol(p.name)
+        param_val = cg_expr!(state, p.val)
+        push!(param_kwargs, Expr(:kw, param_name, param_val))
+    end
+
+    # Generate code to create device instance and stamp it
+    # The model_name is a callable that returns a VA device struct
+    if isempty(param_kwargs)
+        device_expr = :($model_name())
+    else
+        device_expr = Expr(:call, model_name, param_kwargs...)
+    end
+
+    return quote
+        let dev = $device_expr
+            $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
+                t = spec.time, mode = spec.mode, x = x)
+        end
+    end
+end
+
 # Fallback for unhandled instance types - generate nothing
 function cg_mna_instance!(state::CodegenState, instance)
     return :(nothing)  # Skip unimplemented devices
@@ -1624,6 +1667,20 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     if haskey(state.sema.options, :temp)
         temp_expr = cg_expr!(state, state.sema.options[:temp][end][2].val)
         push!(block.args, :(spec = MNASpec(temp=$temp_expr, mode=spec.mode)))
+    end
+
+    # Import exposed models from HDL modules (VA-generated device types)
+    # These are types like nmos_lvt, pmos_lvt from BSIMCMG that have stamp! methods
+    for model in state.sema.exposed_models
+        model_name = cg_model_name!(state, model)
+        # Search for the model in imported HDL modules
+        for hdl_mod in state.sema.imported_hdl_modules
+            if isdefined(hdl_mod, model)
+                # Generate: model_name = HDLModule.model_name
+                push!(block.args, :($model_name = $(GlobalRef(hdl_mod, model))))
+                break
+            end
+        end
     end
 
     # Codegen nets - get_node! for each net (except ports passed as arguments)

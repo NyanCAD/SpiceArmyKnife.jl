@@ -1525,33 +1525,79 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
 
         # Generate unrolled stamping code
+        # The result can be:
+        # 1. Dual{Nothing, Float64, N} - pure resistive (no ddt)
+        # 2. Dual{ContributionTag, T, 1} - contains ddt terms
+        #    where T is the inner port dual (Dual{Nothing, Float64, N})
         branch_stamp = quote
             # Evaluate the branch current
             I_branch = $sum_expr
-            I_val = ForwardDiff.value(I_branch)
+
+            # Handle nested dual structure for mixed resistive/reactive contributions
+            # See mna_ad_stamping.md for design details
+            if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                # ContributionTag is outer: value=resistive, partials[1]=reactive (charge)
+                I_resist = ForwardDiff.value(I_branch)   # Inner dual for resistive I
+                I_react = ForwardDiff.partials(I_branch, 1)  # Inner dual for charge q
+
+                # Extract scalar value and port partials from resistive part
+                I_val = ForwardDiff.value(I_resist)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_ports]...)
+
+                # Extract scalar value and port partials from reactive part (charge)
+                q_val = ForwardDiff.value(I_react)
+                $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_ports]...)
+            elseif I_branch isa ForwardDiff.Dual
+                # Port dual is outer: pure resistive contribution
+                I_val = ForwardDiff.value(I_branch)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_ports]...)
+                q_val = 0.0
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_ports]...)
+            else
+                # Scalar result (e.g., Ids=0 in cutoff)
+                I_val = I_branch isa Real ? Float64(I_branch) : 0.0
+                $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_ports]...)
+                q_val = 0.0
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_ports]...)
+            end
         end
 
-        # Unroll Jacobian stamping for each port k
+        # Stamp resistive Jacobians into G matrix
+        # MNA sign convention: I(p,n) flows from p to n
+        # G[p,k] = +dI/dVk (current leaving p)
+        # G[n,k] = -dI/dVk (current entering n)
         for k in 1:n_ports
             k_node = node_params[k]
             push!(branch_stamp.args, quote
-                let dI_dVk = ForwardDiff.partials(I_branch, $k)
-                    # G[p,k] -= dI/dVk, G[n,k] += dI/dVk
-                    if $p_node != 0 && $k_node != 0
-                        CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, -dI_dVk)
-                    end
-                    if $n_node != 0 && $k_node != 0
-                        CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, dI_dVk)
-                    end
+                if $p_node != 0 && $k_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, $(Symbol("dI_dV", k)))
+                end
+                if $n_node != 0 && $k_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, -$(Symbol("dI_dV", k)))
                 end
             end)
         end
 
-        # Unroll RHS computation: Ieq = I_val - sum(dI/dVk * Vk)
-        ieq_expr = :(I_val)
+        # Stamp reactive Jacobians (capacitances) into C matrix
+        # Same sign convention as G matrix
         for k in 1:n_ports
-            ieq_expr = :($ieq_expr - ForwardDiff.partials(I_branch, $k) * $(Symbol("V_", k)))
+            k_node = node_params[k]
+            push!(branch_stamp.args, quote
+                if $p_node != 0 && $k_node != 0
+                    CedarSim.MNA.stamp_C!(ctx, $p_node, $k_node, $(Symbol("dq_dV", k)))
+                end
+                if $n_node != 0 && $k_node != 0
+                    CedarSim.MNA.stamp_C!(ctx, $n_node, $k_node, -$(Symbol("dq_dV", k)))
+                end
+            end)
         end
+
+        # Stamp RHS: Ieq = I_val - sum(dI/dVk * Vk)
+        ieq_terms = Any[:I_val]
+        for k in 1:n_ports
+            push!(ieq_terms, :(- $(Symbol("dI_dV", k)) * $(Symbol("V_", k))))
+        end
+        ieq_expr = Expr(:call, :+, ieq_terms...)
 
         push!(branch_stamp.args, quote
             let Ieq = $ieq_expr

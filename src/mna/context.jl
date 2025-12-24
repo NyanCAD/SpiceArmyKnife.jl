@@ -235,6 +235,18 @@ end
 #==============================================================================#
 
 """
+    extract_value(x)
+
+Extract the underlying Float64 value from a potentially nested Dual.
+This is needed when ForwardDiff Duals are nested (e.g., ContributionTag wrapping port duals).
+"""
+@inline extract_value(x::Float64) = x
+@inline extract_value(x::Real) = Float64(x)
+@inline function extract_value(x::ForwardDiff.Dual)
+    extract_value(ForwardDiff.value(x))
+end
+
+"""
     stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
 
 Stamp a value into the G (conductance) matrix at position (i, j).
@@ -258,10 +270,11 @@ stamp_G!(ctx, n, n,  G)  # Current leaving n due to Vn
 """
 @inline function stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
-    val == 0 && return nothing  # Skip zero entries
+    v = extract_value(val)
+    v == 0 && return nothing  # Skip zero entries
     push!(ctx.G_I, i)
     push!(ctx.G_J, j)
-    push!(ctx.G_V, Float64(val))
+    push!(ctx.G_V, v)
     return nothing
 end
 
@@ -279,10 +292,11 @@ For the ODE formulation: C * dx/dt + G * x = b
 """
 @inline function stamp_C!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
-    val == 0 && return nothing  # Skip zero entries
+    v = extract_value(val)
+    v == 0 && return nothing  # Skip zero entries
     push!(ctx.C_I, i)
     push!(ctx.C_J, j)
-    push!(ctx.C_V, Float64(val))
+    push!(ctx.C_V, v)
     return nothing
 end
 
@@ -298,7 +312,8 @@ The b vector contains source terms:
 """
 @inline function stamp_b!(ctx::MNAContext, i::Int, val)
     i == 0 && return nothing
-    val == 0 && return nothing
+    v = extract_value(val)
+    v == 0 && return nothing
 
     # Extend b if needed
     if i > length(ctx.b)
@@ -306,7 +321,7 @@ The b vector contains source terms:
         ctx.b[i] = 0.0
     end
 
-    ctx.b[i] += Float64(val)
+    ctx.b[i] += v
     return nothing
 end
 

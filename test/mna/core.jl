@@ -1059,9 +1059,10 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
     # MNASim: Parameterized Circuit Wrapper
     #==========================================================================#
 
-    # Import new exports
+    # Import MNASim and related exports
     using CedarSim.MNA: MNASim, MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
-    using CedarSim.MNA: make_dc_initialized_dae_problem, make_dc_initialized_ode_problem
+    using CedarSim.MNA: MNACircuit
+    using SciMLBase: ODEProblem as SciMLODEProblem
 
     @testset "MNASim basics" begin
         # Define a parameterized circuit builder (new API: params, spec)
@@ -1156,8 +1157,8 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         sys = assemble!(ctx)
         tspan = (0.0, 5τ)
 
-        # Use DC-initialized problem - should start at steady state
-        ode_data = make_dc_initialized_ode_problem(sys, tspan)
+        # Use make_ode_problem which does DC initialization by default
+        ode_data = make_ode_problem(sys, tspan)
 
         # DC initialization means V_out starts at Vcc (steady state)
         @test ode_data.u0[2] ≈ Vcc
@@ -1196,8 +1197,8 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         sys = assemble!(ctx)
         tspan = (0.0, 5τ)
 
-        # Use DC-initialized problem
-        dae_data = make_dc_initialized_dae_problem(sys, tspan)
+        # Use make_dae_problem which does DC initialization by default
+        dae_data = make_dae_problem(sys, tspan)
 
         # DC initialization means consistent ICs
         @test dae_data.u0[1] ≈ Vcc  # vcc
@@ -1282,7 +1283,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
             τ = R * C
             tspan = (0.0, 5τ)
 
-            ode_data = make_dc_initialized_ode_problem(sys, tspan)
+            ode_data = make_ode_problem(sys, tspan)  # DC-initialized by default
 
             M = ode_data.mass_matrix
             f = ode_data.f
@@ -1784,7 +1785,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         using OrdinaryDiffEq
 
         # Build RC circuit with PWL voltage source
-        function build_pwl_rc(params, spec)
+        function build_pwl_rc(params, spec; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1805,14 +1806,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (Vmax=5.0, ramp_time=1e-3, R=1000.0, C=1e-6)
         τ = params.R * params.C  # 1ms
 
-        # Create ODE problem (time-dependent sources handled automatically)
-        prob_data = make_ode_problem(build_pwl_rc, params, (0.0, 5e-3))
-
-        f = ODEFunction(prob_data.f;
-                        mass_matrix = prob_data.mass_matrix,
-                        jac = prob_data.jac,
-                        jac_prototype = prob_data.jac_prototype)
-        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+        # Create ODE problem using MNACircuit (time-dependent sources handled automatically)
+        circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
+        prob = SciMLODEProblem(circuit)
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 
@@ -1831,7 +1827,7 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         using OrdinaryDiffEq
 
         # RC circuit with sinusoidal source
-        function build_sin_rc(params, spec)
+        function build_sin_rc(params, spec; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1853,13 +1849,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (vo=0.0, va=5.0, freq=1000.0, R=1000.0, C=1e-6)
         fc = 1.0 / (2π * params.R * params.C)  # ~159 Hz
 
-        prob_data = make_ode_problem(build_sin_rc, params, (0.0, 5e-3))
-
-        f = ODEFunction(prob_data.f;
-                        mass_matrix = prob_data.mass_matrix,
-                        jac = prob_data.jac,
-                        jac_prototype = prob_data.jac_prototype)
-        prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+        # Create ODE problem using MNACircuit
+        circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
+        prob = SciMLODEProblem(circuit)
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 

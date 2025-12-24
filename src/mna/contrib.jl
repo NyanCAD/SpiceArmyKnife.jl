@@ -385,3 +385,219 @@ function stamp_voltage_contribution!(
 end
 
 export stamp_current_contribution!, stamp_voltage_contribution!, evaluate_contribution
+export stamp_charge_contribution!, evaluate_charge_contribution
+
+#==============================================================================#
+# Charge-Based Contribution Stamping (Phase 6: Nonlinear Capacitors)
+#==============================================================================#
+
+"""
+    evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real) -> NamedTuple
+
+Evaluate a charge function and extract capacitance via AD.
+
+For voltage-dependent capacitors, the charge is q(V) and capacitance is C(V) = dq/dV.
+In transient analysis, the current is I = dq/dt = C(V) * dV/dt.
+
+# Arguments
+- `q_fn`: Function that computes charge q(V)
+- `Vp`: Voltage at positive node
+- `Vn`: Voltage at negative node
+
+# Returns
+NamedTuple with:
+- `q`: Charge value at operating point
+- `dq_dVp`: ∂q/∂Vp (capacitance contribution from positive node)
+- `dq_dVn`: ∂q/∂Vn (capacitance contribution from negative node)
+- `C`: Effective capacitance = dq/dVp - dq/dVn = dq/dVpn
+
+# Example
+```julia
+# Nonlinear junction capacitance: q(V) = Cj0 * φ * (1 - (1 - V/φ)^(1-m))
+q_fn(V) = Cj0 * phi * (1 - (1 - V/phi)^(1-m))
+result = evaluate_charge_contribution(q_fn, 0.3, 0.0)
+# result.C gives the voltage-dependent capacitance at V=0.3
+```
+"""
+function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
+    # Create duals for voltage differentiation
+    Vp_dual = Dual{Nothing}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
+    Vn_dual = Dual{Nothing}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
+
+    # Compute q with branch voltage
+    Vpn_dual = Vp_dual - Vn_dual  # ∂Vpn/∂Vp = 1, ∂Vpn/∂Vn = -1
+
+    result = q_fn(Vpn_dual)
+
+    # Extract values
+    q = _extract_scalar(value(result))
+    dq_dVp = _extract_scalar(partials(result, 1))
+    dq_dVn = _extract_scalar(partials(result, 2))
+
+    # Effective capacitance for branch:
+    # For q(Vpn) where Vpn = Vp - Vn, via chain rule:
+    #   dq/dVp = dq/dVpn * dVpn/dVp = dq/dVpn * 1 = dq/dVpn
+    #   dq/dVn = dq/dVpn * dVpn/dVn = dq/dVpn * (-1) = -dq/dVpn
+    # So the effective capacitance C = dq/dVpn = dq_dVp
+    C = dq_dVp
+
+    return (
+        q = q,
+        dq_dVp = dq_dVp,
+        dq_dVn = dq_dVn,
+        C = C
+    )
+end
+
+"""
+    stamp_charge_contribution!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector)
+
+Stamp a voltage-dependent charge contribution into MNA matrices.
+
+For nonlinear capacitors with charge q(V), this stamps:
+- C matrix: capacitance C(V) = dq/dV at the operating point
+- b vector: charge residual for Newton companion model
+
+The DAE formulation uses:
+    I = dq/dt = C(V) * dV/dt
+
+In the MNA system C*dx/dt + G*x = b, this adds C(V) to the C matrix.
+
+# Arguments
+- `ctx`: MNA context to stamp into
+- `p, n`: Node indices (0 = ground)
+- `q_fn`: Function `V -> q` that computes charge as function of branch voltage
+- `x`: Current solution vector (for node voltages)
+
+# Example
+```julia
+# Linear capacitor: q = C0 * V
+stamp_charge_contribution!(ctx, p, n, V -> C0 * V, x)
+
+# Nonlinear junction cap: q = Cj0 * φ * (1 - (1 - V/φ)^(1-m))
+stamp_charge_contribution!(ctx, p, n, V -> Cj0 * phi * (1 - (1 - V/phi)^(1-m)), x)
+
+# MOSFET gate charge (multi-terminal): q = f(Vgs, Vds)
+# For multi-terminal, use stamp_multiport_charge! instead
+```
+
+# MNA Formulation
+For charge q(V) at branch (p,n):
+- C[p,p] += ∂q/∂Vp, C[p,n] += ∂q/∂Vn
+- C[n,p] -= ∂q/∂Vp, C[n,n] -= ∂q/∂Vn
+
+The current I = dq/dt flows from p to n (positive current leaves p).
+"""
+function stamp_charge_contribution!(
+    ctx::MNAContext,
+    p::Int, n::Int,
+    q_fn,
+    x::AbstractVector
+)
+    # Get node voltages (ground = 0)
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+
+    # Evaluate charge and extract capacitances
+    result = evaluate_charge_contribution(q_fn, Vp, Vn)
+
+    # Stamp capacitance (Jacobian of charge w.r.t. voltages)
+    stamp_C!(ctx, p, p,  result.dq_dVp)
+    stamp_C!(ctx, p, n,  result.dq_dVn)
+    stamp_C!(ctx, n, p, -result.dq_dVp)
+    stamp_C!(ctx, n, n, -result.dq_dVn)
+
+    # For Newton iteration on DAE, we also need to stamp the charge residual
+    # into the RHS. This is handled in the DAE formulation as:
+    # F = C*du + G*u - b = 0
+    # where u includes node voltages and du includes dV/dt.
+    # The charge contribution adds to C, so no direct b stamp needed here.
+
+    return nothing
+end
+
+#==============================================================================#
+# Multi-Port Charge Stamping (Phase 6: MOSFET Gate/Drain/Source/Body charges)
+#==============================================================================#
+
+"""
+    stamp_multiport_charge!(ctx::MNAContext, nodes::NTuple{N,Int}, q_fn, x::AbstractVector) where N
+
+Stamp multi-terminal charge contributions into MNA C matrix.
+
+For complex devices like MOSFETs, charges at each terminal depend on multiple
+node voltages: qg(Vgs, Vds, Vbs), qd(Vgs, Vds, Vbs), etc.
+
+This function stamps all ∂qi/∂Vj capacitance terms for N-terminal devices.
+
+# Arguments
+- `ctx`: MNA context
+- `nodes`: Tuple of node indices (d, g, s, b for MOSFET)
+- `q_fn`: Function `(V1, V2, ..., VN) -> (q1, q2, ..., qN)` computing terminal charges
+- `x`: Current solution vector
+
+# Example
+```julia
+# MOSFET with 4 terminals (d, g, s, b)
+# Charges depend on all terminal voltages relative to source
+function mosfet_charges(Vd, Vg, Vs, Vb)
+    Vgs = Vg - Vs
+    Vds = Vd - Vs
+    Vbs = Vb - Vs
+
+    qg = compute_qg(Vgs, Vds, Vbs)
+    qd = compute_qd(Vgs, Vds, Vbs)
+    qs = -(qg + qd)  # Charge conservation
+    qb = compute_qb(Vgs, Vds, Vbs)
+
+    return (qd, qg, qs, qb)
+end
+
+stamp_multiport_charge!(ctx, (d, g, s, b), mosfet_charges, x)
+```
+
+# MNA Formulation
+For each terminal pair (i, j), stamps:
+- C[i, j] += ∂qi/∂Vj (capacitance from node j affecting charge at node i)
+"""
+function stamp_multiport_charge!(
+    ctx::MNAContext,
+    nodes::NTuple{N,Int},
+    q_fn,
+    x::AbstractVector
+) where N
+    # Get node voltages
+    V = ntuple(i -> nodes[i] == 0 ? 0.0 : x[nodes[i]], Val(N))
+
+    # Create duals for each node voltage
+    # Each dual has partials for all N nodes
+    V_duals = ntuple(Val(N)) do i
+        partials = ntuple(j -> i == j ? 1.0 : 0.0, Val(N))
+        Dual{Nothing}(V[i], partials...)
+    end
+
+    # Evaluate all charges
+    q_duals = q_fn(V_duals...)
+
+    # Extract values and stamp
+    for i in 1:N
+        qi = q_duals[i]
+        node_i = nodes[i]
+
+        if node_i != 0
+            qi_val = _extract_scalar(value(qi))
+            for j in 1:N
+                node_j = nodes[j]
+                if node_j != 0
+                    # ∂qi/∂Vj
+                    dqi_dVj = _extract_scalar(partials(qi, j))
+                    stamp_C!(ctx, node_i, node_j, dqi_dVj)
+                end
+            end
+        end
+    end
+
+    return nothing
+end
+
+export stamp_multiport_charge!

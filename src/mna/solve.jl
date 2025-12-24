@@ -22,8 +22,7 @@ real_time(t::Dual) = Float64(value(t))
 
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
-export make_ode_problem, make_ode_function
-export make_dae_problem, make_dae_function
+export make_ode_problem, make_dae_problem  # For static MNASystem
 export voltage, current, magnitude_db, phase_deg
 
 #==============================================================================#
@@ -515,92 +514,6 @@ function make_ode_function(sys::MNASystem)
 end
 
 """
-    make_ode_function_timed(builder, params, base_spec::MNASpec) -> NamedTuple
-
-Create an ODEFunction for circuits with time-dependent sources.
-
-This version rebuilds b(t) at each timestep by calling the circuit builder
-with updated time in the spec. G and C matrices are assumed constant.
-
-# Arguments
-- `builder`: Circuit builder function `(params, spec) -> MNAContext`
-- `params`: Circuit parameters (NamedTuple)
-- `base_spec`: Base simulation spec (mode will be set to :tran)
-
-# Returns
-NamedTuple with `rhs!`, `jac!`, `mass_matrix`, `jac_prototype`
-
-# Example
-```julia
-function build_rc(params, spec)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-    # PWL voltage source - uses spec.time
-    stamp!(PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]), ctx, vcc, 0;
-           t=spec.time, mode=spec.mode)
-    stamp!(Resistor(params.R), ctx, vcc, out)
-    stamp!(Capacitor(params.C), ctx, out, 0)
-    return ctx
-end
-
-ode_data = make_ode_function_timed(build_rc, (R=1000.0, C=1e-6), MNASpec())
-```
-"""
-function make_ode_function_timed(builder::F, params::P, base_spec::MNASpec) where {F,P}
-    # Build at t=0 to get G, C matrices (assumed time-invariant)
-    tran_spec = MNASpec(temp=base_spec.temp, mode=:tran, time=0.0)
-    ctx0 = builder(params, tran_spec)
-    sys0 = assemble!(ctx0)
-
-    G = sys0.G
-    C = sys0.C
-    n = system_size(sys0)
-
-    # Check if C has any structure
-    has_dynamics = nnz(C) > 0
-
-    if !has_dynamics
-        @warn "No capacitors/inductors - system is purely algebraic. Consider using solve_dc instead."
-    end
-
-    # RHS function: C * du/dt = b(t) - G*u
-    # Rebuilds b(t) at each timestep
-    # Note: We use real_time(t) to extract Float64 from ForwardDiff.Dual
-    # This is needed because MNAContext uses Vector{Float64} for b.
-    # Time gradients will be computed via finite differences by the solver.
-    function rhs!(du, u, p, t)
-        # Build circuit at current time to get b(t)
-        t_real = real_time(t)
-        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=t_real)
-        ctx_t = builder(params, spec_t)
-        sys_t = assemble!(ctx_t)
-
-        # du = b(t) - G*u
-        mul!(du, G, u)
-        du .*= -1
-        du .+= sys_t.b
-        return nothing
-    end
-
-    # Jacobian: d(rhs)/du = -G (constant, doesn't depend on t)
-    function jac!(J, u, p, t)
-        copyto!(J, -G)
-        return nothing
-    end
-
-    return (
-        rhs! = rhs!,
-        jac! = jac!,
-        mass_matrix = C,
-        jac_prototype = -G,
-        sys0 = sys0  # Reference system for node names etc.
-    )
-end
-
-export make_ode_function_timed
-
-"""
     make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
                      u0::Union{Nothing,Vector{Float64}}=nothing) -> NamedTuple
 
@@ -656,90 +569,7 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
     )
 end
 
-"""
-    make_ode_problem(builder, params, tspan; temp=27.0, dc_for_ic=true)
-
-Create an ODE problem from a circuit builder function.
-
-This is the primary API for transient simulation. Time-dependent sources
-(PWL, SIN, PULSE) are handled automatically by passing `spec.time` to stamps.
-
-The builder is called at each timestep to update b(t), while G and C
-matrices are assumed constant (linear circuit topology).
-
-# Arguments
-- `builder`: Circuit builder function `(params, spec) -> MNAContext`
-- `params`: Circuit parameters (NamedTuple)
-- `tspan`: Time span (tstart, tstop)
-- `temp`: Temperature in Celsius (default: 27.0)
-- `dc_for_ic`: Use DC operating point for initial condition (default: true)
-
-# Returns
-NamedTuple with fields for ODEProblem construction:
-- `f`: RHS function
-- `u0`: Initial condition
-- `tspan`: Time span
-- `mass_matrix`: C matrix
-- `jac`: Jacobian function
-- `jac_prototype`: Sparsity pattern
-- `sys`: Reference MNASystem
-
-# Example
-```julia
-function build_pwl_circuit(params, spec)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    # PWL source evaluated at spec.time
-    stamp!(PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]), ctx, vcc, 0;
-           t=spec.time, mode=spec.mode)
-    stamp!(Resistor(params.R), ctx, vcc, out)
-    stamp!(Capacitor(params.C), ctx, out, 0)
-    return ctx
-end
-
-prob_data = make_ode_problem(build_pwl_circuit, (R=1e3, C=1e-6), (0.0, 10e-3))
-
-using OrdinaryDiffEq
-f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix)
-prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
-sol = solve(prob, Rodas5P())
-```
-"""
-function make_ode_problem(builder::F, params::P, tspan::Tuple{Real,Real};
-                          temp::Real=27.0, dc_for_ic::Bool=true) where {F,P}
-    base_spec = MNASpec(temp=Float64(temp), mode=:tran, time=0.0)
-
-    # Get ODE function components
-    ode_funcs = make_ode_function_timed(builder, params, base_spec)
-
-    # Initial condition: DC operating point
-    u0 = if dc_for_ic
-        dc_spec = MNASpec(temp=Float64(temp), mode=:dcop, time=0.0)
-        dc_ctx = builder(params, dc_spec)
-        dc_sys = assemble!(dc_ctx)
-        dc_sol = solve_dc(dc_sys)
-        dc_sol.x
-    else
-        zeros(system_size(ode_funcs.sys0))
-    end
-
-    return (
-        f = ode_funcs.rhs!,
-        u0 = u0,
-        tspan = Float64.(tspan),
-        mass_matrix = ode_funcs.mass_matrix,
-        jac = ode_funcs.jac!,
-        jac_prototype = ode_funcs.jac_prototype,
-        sys = ode_funcs.sys0
-    )
-end
-
-# Alias for backwards compatibility
-const make_ode_problem_timed = make_ode_problem
-
-export make_ode_problem_timed
+# NOTE: Builder-based make_ode_problem removed - use MNACircuit + ODEProblem instead
 
 """
     make_dae_function(sys::MNASystem) -> NamedTuple
@@ -1101,69 +931,8 @@ function solve_ac(sim::MNASim, freqs::AbstractVector{<:Real}; kwargs...)
     return solve_ac(sys, freqs; kwargs...)
 end
 
-#==============================================================================#
-# DC-Initialized Transient Setup
-#==============================================================================#
-
-"""
-    make_dc_initialized_dae_problem(sys::MNASystem, tspan; kwargs...) -> NamedTuple
-
-Create a DAE problem with DC-initialized state, similar to CedarDCOp.
-
-This is the recommended way to set up transient analysis:
-1. Solves DC operating point for consistent initial voltages
-2. Computes consistent initial derivatives
-3. Returns data for DAEProblem construction
-
-# Usage
-```julia
-using Sundials
-using DiffEqBase: BrownFullBasicInit
-
-dae_data = make_dc_initialized_dae_problem(sys, (0.0, 1e-3))
-prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
-                  differential_vars = dae_data.differential_vars)
-sol = solve(prob, IDA(); initializealg = BrownFullBasicInit())
-```
-"""
-function make_dc_initialized_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real})
-    # Step 1: Solve DC to get consistent initial state
-    dc_sol = solve_dc(sys)
-    u0 = dc_sol.x
-
-    # Step 2: Create DAE problem with DC-initialized state
-    return make_dae_problem(sys, tspan; u0=u0)
-end
-
-export make_dc_initialized_dae_problem
-
-"""
-    make_dc_initialized_ode_problem(sys::MNASystem, tspan) -> NamedTuple
-
-Create an ODE problem (mass matrix formulation) with DC-initialized state.
-
-# Usage
-```julia
-using OrdinaryDiffEq
-
-ode_data = make_dc_initialized_ode_problem(sys, (0.0, 1e-3))
-f = ODEFunction(ode_data.f;
-                mass_matrix = ode_data.mass_matrix,
-                jac = ode_data.jac,
-                jac_prototype = ode_data.jac_prototype)
-prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
-sol = solve(prob, Rodas5P())
-```
-"""
-function make_dc_initialized_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real})
-    # Solve DC to get consistent initial state
-    dc_sol = solve_dc(sys)
-    u0 = dc_sol.x
-
-    return make_ode_problem(sys, tspan; u0=u0)
-end
-
-export make_dc_initialized_ode_problem
+# NOTE: make_dc_initialized_* removed - use MNACircuit + DAEProblem/ODEProblem instead
+# The new API automatically performs DC initialization.
 
 #==============================================================================#
 # Utility Functions
@@ -1350,3 +1119,347 @@ Create a scoped view of the system for hierarchical node access.
 scope(sys::MNASystem) = ScopedSystem(sys)
 
 export scope
+
+#==============================================================================#
+# MNACircuit: Phase 6 SciML DAE Integration
+#==============================================================================#
+
+"""
+    MNACircuit{F,P,S}
+
+Circuit definition for SciML DAE integration, following the System → Problem → Solution pattern.
+
+This is the Phase 6 replacement for `CircuitIRODESystem`, providing
+the same interface while using the MNA backend instead of DAECompiler.
+
+# SciML Pattern
+    MNACircuit (System) → DAEProblem (Problem) → solve() → Solution
+
+# Architecture
+- `builder`: Function `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Base simulation spec (MNASpec)
+- `tspan`: Time span for transient
+
+# DAE Formulation
+The MNA system G*x + C*dx/dt = b is converted to implicit DAE form:
+    F(du, u, p, t) = C*du + G*u - b = 0
+
+For nonlinear devices, G, C, and b are recomputed at each evaluation
+by calling the builder with the current operating point.
+
+# Usage
+```julia
+# Define circuit builder
+function build_inverter(params, spec; x=Float64[])
+    ctx = MNAContext()
+    # ... stamp devices, passing x for nonlinear devices ...
+    return ctx
+end
+
+# Create circuit system
+circuit = MNACircuit(build_inverter, (Vdd=1.0,), MNASpec(), (0.0, 1e-6))
+
+# Convert to SciML DAEProblem
+using DifferentialEquations
+prob = DAEProblem(circuit)
+sol = solve(prob, IDA())
+```
+
+# See Also
+- `make_dae_problem`: Lower-level DAE problem creation
+- `CircuitIRODESystem`: DAECompiler equivalent (legacy)
+"""
+struct MNACircuit{F,P,S}
+    builder::F
+    params::P
+    spec::S
+    tspan::Tuple{Float64,Float64}
+end
+
+export MNACircuit
+
+# Keep deprecated alias for backwards compatibility
+const MNACircuitProblem = MNACircuit
+export MNACircuitProblem
+
+"""
+    MNACircuit(builder, params, spec, tspan)
+
+Create an MNA circuit system for SciML DAE solvers.
+
+# Arguments
+- `builder`: Circuit builder `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters
+- `spec`: Base simulation spec
+- `tspan`: Time span `(t0, tf)`
+"""
+function MNACircuit(builder::F, params::P, spec::S, tspan::Tuple{<:Real,<:Real}) where {F,P,S}
+    MNACircuit{F,P,S}(builder, params, spec, Float64.(tspan))
+end
+
+"""
+    system_size(circuit::MNACircuit) -> Int
+
+Get the system size (number of unknowns) for the circuit.
+"""
+function system_size(circuit::MNACircuit)
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    return system_size(sys0)
+end
+
+"""
+    make_dae_residual(circuit::MNACircuit) -> Function
+
+Create the DAE residual function for the circuit.
+
+For nonlinear circuits, this rebuilds G, C, b at each evaluation.
+For linear circuits, the matrices are constant but b(t) may vary.
+
+Returns `(resid, du, u, p, t) -> nothing` suitable for DAEProblem.
+"""
+function make_dae_residual(circuit::MNACircuit)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
+
+    function dae_residual!(resid, du, u, p, t)
+        # Build circuit at current operating point and time
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        # F(du, u) = C*du + G*u - b = 0
+        mul!(resid, sys.C, du)
+        mul!(resid, sys.G, u, 1.0, 1.0)
+        resid .-= sys.b
+
+        return nothing
+    end
+
+    return dae_residual!
+end
+
+"""
+    make_dae_jacobian(circuit::MNACircuit) -> Function
+
+Create the combined Jacobian function J = γ*C + G for DAE solvers.
+
+For Sundials IDA, the Jacobian is ∂F/∂u + γ*∂F/∂(du) = G + γ*C.
+"""
+function make_dae_jacobian(circuit::MNACircuit)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
+
+    function dae_jac!(J, du, u, p, gamma, t)
+        # Build circuit at current operating point
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        # J = G + γ*C
+        copyto!(J, sys.G)
+        J .+= gamma .* sys.C
+
+        return nothing
+    end
+
+    return dae_jac!
+end
+
+"""
+    detect_differential_vars(circuit::MNACircuit) -> BitVector
+
+Determine which variables are differential (have du terms in C*du).
+
+Variables with nonzero rows in the C matrix are differential.
+Variables with zero rows are algebraic (no time derivatives).
+"""
+function detect_differential_vars(circuit::MNACircuit)
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
+    sys0 = assemble!(ctx0)
+    return detect_differential_vars(sys0)
+end
+
+"""
+    detect_differential_vars(sys::MNASystem) -> BitVector
+
+Determine which variables are differential from the C matrix structure.
+"""
+function detect_differential_vars(sys::MNASystem)
+    n = system_size(sys)
+    C = sys.C
+    diff_vars = falses(n)
+
+    for j in 1:n
+        for k in nzrange(C, j)
+            i = rowvals(C)[k]
+            diff_vars[i] = true
+        end
+    end
+
+    return diff_vars
+end
+
+"""
+    compute_initial_conditions(circuit::MNACircuit) -> (u0, du0)
+
+Compute consistent initial conditions via DC operating point.
+
+1. Solves DC problem (du=0) to get u0
+2. Computes du0 to satisfy F(du0, u0, 0) = 0
+
+This is equivalent to CedarDCOp initialization.
+"""
+function compute_initial_conditions(circuit::MNACircuit)
+    # DC solve for u0
+    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
+    u0 = solve_dc(circuit.builder, circuit.params, dc_spec).x
+
+    n = length(u0)
+    du0 = zeros(n)
+
+    # At t=0, need F(du0, u0) = C*du0 + G*u0 - b = 0
+    # So: C*du0 = b - G*u0
+    # For singular C (algebraic vars), du0 components are 0
+
+    ctx0 = circuit.builder(circuit.params, circuit.spec; x=u0)
+    sys0 = assemble!(ctx0)
+
+    rhs = sys0.b - sys0.G * u0
+    diff_vars = detect_differential_vars(sys0)
+
+    # Compute du0 for differential variables
+    # Simple diagonal approximation (works for typical MNA)
+    C_dense = Matrix(sys0.C)
+    for i in 1:n
+        if diff_vars[i]
+            c_ii = C_dense[i, i]
+            if abs(c_ii) > 1e-15
+                du0[i] = rhs[i] / c_ii
+            end
+        end
+    end
+
+    return u0, du0
+end
+
+"""
+    SciMLBase.DAEProblem(circuit::MNACircuit; kwargs...)
+
+Convert MNACircuit to SciML DAEProblem.
+
+# Keyword Arguments
+- `u0`: Initial state (default: DC solution)
+- `du0`: Initial derivatives (default: computed for consistency)
+- `abstol`: Solver tolerance
+
+# Example
+```julia
+circuit = MNACircuit(builder, params, spec, tspan)
+prob = DAEProblem(circuit)
+sol = solve(prob, IDA())
+```
+"""
+function SciMLBase.DAEProblem(circuit::MNACircuit;
+                               u0=nothing, du0=nothing, kwargs...)
+    # Get initial conditions
+    if u0 === nothing || du0 === nothing
+        u0_computed, du0_computed = compute_initial_conditions(circuit)
+        u0 = u0 === nothing ? u0_computed : u0
+        du0 = du0 === nothing ? du0_computed : du0
+    end
+
+    # Create residual function
+    residual! = make_dae_residual(circuit)
+
+    # Detect differential variables
+    diff_vars = detect_differential_vars(circuit)
+
+    return SciMLBase.DAEProblem(
+        residual!,
+        du0,
+        u0,
+        circuit.tspan;
+        differential_vars = diff_vars,
+        kwargs...
+    )
+end
+
+"""
+    SciMLBase.ODEProblem(circuit::MNACircuit; kwargs...)
+
+Convert MNACircuit to SciML ODEProblem with mass matrix formulation.
+
+Uses mass matrix form: C * du/dt = b(t) - G*u
+where C is the capacitance matrix (mass matrix) and the RHS is b - G*u.
+
+# Keyword Arguments
+- `u0`: Initial state (default: DC solution)
+
+# Example
+```julia
+circuit = MNACircuit(builder, params, spec, tspan)
+prob = ODEProblem(circuit)
+sol = solve(prob, Rodas5P())  # Rosenbrock handles singular mass matrix
+```
+
+# Notes
+- For nonlinear circuits with voltage-dependent capacitance, use DAEProblem instead
+- ODEProblem with mass matrix works well for linear circuits with Rodas5P
+- DAEProblem with IDA is recommended for large circuits and better algebraic handling
+"""
+function SciMLBase.ODEProblem(circuit::MNACircuit; u0=nothing, kwargs...)
+    builder = circuit.builder
+    params = circuit.params
+    base_spec = circuit.spec
+
+    # Get initial conditions via DC solve
+    if u0 === nothing
+        dc_spec = MNASpec(temp=base_spec.temp, mode=:dcop, time=0.0)
+        u0 = solve_dc(builder, params, dc_spec).x
+    end
+
+    # Build initial system for structure and mass matrix
+    ctx0 = builder(params, base_spec; x=u0)
+    sys0 = assemble!(ctx0)
+
+    # RHS function: C * du/dt = b(t) - G*u
+    # Returns f = b - G*u (the RHS without mass matrix)
+    function rhs!(du, u, p, t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+
+        # du = b - G*u
+        mul!(du, sys.G, u)
+        du .*= -1
+        du .+= sys.b
+        return nothing
+    end
+
+    # Jacobian: d(rhs)/du = -G
+    function jac!(J, u, p, t)
+        spec_t = MNASpec(temp=base_spec.temp, mode=:tran, time=real_time(t))
+        ctx = builder(params, spec_t; x=u)
+        sys = assemble!(ctx)
+        copyto!(J, -sys.G)
+        return nothing
+    end
+
+    # Create ODEFunction with constant mass matrix C
+    # For nonlinear voltage-dependent capacitors, use DAEProblem instead
+    f = SciMLBase.ODEFunction(
+        rhs!;
+        mass_matrix = sys0.C,
+        jac = jac!,
+        jac_prototype = -sys0.G
+    )
+
+    return SciMLBase.ODEProblem(f, u0, circuit.tspan; kwargs...)
+end
+
+# NOTE: make_nonlinear_dae_* removed - use MNACircuit + DAEProblem instead
+# MNACircuit automatically handles nonlinear devices by rebuilding matrices each step.

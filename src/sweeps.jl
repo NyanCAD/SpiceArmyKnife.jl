@@ -361,7 +361,7 @@ sweepify(x::SweepLike) = x
 sweepify(x) = Sweep(x)
 
 
-using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_dc_initialized_ode_problem
+using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_ode_problem
 
 """
     CircuitSweep
@@ -458,7 +458,7 @@ sol(0.5e-3)  # State at t=0.5ms
 function tran!(sim::MNASim, tspan::Tuple{Real,Real};
                solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
     sys = MNA.assemble!(sim)
-    ode_data = MNA.make_dc_initialized_ode_problem(sys, tspan)
+    ode_data = MNA.make_ode_problem(sys, tspan)  # Uses DC solution for initial condition
 
     f = ODEFunction(ode_data.f;
                     mass_matrix = ode_data.mass_matrix,

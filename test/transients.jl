@@ -5,7 +5,8 @@ include("common.jl")
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using CedarSim.MNA: PWLVoltageSource, PWLCurrentSource, SinVoltageSource
-using CedarSim.MNA: voltage, current, make_ode_problem, make_ode_problem_timed
+using CedarSim.MNA: voltage, current, MNACircuit
+using SciMLBase: ODEProblem
 
 # We'll create a piecewise linear current source that goes through a resistor
 #
@@ -51,19 +52,16 @@ const r_val_pwl = 2
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
     builder = Base.eval(m, code)
 
-    # Solve for 10ms
+    # Solve for 10ms using MNACircuit API
     tspan = (0.0, 10e-3)
-    prob_data = Base.invokelatest(CedarSim.MNA.make_ode_problem_timed, builder, (;), tspan; temp=27.0)
-
-    f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
-                    jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
-    prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+    spec = MNASpec(temp=27.0, mode=:tran, time=0.0)
+    circuit = Base.invokelatest(MNACircuit, builder, (;), spec, tspan)
+    prob = Base.invokelatest(ODEProblem, circuit)
     sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6)
 
     # Get node index for vout
-    # Need to build once to get the system structure
-    spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop, time=0.0)
-    ctx = Base.invokelatest(builder, (;), spec)
+    dc_spec = MNASpec(temp=27.0, mode=:dcop, time=0.0)
+    ctx = Base.invokelatest(builder, (;), dc_spec)
     sys = CedarSim.MNA.assemble!(ctx)
     vout_idx = findfirst(n -> n == :vout, sys.node_names)
 
@@ -75,7 +73,7 @@ const r_val_pwl = 2
     end
 
     # Also test using direct MNA API with PWLCurrentSource
-    function PWLIRcircuit(params, spec)
+    function PWLIRcircuit(params, spec; x=Float64[])
         ctx = MNAContext()
         vout = get_node!(ctx, :vout)
         # PWL: 0->0 at 1ms, 0->i_max at 9ms
@@ -86,10 +84,8 @@ const r_val_pwl = 2
         return ctx
     end
 
-    prob_data2 = CedarSim.MNA.make_ode_problem_timed(PWLIRcircuit, (;), tspan; temp=27.0)
-    f2 = ODEFunction(prob_data2.f; mass_matrix=prob_data2.mass_matrix,
-                     jac=prob_data2.jac, jac_prototype=prob_data2.jac_prototype)
-    prob2 = ODEProblem(f2, prob_data2.u0, prob_data2.tspan)
+    circuit2 = MNACircuit(PWLIRcircuit, (;), MNASpec(temp=27.0), tspan)
+    prob2 = ODEProblem(circuit2)
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Check direct API matches
@@ -172,14 +168,11 @@ const ω_val = 1
     ctx = Base.invokelatest(builder, (;), spec)
     sys = CedarSim.MNA.assemble!(ctx)
 
-    prob_data = Base.invokelatest(CedarSim.MNA.make_ode_problem_timed, builder, (;), tspan; temp=27.0)
-
-    # Explicitly set initial conditions to zero (capacitor/inductor start uncharged)
-    u0 = zeros(length(prob_data.u0))
-
-    f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
-                    jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
-    prob = ODEProblem(f, u0, prob_data.tspan)
+    # Use MNACircuit API with zero initial conditions (capacitor/inductor start uncharged)
+    circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0), tspan)
+    n = CedarSim.MNA.system_size(circuit)
+    u0 = zeros(n)
+    prob = Base.invokelatest(ODEProblem, circuit; u0=u0)
     sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get node index for vout
@@ -195,7 +188,7 @@ const ω_val = 1
     @test isapprox(rms(steady_state_vout), 0.5; atol=0.15, rtol=0.15)
 
     # Test using direct MNA API with SinVoltageSource
-    function butterworth_circuit(params, spec)
+    function butterworth_circuit(params, spec; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
         n1 = get_node!(ctx, :n1)
@@ -210,11 +203,10 @@ const ω_val = 1
         return ctx
     end
 
-    prob_data2 = CedarSim.MNA.make_ode_problem_timed(butterworth_circuit, (;), tspan; temp=27.0)
-    u0_2 = zeros(length(prob_data2.u0))
-    f2 = ODEFunction(prob_data2.f; mass_matrix=prob_data2.mass_matrix,
-                     jac=prob_data2.jac, jac_prototype=prob_data2.jac_prototype)
-    prob2 = ODEProblem(f2, u0_2, prob_data2.tspan)
+    circuit2 = MNACircuit(butterworth_circuit, (;), MNASpec(temp=27.0), tspan)
+    n2 = CedarSim.MNA.system_size(circuit2)
+    u0_2 = zeros(n2)
+    prob2 = ODEProblem(circuit2; u0=u0_2)
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get vout index from direct API circuit

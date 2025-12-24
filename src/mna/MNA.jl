@@ -42,6 +42,7 @@
 module MNA
 
 using Printf
+using ForwardDiff
 
 # Context and stamping primitives
 include("context.jl")

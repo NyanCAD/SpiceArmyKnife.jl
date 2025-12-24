@@ -1085,3 +1085,363 @@ function stamp!(B::Union{BehavioralVoltageSource, BehavioralCurrentSource},
                 ctx::MNAContext, p::Symbol, n::Symbol; get_voltage=nothing)
     stamp!(B, ctx, get_node!(ctx, p), get_node!(ctx, n); get_voltage=get_voltage)
 end
+
+#==============================================================================#
+# Phase 6: Nonlinear Devices
+#==============================================================================#
+
+"""
+    Diode(; Is=1e-14, Vt=0.026, n=1.0, name=:D)
+
+Ideal diode with exponential I-V characteristic: I = Is * (exp(V/(n*Vt)) - 1)
+
+This is a nonlinear device that requires Newton iteration for DC analysis.
+The stamp! method takes `x` parameter for the current operating point.
+
+# Parameters
+- `Is`: Saturation current (default: 1e-14 A)
+- `Vt`: Thermal voltage (default: 0.026 V ≈ kT/q at 300K)
+- `n`: Ideality factor (default: 1.0)
+- `name`: Device name
+
+# Example
+```julia
+function build_circuit(params, spec; x=Float64[])
+    ctx = MNAContext()
+    vin = get_node!(ctx, :vin)
+    out = get_node!(ctx, :out)
+
+    stamp!(VoltageSource(5.0), ctx, vin, 0)
+    stamp!(Resistor(1000.0), ctx, vin, out)
+    stamp!(Diode(Is=1e-14), ctx, out, 0; x=x)
+
+    return ctx
+end
+
+sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
+```
+"""
+struct Diode
+    Is::Float64    # Saturation current
+    Vt::Float64    # Thermal voltage
+    n::Float64     # Ideality factor
+    name::Symbol
+end
+
+function Diode(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0, name::Symbol=:D)
+    Diode(Float64(Is), Float64(Vt), Float64(n), name)
+end
+
+export Diode
+
+"""
+    stamp!(D::Diode, ctx::MNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
+
+Stamp a nonlinear diode into MNA matrices.
+
+Uses Newton companion model: linearize I(V) at operating point V0.
+I ≈ I(V0) + G(V0) * (V - V0) = G*V + (I0 - G*V0)
+
+where G = dI/dV = Is/(n*Vt) * exp(V0/(n*Vt)) at operating point.
+
+Stamps:
+- G matrix: conductance G(V0) between p and n
+- b vector: Newton companion current Ieq = I0 - G*V0
+
+The x parameter provides the current solution for V0.
+"""
+function stamp!(D::Diode, ctx::MNAContext, p::Int, n::Int;
+                x::AbstractVector=Float64[])
+    # Get operating point voltage
+    Vp = p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[p])
+    Vn = n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[n])
+    V0 = Vp - Vn
+
+    # Diode equation: I = Is * (exp(V/(n*Vt)) - 1)
+    Is, Vt, n_factor = D.Is, D.Vt, D.n
+    nVt = n_factor * Vt
+
+    # Current at operating point
+    expterm = exp(V0 / nVt)
+    I0 = Is * (expterm - 1.0)
+
+    # Conductance (dI/dV) at operating point
+    G = Is / nVt * expterm
+
+    # Newton companion model: I = G*V + Ieq
+    # where Ieq = I0 - G*V0
+    Ieq = I0 - G * V0
+
+    # Stamp conductance (same pattern as resistor)
+    stamp_conductance!(ctx, p, n, G)
+
+    # Stamp companion current source
+    # Current I flows from p to n (out of p, into n in MNA convention)
+    # So: -Ieq enters p, +Ieq enters n
+    stamp_b!(ctx, p, -Ieq)
+    stamp_b!(ctx, n,  Ieq)
+
+    return nothing
+end
+
+"""
+    DiodeWithCap(; Is=1e-14, Vt=0.026, n=1.0, Cj0=1e-12, Vj=0.7, m=0.5, name=:D)
+
+Diode with nonlinear junction capacitance.
+
+Combines the exponential I-V characteristic with voltage-dependent
+depletion capacitance model: Cj(V) = Cj0 / (1 - V/Vj)^m
+
+For forward bias (V > Vj), the capacitance is clamped to avoid singularity.
+
+# Parameters
+- `Is`: Saturation current (default: 1e-14 A)
+- `Vt`: Thermal voltage (default: 0.026 V)
+- `n`: Ideality factor (default: 1.0)
+- `Cj0`: Zero-bias junction capacitance (default: 1e-12 F)
+- `Vj`: Junction potential (default: 0.7 V)
+- `m`: Grading coefficient (default: 0.5)
+- `name`: Device name
+
+# Charge Model
+The junction charge is:
+    q(V) = Cj0 * Vj * (1 - (1 - V/Vj)^(1-m)) / (1-m)  for V < Vj
+
+For transient analysis, the capacitor current is I = dq/dt.
+"""
+struct DiodeWithCap
+    Is::Float64    # Saturation current
+    Vt::Float64    # Thermal voltage
+    n::Float64     # Ideality factor
+    Cj0::Float64   # Zero-bias junction capacitance
+    Vj::Float64    # Junction potential
+    m::Float64     # Grading coefficient
+    name::Symbol
+end
+
+function DiodeWithCap(; Is::Real=1e-14, Vt::Real=0.026, n::Real=1.0,
+                       Cj0::Real=1e-12, Vj::Real=0.7, m::Real=0.5, name::Symbol=:D)
+    DiodeWithCap(Float64(Is), Float64(Vt), Float64(n),
+                 Float64(Cj0), Float64(Vj), Float64(m), name)
+end
+
+export DiodeWithCap
+
+"""
+    diode_junction_cap(V, Cj0, Vj, m) -> Float64
+
+Compute the junction capacitance at voltage V.
+
+Cj(V) = Cj0 / (1 - V/Vj)^m
+
+For V approaching Vj, we use a linear extrapolation to avoid singularity.
+"""
+function diode_junction_cap(V, Cj0, Vj, m)
+    # Clamp to avoid singularity near V = Vj
+    Vmax = 0.9 * Vj
+    if V < Vmax
+        return Cj0 / (1 - V/Vj)^m
+    else
+        # Linear extrapolation from Vmax
+        C_at_max = Cj0 / (1 - Vmax/Vj)^m
+        dC_dV = Cj0 * m / Vj / (1 - Vmax/Vj)^(m+1)
+        return C_at_max + dC_dV * (V - Vmax)
+    end
+end
+
+"""
+    diode_junction_charge(V, Cj0, Vj, m) -> Float64
+
+Compute the junction charge at voltage V.
+
+q(V) = ∫ Cj(V) dV = Cj0 * Vj / (1-m) * (1 - (1 - V/Vj)^(1-m))
+
+For V approaching Vj, we use continuation.
+"""
+function diode_junction_charge(V, Cj0, Vj, m)
+    # Clamp to avoid singularity
+    Vmax = 0.9 * Vj
+    if V < Vmax
+        if abs(m - 1.0) < 1e-10
+            # Special case: m = 1 -> q = Cj0 * Vj * log(1 - V/Vj)
+            return -Cj0 * Vj * log(1 - V/Vj)
+        else
+            return Cj0 * Vj / (1 - m) * (1 - (1 - V/Vj)^(1-m))
+        end
+    else
+        # Continuation: q(V) = q(Vmax) + Cj(Vmax) * (V - Vmax)
+        q_at_max = Cj0 * Vj / (1 - m) * (1 - (1 - Vmax/Vj)^(1-m))
+        C_at_max = Cj0 / (1 - Vmax/Vj)^m
+        return q_at_max + C_at_max * (V - Vmax)
+    end
+end
+
+export diode_junction_cap, diode_junction_charge
+
+"""
+    stamp!(D::DiodeWithCap, ctx::MNAContext, p::Int, n::Int; x::AbstractVector=Float64[])
+
+Stamp a diode with junction capacitance.
+
+This stamps both:
+1. Resistive part: Nonlinear I-V (same as Diode)
+2. Reactive part: Voltage-dependent capacitance Cj(V)
+
+For transient analysis, the capacitor current is I = dq/dt = C(V) * dV/dt.
+"""
+function stamp!(D::DiodeWithCap, ctx::MNAContext, p::Int, n::Int;
+                x::AbstractVector=Float64[])
+    # Get operating point voltage
+    Vp = p == 0 ? 0.0 : (isempty(x) ? 0.0 : x[p])
+    Vn = n == 0 ? 0.0 : (isempty(x) ? 0.0 : x[n])
+    V0 = Vp - Vn
+
+    # === Resistive Part (DC current) ===
+    Is, Vt, n_factor = D.Is, D.Vt, D.n
+    nVt = n_factor * Vt
+
+    expterm = exp(V0 / nVt)
+    I0 = Is * (expterm - 1.0)
+    G = Is / nVt * expterm
+
+    Ieq = I0 - G * V0
+
+    # Stamp conductance
+    stamp_conductance!(ctx, p, n, G)
+
+    # Stamp companion current
+    stamp_b!(ctx, p, -Ieq)
+    stamp_b!(ctx, n,  Ieq)
+
+    # === Reactive Part (Junction Capacitance) ===
+    Cj0, Vj, m = D.Cj0, D.Vj, D.m
+
+    # Capacitance at operating point
+    C = diode_junction_cap(V0, Cj0, Vj, m)
+
+    # Stamp capacitance
+    stamp_capacitance!(ctx, p, n, C)
+
+    return nothing
+end
+
+#==============================================================================#
+# Phase 6: Simple MOSFET Model
+#==============================================================================#
+
+"""
+    SimpleMOSFET(; Vth=0.5, K=1e-3, lambda=0.0, Cgd=1e-15, Cgs=1e-15, name=:M)
+
+Simple long-channel MOSFET model for testing.
+
+Uses square-law model in saturation:
+    Ids = K/2 * (Vgs - Vth)^2 * (1 + lambda*Vds)  for Vgs > Vth, Vds > Vgs - Vth
+
+Linear region:
+    Ids = K * ((Vgs - Vth)*Vds - Vds^2/2)  for Vgs > Vth, Vds < Vgs - Vth
+
+# Parameters
+- `Vth`: Threshold voltage (default: 0.5 V)
+- `K`: Transconductance parameter (default: 1e-3 A/V²)
+- `lambda`: Channel length modulation (default: 0)
+- `Cgd`: Gate-drain capacitance (default: 1e-15 F)
+- `Cgs`: Gate-source capacitance (default: 1e-15 F)
+- `name`: Device name
+
+This is NOT a BSIM4-level model. It's a simple model for testing the
+multi-port stamping infrastructure.
+"""
+struct SimpleMOSFET
+    Vth::Float64     # Threshold voltage
+    K::Float64       # Transconductance parameter
+    lambda::Float64  # Channel length modulation
+    Cgd::Float64     # Gate-drain capacitance
+    Cgs::Float64     # Gate-source capacitance
+    name::Symbol
+end
+
+function SimpleMOSFET(; Vth::Real=0.5, K::Real=1e-3, lambda::Real=0.0,
+                       Cgd::Real=1e-15, Cgs::Real=1e-15, name::Symbol=:M)
+    SimpleMOSFET(Float64(Vth), Float64(K), Float64(lambda),
+                 Float64(Cgd), Float64(Cgs), name)
+end
+
+export SimpleMOSFET
+
+"""
+    stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int;
+           x::AbstractVector=Float64[])
+
+Stamp a simple MOSFET (3-terminal: drain, gate, source).
+
+Uses ForwardDiff to compute transconductances gm, gds from the square-law model.
+"""
+function stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int;
+                x::AbstractVector=Float64[])
+    # Get operating point voltages
+    Vd = d == 0 ? 0.0 : (isempty(x) ? 0.0 : x[d])
+    Vg = g == 0 ? 0.0 : (isempty(x) ? 0.0 : x[g])
+    Vs = s == 0 ? 0.0 : (isempty(x) ? 0.0 : x[s])
+
+    Vgs = Vg - Vs
+    Vds = Vd - Vs
+
+    Vth, K, lambda = M.Vth, M.K, M.lambda
+
+    # Compute drain current and derivatives
+    if Vgs <= Vth
+        # Cutoff
+        Ids = 0.0
+        gm = 0.0    # dIds/dVgs
+        gds = 0.0   # dIds/dVds
+    elseif Vds <= Vgs - Vth
+        # Linear region
+        Ids = K * ((Vgs - Vth) * Vds - Vds^2 / 2)
+        gm = K * Vds
+        gds = K * (Vgs - Vth - Vds)
+    else
+        # Saturation
+        Ids = K / 2 * (Vgs - Vth)^2 * (1 + lambda * Vds)
+        gm = K * (Vgs - Vth) * (1 + lambda * Vds)
+        gds = K / 2 * (Vgs - Vth)^2 * lambda
+    end
+
+    # Newton companion: Ids = gm*(Vg-Vs) + gds*(Vd-Vs) + Ieq
+    # where Ieq = Ids - gm*Vgs - gds*Vds
+    Ieq = Ids - gm * Vgs - gds * Vds
+
+    # Stamp drain current (flows from drain to source)
+    # Current leaves drain (d), enters source (s)
+    # dIds/dVd = gds, dIds/dVg = gm, dIds/dVs = -(gm + gds)
+
+    # G matrix contributions
+    stamp_G!(ctx, d, d,  gds)
+    stamp_G!(ctx, d, g,  gm)
+    stamp_G!(ctx, d, s, -(gds + gm))
+
+    stamp_G!(ctx, s, d, -gds)
+    stamp_G!(ctx, s, g, -gm)
+    stamp_G!(ctx, s, s,  gds + gm)
+
+    # Companion current
+    stamp_b!(ctx, d, -Ieq)
+    stamp_b!(ctx, s,  Ieq)
+
+    # === Capacitances ===
+    # Simple linear caps (not voltage-dependent for this simple model)
+    # Cgs between g and s
+    stamp_capacitance!(ctx, g, s, M.Cgs)
+    # Cgd between g and d
+    stamp_capacitance!(ctx, g, d, M.Cgd)
+
+    return nothing
+end
+
+# 4-terminal version with body (bulk)
+function stamp!(M::SimpleMOSFET, ctx::MNAContext, d::Int, g::Int, s::Int, b::Int;
+                x::AbstractVector=Float64[])
+    # For the simple model, body is not connected (ignore body effect)
+    # Just call 3-terminal version
+    stamp!(M, ctx, d, g, s; x=x)
+    return nothing
+end

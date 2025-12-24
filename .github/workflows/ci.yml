@@ -35,12 +35,24 @@ jobs:
       - uses: julia-actions/cache@v2
 
       - name: Install dependencies
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+        run: |
+          julia --project=. -e '
+            using Pkg
+            # Develop local packages explicitly (required for Julia 1.10 which
+            # does not support [sources] in Project.toml)
+            Pkg.develop([
+              PackageSpec(path="Lexers.jl"),
+              PackageSpec(path="SpectreNetlistParser.jl"),
+              PackageSpec(path="VerilogAParser.jl")
+            ])
+            Pkg.instantiate()
+          '
 
       - name: Run SpectreNetlistParser tests
         run: |
           julia --project=SpectreNetlistParser.jl -e '
             using Pkg
+            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '
@@ -49,6 +61,7 @@ jobs:
         run: |
           julia --project=VerilogAParser.jl -e '
             using Pkg
+            Pkg.develop(PackageSpec(path="Lexers.jl"))
             Pkg.instantiate()
             Pkg.test()
           '

@@ -1393,17 +1393,16 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
     # For a simple 2-terminal device, combine all current contributions
     contrib_body = Expr(:block)
 
-    # Add local variable initializations (without type annotations to allow Duals)
+    # Add local variable initializations with parametric type based on Vpn
+    # Use zero(typeof(Vpn)) so variables can hold Duals when Vpn is a Dual
     for decl in local_var_decls
-        # Convert `local name::T = zero(T)` to just `name = 0.0`
-        # This allows variables to hold Dual values during AD
         if decl.head == :local
             inner = decl.args[1]
             if inner isa Expr && inner.head == :(=)
                 lhs = inner.args[1]
                 if lhs isa Expr && lhs.head == :(::)
                     name = lhs.args[1]
-                    push!(contrib_body.args, :($name = 0.0))
+                    push!(contrib_body.args, :($name = zero(typeof(Vpn))))
                 else
                     push!(contrib_body.args, decl)
                 end
@@ -1489,21 +1488,19 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     # Build the contribution evaluation body - includes local vars and expressions
     # that compute the current contributions
     contrib_eval = Expr(:block)
-    # For n-terminal devices, DON'T use `local` or type annotations since:
-    # 1. Type annotations prevent Dual assignment
-    # 2. `local` scopes variables to this block, making them invisible to stamp_code
-    # Just use plain assignment: `name = zero(Float64)` to allow reassignment to Dual
+    # For n-terminal devices:
+    # 1. Don't use `local` - variables need to be visible in outer scope for stamp_code
+    # 2. Use parametric type based on first port dual so variables can hold Duals
+    first_port = port_args[1]
     for decl in local_var_decls
-        # Convert `local name::T = zero(T)` to just `name = zero(Float64)`
-        # The structure is: Expr(:local, Expr(:(=), Expr(:(::), name, T), zero_expr))
+        # Convert `local name::T = zero(T)` to `name = zero(typeof(first_port))`
         if decl.head == :local
             inner = decl.args[1]
             if inner isa Expr && inner.head == :(=)
                 lhs = inner.args[1]
                 if lhs isa Expr && lhs.head == :(::)
                     name = lhs.args[1]
-                    # Don't use `local` - variable needs to be visible in outer scope
-                    push!(contrib_eval.args, :($name = zero(Float64)))
+                    push!(contrib_eval.args, :($name = zero(typeof($first_port))))
                 else
                     # If no type annotation, still strip `local`
                     push!(contrib_eval.args, inner)
@@ -1511,7 +1508,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
             elseif inner isa Expr && inner.head == :(::)
                 # Just type annotation, no initialization
                 name = inner.args[1]
-                push!(contrib_eval.args, :($name = zero(Float64)))
+                push!(contrib_eval.args, :($name = zero(typeof($first_port))))
             else
                 # Plain assignment inside local - just use the assignment
                 push!(contrib_eval.args, inner)

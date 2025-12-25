@@ -22,90 +22,11 @@ using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: voltage, current
 using CedarSim.MNA: VoltageSource, Resistor
-using SpectreNetlistParser
+
+include(joinpath(@__DIR__, "..", "common.jl"))
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
-
-#==============================================================================#
-# Helper: Build MNA circuit from SPICE/Spectre with VA modules
-#
-# This mirrors how spice_select_device works for built-in devices (BSIM4, etc.)
-# but uses imported_hdl_modules for user-provided VA modules.
-#==============================================================================#
-
-"""
-    solve_with_va_modules(code, hdl_modules; lang=:spice, temp=27.0)
-
-Parse SPICE or Spectre code with imported VA modules and solve DC.
-
-This is the integration point that connects VA models to SPICE/Spectre netlists.
-VA modules are passed via `imported_hdl_modules` to `sema()`, which then
-recognizes them when device types are referenced in the netlist.
-
-# Arguments
-- `code`: SPICE or Spectre netlist code
-- `hdl_modules`: Vector of baremodules containing VA device types
-- `lang`: `:spice` or `:spectre`
-- `temp`: Temperature for simulation
-"""
-function solve_with_va_modules(code::String, hdl_modules::Vector{Module};
-                                lang::Symbol=:spice, temp::Real=27.0)
-    # Parse the netlist
-    if lang == :spice
-        ast = SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spice, implicit_title=true)
-    else
-        ast = SpectreNetlistParser.parse(IOBuffer(code); start_lang=:spectre)
-    end
-
-    # Run sema with imported_hdl_modules - this is the key integration point
-    sema_result = CedarSim.sema(ast; imported_hdl_modules=hdl_modules)
-
-    # Generate MNA code
-    state = CedarSim.CodegenState(sema_result)
-
-    # Generate subcircuit builders
-    subckt_defs = Expr[]
-    for (name, subckt_list) in sema_result.subckts
-        if !isempty(subckt_list)
-            _, subckt_sema = first(subckt_list)
-            push!(subckt_defs, CedarSim.codegen_mna_subcircuit(subckt_sema.val, name))
-        end
-    end
-
-    body = CedarSim.codegen_mna!(state)
-
-    code_expr = quote
-        $(subckt_defs...)
-        function circuit(params, spec::$(MNASpec)=$(MNASpec)(); x::AbstractVector=Float64[])
-            ctx = $(MNAContext)()
-            $body
-            return ctx
-        end
-    end
-
-    # Evaluate in a module with VA types imported
-    m = Module()
-    Base.eval(m, :(using CedarSim.MNA))
-    Base.eval(m, :(using CedarSim: ParamLens))
-    Base.eval(m, :(using CedarSim.SpectreEnvironment))
-    for hdl_mod in hdl_modules
-        for name in names(hdl_mod; all=true, imported=false)
-            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
-                val = getfield(hdl_mod, name)
-                isa(val, Type) && Base.eval(m, :(const $name = $val))
-            end
-        end
-    end
-    circuit_fn = Base.eval(m, code_expr)
-
-    spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = Base.invokelatest(circuit_fn, (;), spec)
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
-
-    return sys, sol
-end
 
 #==============================================================================#
 # Tests: VA Modules in SPICE Netlists
@@ -132,7 +53,7 @@ end
         R1 mid 0 2k
         """
 
-        sys, sol = solve_with_va_modules(spice, [varesistor_module]; lang=:spice)
+        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[varesistor_module])
 
         # Voltage divider: 10V * (2k / (2k + 2k)) = 5V
         @test isapprox_deftol(voltage(sol, :vcc), 10.0)
@@ -156,13 +77,14 @@ end
         X1 cap 0 vacapacitor c=1n
         """
 
-        sys, sol = solve_with_va_modules(spice, [vacapacitor_module]; lang=:spice)
+        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[vacapacitor_module])
 
         # DC: capacitor is open, V(cap) = V(vcc) = 5V
         @test isapprox_deftol(voltage(sol, :vcc), 5.0)
         @test isapprox_deftol(voltage(sol, :cap), 5.0)
 
         # Verify capacitance is stamped
+        sys = assemble!(ctx)
         cap_idx = findfirst(n -> n == :cap, sys.node_names)
         @test isapprox(sys.C[cap_idx, cap_idx], 1e-9; atol=1e-12)
     end
@@ -195,7 +117,7 @@ end
         X4 n1 0 vacap c=100p
         """
 
-        sys, sol = solve_with_va_modules(spice, [vares_module, vacap_module]; lang=:spice)
+        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[vares_module, vacap_module])
 
         # Total R = 4k, I = 10/4k = 2.5mA
         # V(n1) = 10 - 2.5mA * 1k = 7.5V
@@ -229,7 +151,7 @@ end
         r1 (mid 0) resistor r=2k
         """
 
-        sys, sol = solve_with_va_modules(spectre, [spectreres_module]; lang=:spectre)
+        ctx, sol = solve_mna_spectre_code(spectre; imported_hdl_modules=[spectreres_module])
 
         @test isapprox_deftol(voltage(sol, :vcc), 10.0)
         @test isapprox_deftol(voltage(sol, :mid), 5.0)
@@ -252,7 +174,7 @@ end
         x1 (vcc 0) spectrerc r=500 c=2n
         """
 
-        sys, sol = solve_with_va_modules(spectre, [spectrerc_module]; lang=:spectre)
+        ctx, sol = solve_mna_spectre_code(spectre; imported_hdl_modules=[spectrerc_module])
 
         @test isapprox_deftol(voltage(sol, :vcc), 5.0)
         # I = V/R = 5/500 = 10mA
@@ -277,7 +199,7 @@ end
         r2 (n2 0) resistor r=1k
         """
 
-        sys, sol = solve_with_va_modules(spectre, [spectreva_module]; lang=:spectre)
+        ctx, sol = solve_mna_spectre_code(spectre; imported_hdl_modules=[spectreva_module])
 
         # Total R = 4k, I = 12/4k = 3mA
         # V(n1) = 12 - 3mA * 1k = 9V

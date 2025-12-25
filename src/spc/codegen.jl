@@ -2088,9 +2088,9 @@ sys = MNA.assemble!(ctx)
 sol = MNA.solve_dc(sys)
 ```
 """
-function make_mna_circuit(ast; circuit_name::Symbol=:circuit)
+function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modules::Vector{Module}=Module[])
     # Run semantic analysis (use sema() not sema_file_or_section to get parameter_order)
-    sema_result = sema(ast)
+    sema_result = sema(ast; imported_hdl_modules)
     state = CodegenState(sema_result)
 
     # Generate subcircuit builders first

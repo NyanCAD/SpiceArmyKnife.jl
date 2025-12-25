@@ -156,15 +156,24 @@ ctx, sol = solve_mna_spice_code(code)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function solve_mna_spice_code(spice_code::String; temp::Real=27.0)
+function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
     ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    code = CedarSim.make_mna_circuit(ast)
+    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
 
     # Evaluate in temporary module
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    # Import VA device types
+    for hdl_mod in imported_hdl_modules
+        for name in names(hdl_mod; all=true, imported=false)
+            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
+                val = getfield(hdl_mod, name)
+                isa(val, Type) && Base.eval(m, :(const $name = $val))
+            end
+        end
+    end
     circuit_fn = Base.eval(m, code)
 
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
@@ -192,15 +201,24 @@ ctx, sol = solve_mna_spectre_code(code)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0)
+function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
     ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spectre_code); start_lang=:spectre)
-    code = CedarSim.make_mna_circuit(ast)
+    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
 
     # Evaluate in temporary module
     m = Module()
     Base.eval(m, :(using CedarSim.MNA))
     Base.eval(m, :(using CedarSim: ParamLens))
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    # Import VA device types
+    for hdl_mod in imported_hdl_modules
+        for name in names(hdl_mod; all=true, imported=false)
+            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
+                val = getfield(hdl_mod, name)
+                isa(val, Type) && Base.eval(m, :(const $name = $val))
+            end
+        end
+    end
     circuit_fn = Base.eval(m, code)
 
     spec = MNASpec(temp=Float64(temp), mode=:dcop)

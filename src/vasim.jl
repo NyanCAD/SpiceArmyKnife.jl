@@ -1593,6 +1593,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         end
 
         # Stamp RHS: Ieq = I_val - sum(dI/dVk * Vk)
+        # MNA sign convention: b[p] -= Ieq, b[n] += Ieq
+        # (matches stamp_contribution! in contrib.jl)
         ieq_terms = Any[:I_val]
         for k in 1:n_ports
             push!(ieq_terms, :(- $(Symbol("dI_dV", k)) * $(Symbol("V_", k))))
@@ -1602,10 +1604,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         push!(branch_stamp.args, quote
             let Ieq = $ieq_expr
                 if $p_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $p_node, Ieq)
+                    CedarSim.MNA.stamp_b!(ctx, $p_node, -Ieq)
                 end
                 if $n_node != 0
-                    CedarSim.MNA.stamp_b!(ctx, $n_node, -Ieq)
+                    CedarSim.MNA.stamp_b!(ctx, $n_node, Ieq)
                 end
             end
         end)

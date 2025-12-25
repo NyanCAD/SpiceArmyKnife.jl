@@ -34,8 +34,8 @@ endmodule
     # NLVCR(R=2) with d=vcc, g=vg, s=gnd
     #
     # Expected current:
-    # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A
-    # V1 sources this current, so I_V1 = -60A
+    # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from vcc to gnd
+    # V1 sources this current (pushes out of positive terminal), so I_V1 = -60A
 
     # Builder accepts x keyword for Newton iteration
     function VRcircuit(params, spec; x=Float64[])
@@ -60,9 +60,9 @@ endmodule
 
     # Verify current:
     # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from d(vcc) to s(gnd)
-    # V1 supplies this current, so I_V1 = +60A (current into V1's positive terminal)
+    # V1 sources this current (pushing out of positive terminal), so I_V1 = -60A
     expected_I = 5.0 * 2.0 * 2.0 * 3.0
-    @test isapprox(current(sol, :I_V1), expected_I; atol=1e-6)
+    @test isapprox(current(sol, :I_V1), -expected_I; atol=1e-6)
 end
 
 end # module ddx_tests

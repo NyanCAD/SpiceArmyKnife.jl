@@ -37,6 +37,11 @@ if PHASE0_MINIMAL
         @testset "basic.jl" include("basic.jl")
         @testset "transients.jl" include("transients.jl")
     end
+
+    # Phase 6: Complex VA models with MNA backend
+    @testset "Phase 6: BSIMCMG MNA" begin
+        @testset "bsimcmg/bsimcmg_mna.jl" include("bsimcmg/bsimcmg_mna.jl")
+    end
 else
     @info "Running full test suite"
 

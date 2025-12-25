@@ -1,8 +1,8 @@
 #==============================================================================#
-# Phase 6 Test: BSIMCMG Inverter with MNA Backend
+# Phase 6 Test: BSIMCMG with MNA Backend
 #
-# This is a simplified version of bsimcmg_spectre.jl that uses the MNA backend
-# instead of DAECompiler.
+# Tests that BSIMCMG Verilog-A model loads and stamp! method works correctly.
+# This is a key test for Phase 6 (full VA & DAE support).
 #==============================================================================#
 
 module bsimcmg_mna
@@ -10,59 +10,77 @@ module bsimcmg_mna
 using CedarSim
 using CedarSim.VerilogAParser
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: VoltageSource, Resistor, MNACircuit
-using SpectreNetlistParser
-using CedarSim.SpectreEnvironment
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: VoltageSource, Resistor
 using Test
-using SciMLBase
 
-# Step 1: Load the BSIMCMG Verilog-A model
-# This uses make_mna_module internally to generate stamp! methods
-println("Step 1: Loading BSIMCMG model...")
-# Use the local copy from VerilogAParser
-const bsimcmg_path = joinpath(dirname(pathof(VerilogAParser)), "..", "cmc_models", "bsimcmg107", "bsimcmg.va")
-@time const bsimcmg = CedarSim.ModelLoader.load_VA_model(bsimcmg_path)
-println("  BSIMCMG module type: ", typeof(bsimcmg))
+@testset "BSIMCMG MNA Backend" begin
+    # Step 1: Load the BSIMCMG Verilog-A model
+    @testset "Model Loading" begin
+        bsimcmg_path = joinpath(dirname(pathof(VerilogAParser)), "..", "cmc_models", "bsimcmg107", "bsimcmg.va")
+        @test isfile(bsimcmg_path)
 
-# Test that we can instantiate a BSIMCMG device
-println("\nStep 2: Testing device instantiation...")
-try
-    dev = bsimcmg()
-    println("  Created device: ", typeof(dev))
-catch e
-    println("  ERROR creating device: ", e)
-    rethrow(e)
-end
+        bsimcmg = CedarSim.ModelLoader.load_VA_model(bsimcmg_path)
+        @test bsimcmg isa DataType
 
-# Step 3: Try to stamp a simple circuit with BSIMCMG
-println("\nStep 3: Testing stamp! method...")
-try
-    ctx = MNAContext()
-    d = get_node!(ctx, :d)
-    g = get_node!(ctx, :g)
-    s = get_node!(ctx, :s)
-    b = get_node!(ctx, :b)
+        # Test device instantiation
+        dev = bsimcmg()
+        @test dev !== nothing
+    end
 
-    # Stamp voltage sources
-    stamp!(VoltageSource(1.0; name=:Vdd), ctx, d, 0)
-    stamp!(VoltageSource(0.5; name=:Vg), ctx, g, 0)
-    stamp!(VoltageSource(0.0; name=:Vs), ctx, s, 0)
-    stamp!(VoltageSource(0.0; name=:Vb), ctx, b, 0)
+    # Step 2: Test stamp! method
+    @testset "Stamp Method" begin
+        bsimcmg_path = joinpath(dirname(pathof(VerilogAParser)), "..", "cmc_models", "bsimcmg107", "bsimcmg.va")
+        bsimcmg = CedarSim.ModelLoader.load_VA_model(bsimcmg_path)
 
-    # Try to stamp BSIMCMG device
-    dev = bsimcmg()
-    x = zeros(10)  # Dummy solution vector
-    MNA.stamp!(dev, ctx, d, g, s, b; t=0.0, mode=:dcop, x=x)
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        g = get_node!(ctx, :g)
+        s = get_node!(ctx, :s)
+        b = get_node!(ctx, :b)
 
-    sys = assemble!(ctx)
-    println("  SUCCESS: stamp! method works")
-    println("  System size: ", MNA.system_size(sys))
-catch e
-    println("  ERROR in stamp!: ", e)
-    for (exc, bt) in Base.catch_stack()
-        showerror(stdout, exc, bt)
-        println()
+        # Stamp voltage sources for biasing
+        stamp!(VoltageSource(1.0; name=:Vdd), ctx, d, 0)
+        stamp!(VoltageSource(0.5; name=:Vg), ctx, g, 0)
+        stamp!(VoltageSource(0.0; name=:Vs), ctx, s, 0)
+        stamp!(VoltageSource(0.0; name=:Vb), ctx, b, 0)
+
+        # Stamp BSIMCMG device
+        dev = bsimcmg()
+        x = zeros(10)  # Dummy solution vector
+        MNA.stamp!(dev, ctx, d, g, s, b; t=0.0, mode=:dcop, x=x)
+
+        # Assemble and check system was created
+        sys = assemble!(ctx)
+        @test MNA.system_size(sys) > 0
+        @test ctx.n_nodes >= 4  # d, g, s, b + internal nodes (si, di)
+        @test ctx.n_currents >= 4  # At least 4 voltage sources
+    end
+
+    # Step 3: Test with PMOS (DEVTYPE=1)
+    @testset "PMOS Device" begin
+        bsimcmg_path = joinpath(dirname(pathof(VerilogAParser)), "..", "cmc_models", "bsimcmg107", "bsimcmg.va")
+        bsimcmg = CedarSim.ModelLoader.load_VA_model(bsimcmg_path)
+
+        ctx = MNAContext()
+        d = get_node!(ctx, :d)
+        g = get_node!(ctx, :g)
+        s = get_node!(ctx, :s)
+        b = get_node!(ctx, :b)
+
+        # Stamp voltage sources
+        stamp!(VoltageSource(1.0; name=:Vdd), ctx, d, 0)
+        stamp!(VoltageSource(0.5; name=:Vg), ctx, g, 0)
+        stamp!(VoltageSource(0.0; name=:Vs), ctx, s, 0)
+        stamp!(VoltageSource(0.0; name=:Vb), ctx, b, 0)
+
+        # Create PMOS device (DEVTYPE=1)
+        pmos = bsimcmg(; DEVTYPE=1)
+        x = zeros(10)
+        MNA.stamp!(pmos, ctx, d, g, s, b; t=0.0, mode=:dcop, x=x)
+
+        sys = assemble!(ctx)
+        @test MNA.system_size(sys) > 0
     end
 end
 

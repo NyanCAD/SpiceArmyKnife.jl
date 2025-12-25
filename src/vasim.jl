@@ -1203,6 +1203,29 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return :(spec.temp + 273.15)  # Convert to Kelvin
     elseif fname == Symbol("\$vt")
         return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
+    elseif fname == Symbol("\$pow")
+        # $pow(a, b) -> pow(a, b) from VerilogAEnvironment
+        return Expr(:call, :pow, map(x -> to_julia(x.item), stmt.args)...)
+    elseif fname == Symbol("\$ln")
+        return Expr(:call, :ln, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$log10")
+        return Expr(:call, :log10, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$exp")
+        return Expr(:call, :exp, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$sqrt")
+        return Expr(:call, :sqrt, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$sin")
+        return Expr(:call, :sin, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$cos")
+        return Expr(:call, :cos, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$tan")
+        return Expr(:call, :tan, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$atan")
+        return Expr(:call, :atan, to_julia(stmt.args[1].item))
+    elseif fname == Symbol("\$atan2")
+        return Expr(:call, :atan, to_julia(stmt.args[1].item), to_julia(stmt.args[2].item))
+    elseif fname == Symbol("\$abs")
+        return Expr(:call, :abs, to_julia(stmt.args[1].item))
     end
 
     # Check for VA-defined function
@@ -1388,9 +1411,26 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
     # For a simple 2-terminal device, combine all current contributions
     contrib_body = Expr(:block)
 
-    # Add local variable initializations
+    # Add local variable initializations (without type annotations to allow Duals)
     for decl in local_var_decls
-        push!(contrib_body.args, decl)
+        # Convert `local name::T = zero(T)` to just `name = 0.0`
+        # This allows variables to hold Dual values during AD
+        if decl.head == :local
+            inner = decl.args[1]
+            if inner isa Expr && inner.head == :(=)
+                lhs = inner.args[1]
+                if lhs isa Expr && lhs.head == :(::)
+                    name = lhs.args[1]
+                    push!(contrib_body.args, :($name = 0.0))
+                else
+                    push!(contrib_body.args, decl)
+                end
+            else
+                push!(contrib_body.args, decl)
+            end
+        else
+            push!(contrib_body.args, decl)
+        end
     end
 
     # Add setup code that doesn't depend on Vpn
@@ -1399,12 +1439,15 @@ function generate_mna_stamp_method_2term(symname, port_args, params_to_locals,
     # For now, assume single current contribution: I(p,n) <+ expr
     # The expr should be a function of Vpn
     if !isempty(contributions)
-        # Replace V() references with Vpn
+        # Process all contributions in order
         for c in contributions
             if c.kind == :current
                 # Transform the expression to use Vpn
                 push!(contrib_body.args, :(contrib_val += $(c.expr)))
             elseif c.kind == :conditional
+                push!(contrib_body.args, c.expr)
+            elseif c.kind == :assignment
+                # Variable assignments (e.g., V = V(p,n), C = Cj0/pow(...))
                 push!(contrib_body.args, c.expr)
             end
         end
@@ -1601,6 +1644,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         end
         ieq_expr = Expr(:call, :+, ieq_terms...)
 
+        # RHS stamping using Newton companion model
+        # Must match the 2-term convention in contrib.jl:
+        #   stamp_b!(ctx, p, -b_companion)
+        #   stamp_b!(ctx, n, +b_companion)
+        # where b_companion = I_val - dI/dVp*Vp - dI/dVn*Vn = Ieq
         push!(branch_stamp.args, quote
             let Ieq = $ieq_expr
                 if $p_node != 0

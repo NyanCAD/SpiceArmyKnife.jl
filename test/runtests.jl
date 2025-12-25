@@ -30,6 +30,14 @@ if PHASE0_MINIMAL
     # Phase 5: VA integration tests (s-dual contribution stamping)
     @testset "Phase 5: MNA VA Integration" begin
         @testset "mna/va.jl" include("mna/va.jl")
+        @testset "ddx.jl" include("ddx.jl")
+        @testset "varegress.jl" include("varegress.jl")
+    end
+
+    # Phase 6: Multi-terminal VA devices and MOSFET tests
+    @testset "Phase 6: MNA VA Multi-Terminal" begin
+        @testset "mna/va_mosfet.jl" include("mna/va_mosfet.jl")
+        @testset "mna/vadistiller.jl" include("mna/vadistiller.jl")
     end
 
     # Phase 4: Basic tests using MNA backend

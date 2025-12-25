@@ -268,10 +268,21 @@ stamp_G!(ctx, n, p, -G)  # Current leaving n due to Vp
 stamp_G!(ctx, n, n,  G)  # Current leaving n due to Vn
 ```
 """
+const _NAN_DEBUG = Ref(false)
+const _FIRST_NAN_FOUND = Ref(false)
+const _FIRST_NAN_STACK = Ref{Union{Nothing, Vector{Base.StackTraces.StackFrame}}}(nothing)
+
 @inline function stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
     v = extract_value(val)
     v == 0 && return nothing  # Skip zero entries
+    # Debug: track first NaN
+    if isnan(v) && _NAN_DEBUG[] && _FIRST_NAN_STACK[] === nothing
+        _FIRST_NAN_STACK[] = stacktrace()
+        println("DEBUG: First NaN in stamp_G! at row=$i, col=$j")
+        println("  val (before extract) = ", val)
+        println("  val type = ", typeof(val))
+    end
     push!(ctx.G_I, i)
     push!(ctx.G_J, j)
     push!(ctx.G_V, v)

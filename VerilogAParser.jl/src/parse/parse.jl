@@ -230,7 +230,25 @@ end
 
 function parse_intreal_declaration(ps)
     kw = take_kw(ps, (INTEGER, REAL))
-    return EXPR(IntRealDeclaration(kw, parse_identifier_list(ps, accept_identifier(ps))))
+    # Parse list of variable declarations with optional initialization
+    # Supports: real x;  real x = 0.0;  real x, y = 1.0, z;
+    idents = EXPRList{IntRealDeclItem}()
+    comma = nothing
+    while true
+        id = accept_identifier(ps)
+        # Check for optional initialization: = expr
+        if kind(nt(ps)) == EQ
+            eq = take(ps, EQ)
+            init = parse_analog_expression(ps)
+            push!(idents, EXPR(IntRealDeclItem(comma, EXPR(IntRealVarDecl(id, eq, init)))))
+        else
+            push!(idents, EXPR(IntRealDeclItem(comma, EXPR(IntRealVarDecl(id, nothing, nothing)))))
+        end
+        # Check for more declarations
+        kind(nt(ps)) == COMMA || break
+        comma = take(ps, COMMA)
+    end
+    return EXPR(IntRealDeclaration(kw, idents))
 end
 
 function parse_net_declaration(ps)

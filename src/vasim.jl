@@ -7,7 +7,7 @@ using VerilogAParser.VerilogACSTParser:
     VerilogModule, Literal, BinaryExpression, BPFC,
     IdentifierPrimary, @case, BranchDeclaration,
     AnalogFunctionDeclaration,
-    IntRealDeclaration, AnalogStatement,
+    IntRealDeclaration, IntRealVarDecl, AnalogStatement,
     AnalogConditionalBlock, AnalogVariableAssignment, AnalogProceduralAssignment,
     Parens, AnalogIf, AnalogFor, AnalogWhile, AnalogRepeat, UnaryOp, Function,
     AnalogSystemTaskEnable, StringLiteral,
@@ -250,8 +250,11 @@ function (to_julia::Scope)(asb::VANode{AnalogSeqBlock})
             @case formof(item) begin
                 IntRealDeclaration => begin
                     T = kw_to_T(item.kw.kw)
-                    for name in item.idents
-                        block_var_types[Symbol(name.item)] = T
+                    for ident in item.idents
+                        # ident.item is IntRealVarDecl with id, eq, init fields
+                        vardecl = ident.item
+                        name = Symbol(assemble_id_string(vardecl.id))
+                        block_var_types[name] = T
                     end
                 end
             end
@@ -540,11 +543,13 @@ function (to_julia::Scope)(fd::VANode{AnalogFunctionDeclaration})
             end
             IntRealDeclaration => begin
                 T = kw_to_T(item.kw.kw)
-                for name in item.idents
-                    ns = Symbol(name.item)
-                    haskey(type_decls, ns) && throw(DuplicateDef(name))
+                for ident in item.idents
+                    # ident.item is IntRealVarDecl with id, eq, init fields
+                    vardecl = ident.item
+                    ns = Symbol(assemble_id_string(vardecl.id))
+                    haskey(type_decls, ns) && throw(DuplicateDef(ns))
                     ns == fname && throw(DuplicateDef(ns))
-                    var_types[Symbol(name.item)] = T
+                    var_types[ns] = T
                 end
             end
             _ => cedarerror("Unknown function declaration item")
@@ -757,7 +762,9 @@ function make_spice_device(vm::VANode{VerilogModule})
                 observe = attr isa Dict && length(attr) == 1 && haskey(attr, :desc)
                 T = kw_to_T(item.kw.kw)
                 for ident in item.idents
-                    name = Symbol(String(ident.item))
+                    # ident.item is IntRealVarDecl with id, eq, init fields
+                    vardecl = ident.item
+                    name = Symbol(assemble_id_string(vardecl.id))
                     var_types[name] = T
                     if observe
                         observables[name] = Symbol(attr[:desc])
@@ -948,6 +955,7 @@ function make_mna_device(vm::VANode{VerilogModule})
 
     internal_nodes = Vector{Symbol}()
     var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
+    var_inits = Dict{Symbol, Any}()  # Store variable initialization expressions
     aliases = Dict{Symbol, Symbol}()
 
     # Pre-pass: collect parameters and nodes
@@ -997,8 +1005,14 @@ function make_mna_device(vm::VANode{VerilogModule})
             IntRealDeclaration => begin
                 T = kw_to_T(item.kw.kw)
                 for ident in item.idents
-                    name = Symbol(String(ident.item))
+                    # ident.item is IntRealVarDecl with id, eq, init fields
+                    vardecl = ident.item
+                    name = Symbol(assemble_id_string(vardecl.id))
                     var_types[name] = T
+                    # Capture initialization expression if present
+                    if vardecl.init !== nothing
+                        var_inits[name] = to_julia_defaults(vardecl.init)
+                    end
                 end
             end
         end
@@ -1044,10 +1058,12 @@ function make_mna_device(vm::VANode{VerilogModule})
     end
 
     # Generate variable declarations for non-parameter local vars
+    # Use initialization expression if provided, otherwise default to zero
     local_var_decls = Any[]
     for (name, T) in var_types
         if !(name in parameter_names)
-            push!(local_var_decls, :(local $name::$T = zero($T)))
+            init_expr = get(var_inits, name, :(zero($T)))
+            push!(local_var_decls, :(local $name::$T = $init_expr))
         end
     end
 
@@ -1380,8 +1396,11 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
             end
             IntRealDeclaration => begin
                 T = kw_to_T(item.kw.kw)
-                for name in item.idents
-                    var_types[Symbol(name.item)] = T
+                for ident in item.idents
+                    # ident.item is IntRealVarDecl with id, eq, init fields
+                    vardecl = ident.item
+                    name = Symbol(assemble_id_string(vardecl.id))
+                    var_types[name] = T
                 end
             end
         end
@@ -1487,14 +1506,22 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     # 2. Use parametric type based on first port dual so variables can hold Duals
     first_port = port_args[1]
     for decl in local_var_decls
-        # Convert `local name::T = zero(T)` to `name = zero(typeof(first_port))`
+        # Convert `local name::T = init_expr` to `name = init_expr + zero(typeof(first_port))`
+        # This preserves the initialization value while ensuring type compatibility with Duals
         if decl.head == :local
             inner = decl.args[1]
             if inner isa Expr && inner.head == :(=)
                 lhs = inner.args[1]
+                rhs = inner.args[2]
                 if lhs isa Expr && lhs.head == :(::)
                     name = lhs.args[1]
-                    push!(contrib_eval.args, :($name = zero(typeof($first_port))))
+                    # Check if rhs is a zero() call - use zero(typeof(...)) for type compatibility
+                    if rhs isa Expr && rhs.head == :call && rhs.args[1] == :zero
+                        push!(contrib_eval.args, :($name = zero(typeof($first_port))))
+                    else
+                        # Preserve the initialization value, add zero for type promotion
+                        push!(contrib_eval.args, :($name = $rhs + zero(typeof($first_port))))
+                    end
                 else
                     # If no type annotation, still strip `local`
                     push!(contrib_eval.args, inner)

@@ -60,6 +60,15 @@ allchildren(p::Identifier) = p.concat === nothing ? (p.id,) : (p.id, p.concat...
 
 const IdentifierListItem = ListItem{EXPR{Identifier}}
 
+# Variable declaration with optional initialization (real x = 0.0;)
+struct IntRealVarDecl
+    id::EXPR{Identifier}
+    eq::Maybe{EXPR{Notation}}
+    init::Maybe{EXPR}
+end
+allchildren(v::IntRealVarDecl) = v.eq === nothing ? (v.id,) : (v.id, v.eq, v.init)
+const IntRealDeclItem = ListItem{EXPR{IntRealVarDecl}}
+
 struct AttrSpec
     name::Union{EXPR{Identifier}, EXPR{Keyword}, EXPR{Error}, EXPR{MacroError}}
     eq::EXPRErr{Notation}
@@ -321,7 +330,7 @@ allchildren(fd::AnalogFunctionDeclaration) = (fd.akw, fd.fkw, fd.fty, fd.id, fd.
 
 struct IntRealDeclaration
     kw::EXPR{Keyword}
-    idents::EXPRList{IdentifierListItem}
+    idents::EXPRList{IntRealDeclItem}
 end
 allchildren(ird::IntRealDeclaration) = (ird.kw, ird.idents...)
 

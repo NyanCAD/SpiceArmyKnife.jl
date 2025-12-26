@@ -501,9 +501,76 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "Real variable with initialization" begin
             # VADistiller uses `real G = 0.0;` at module scope
-            # Currently broken: parser error at inline initialization
-            # Note: This requires VerilogAParser changes
-            @test_broken false
+            # NOW WORKING: parser handles inline variable initialization
+
+            # Test module with variable initialization
+            va"""
+            module VarInitResistor(p, n);
+                parameter real R = 1000.0;
+                real temp_var = 0.0;
+                real scale = 1.0;
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    temp_var = V(p, n) * scale;
+                    I(p, n) <+ temp_var / R;
+                end
+            endmodule
+            """
+
+            # Test in voltage divider circuit
+            function var_init_divider(params, spec)
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                mid = get_node!(ctx, :mid)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(VarInitResistor(R=1000.0), ctx, vcc, mid)
+                stamp!(VarInitResistor(R=1000.0), ctx, mid, 0)
+
+                return ctx
+            end
+
+            ctx = var_init_divider((;), MNASpec())
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+            @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
+            @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)  # 5V / 2kΩ
+        end
+
+        @testset "Real variable with non-zero initialization" begin
+            # Test that non-zero initial values work correctly
+            va"""
+            module VarInitNonZero(p, n);
+                parameter real R = 1000.0;
+                real offset = 0.5;  // Non-zero initial value
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    I(p, n) <+ (V(p, n) + offset) / R;
+                end
+            endmodule
+            """
+
+            function var_init_offset(params, spec)
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(4.5; name=:V1), ctx, vcc, 0)
+                stamp!(VarInitNonZero(R=1000.0), ctx, vcc, 0)
+
+                return ctx
+            end
+
+            ctx = var_init_offset((;), MNASpec())
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            @test isapprox_deftol(voltage(sol, :vcc), 4.5)
+            # Current should be (4.5 + 0.5) / 1000 = 5mA
+            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
         end
 
         @testset "Internal nodes" begin
@@ -535,10 +602,12 @@ end
 # ✅ $vt() - thermal voltage (kT/q)
 # ✅ aliasparam - parameter aliases (aliasparam tref = tnom;)
 #
+# WORKING PARSER FEATURES (for full VADistiller models):
+# ✅ Real variable initialization at module scope (real x = 0.0;)
+#
 # MISSING PARSER FEATURES (needed for full VADistiller models):
 # ❌ $mfactor - device multiplicity
 # ❌ $limit() - voltage limiting for Newton convergence
-# ❌ Real variable initialization at module scope (real x = 0.0;)
 # ❌ @(initial_step) - initialization event handling
 # ❌ analog function definitions (used for reusable computations)
 #
@@ -548,10 +617,10 @@ end
 # ❌ Noise functions (not needed for DC/transient)
 #
 # TESTED VADistiller MODELS:
-# - resistor.va: Parser fails at `real REStemp = 0;`
-# - capacitor.va: Parser fails at `real CAPtemp = 0;`
-# - inductor.va: Parser fails at inline real init
-# - diode.va: Parser fails at inline real init + uses internal nodes
+# - resistor.va: NOW PARSEABLE (inline real init works) - needs internal node support
+# - capacitor.va: NOW PARSEABLE (inline real init works) - needs internal node support
+# - inductor.va: NOW PARSEABLE (inline real init works) - needs internal node support
+# - diode.va: NOW PARSEABLE (inline real init works) - uses internal nodes
 # - bjt.va: Complex - internal nodes, aliasparam, $simparam, $temperature
 # - mos1.va: Complex - same issues as BJT
 # - bsim4v8.va: Very complex - needs all features above

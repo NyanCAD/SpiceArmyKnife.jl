@@ -1018,6 +1018,30 @@ function make_mna_device(vm::VANode{VerilogModule})
         end
     end
 
+    # Second pre-pass: collect named branches (branch declarations like "branch (pos, neg) br;")
+    named_branches = Dict{Symbol, Pair{Symbol,Symbol}}()
+    for child in vm.items
+        item = child.item
+        @case formof(item) begin
+            BranchDeclaration => begin
+                # Extract references (nodes in parentheses)
+                refs = Symbol[]
+                for ref in item.references
+                    push!(refs, Symbol(assemble_id_string(ref.item)))
+                end
+                @assert length(refs) == 2 "Branch declaration must have exactly 2 nodes"
+                pos_node, neg_node = refs[1], refs[2]
+
+                # Extract branch identifiers
+                for bid in item.ids
+                    branch_name = Symbol(assemble_id_string(bid.item.id))
+                    named_branches[branch_name] = pos_node => neg_node
+                end
+            end
+            _ => nothing
+        end
+    end
+
     # Build scope for code generation
     node_order = [ps; internal_nodes; Symbol("0")]
     to_julia_mna = MNAScope(parameter_names, node_order, length(internal_nodes),
@@ -1025,7 +1049,8 @@ function make_mna_device(vm::VANode{VerilogModule})
         Set{Pair{Symbol}}(),
         var_types,
         Dict{Symbol, VAFunction}(), false,
-        to_julia_global.ddx_order)
+        to_julia_global.ddx_order,
+        named_branches)
 
     # Generate analog block code
     analog_body = Expr(:block)
@@ -1187,6 +1212,7 @@ struct MNAScope
     all_functions::Dict{Symbol, VAFunction}
     undefault_ids::Bool
     ddx_order::Vector{Symbol}
+    named_branches::Dict{Symbol, Pair{Symbol,Symbol}}  # Maps branch name -> (pos, neg) nodes
 end
 
 # Forward basic translations to Scope
@@ -1227,6 +1253,20 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         # Voltage access - return variable name that will be replaced with Vpn
         @assert length(stmt.args) in (1, 2)
         id1 = Symbol(stmt.args[1].item)
+
+        # Check if this is a named branch (e.g., V(br) where br is a branch)
+        if length(stmt.args) == 1 && haskey(to_julia.named_branches, id1)
+            # Named branch: V(br) -> V_pos - V_neg
+            branch_nodes = to_julia.named_branches[id1]
+            pos_node, neg_node = branch_nodes.first, branch_nodes.second
+            push!(to_julia.used_branches, pos_node => neg_node)
+            if neg_node == Symbol("0")
+                return pos_node
+            else
+                return :($pos_node - $neg_node)
+            end
+        end
+
         id2 = length(stmt.args) > 1 ? Symbol(stmt.args[2].item) : Symbol("0")
         push!(to_julia.used_branches, id1 => id2)
 
@@ -1236,8 +1276,28 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             return :($id1 - $id2)
         end
     elseif fname == :I
-        # Current access - not supported in simple MNA stamp
-        return :(error("I() probe not supported in MNA contribution"))
+        # Current access
+        @assert length(stmt.args) in (1, 2)
+
+        if length(stmt.args) == 1
+            # I(br) - current through named branch
+            branch_name = Symbol(stmt.args[1].item)
+            if haskey(to_julia.named_branches, branch_name)
+                # Named branch: I(br) returns the branch current variable
+                # The current variable is accessed via a special symbol that will be
+                # replaced with the actual current index in the generated code
+                branch_nodes = to_julia.named_branches[branch_name]
+                push!(to_julia.used_branches, branch_nodes.first => branch_nodes.second)
+                # Return a symbol that represents the branch current
+                # This will be provided as a variable in the generated stamp function
+                return Symbol("_I_branch_", branch_name)
+            else
+                return :(error("I() with single argument requires a named branch"))
+            end
+        else
+            # I(a, b) - not directly supported in contribution-based stamping
+            return :(error("I(a,b) probe not supported in MNA contribution"))
+        end
     elseif fname == :ddt
         # Time derivative - use va_ddt
         return Expr(:call, :va_ddt, to_julia(stmt.args[1].item))
@@ -1297,6 +1357,50 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
                      getproperty(spec, $(QuoteNode(param_sym))) :
                      $default_expr)
         end
+    elseif fname == :analysis
+        # Analysis type check - returns true if current analysis matches the string
+        # Mapping:
+        #   "dc" or "static" -> spec.mode == :dcop
+        #   "tran" or "transient" -> spec.mode == :tran
+        #   "ac" -> spec.mode == :ac
+        #   "nodeset" -> false (not supported)
+        @assert length(stmt.args) == 1 "analysis() takes exactly one argument"
+        analysis_str = to_julia(stmt.args[1].item)
+        if analysis_str isa String
+            analysis_sym = analysis_str
+        else
+            # If it's not a constant string, evaluate at runtime
+            return :(
+                let atype = $analysis_str
+                    if atype == "dc" || atype == "static"
+                        spec.mode == :dcop
+                    elseif atype == "tran" || atype == "transient"
+                        spec.mode == :tran
+                    elseif atype == "ac"
+                        spec.mode == :ac
+                    else
+                        false
+                    end
+                end
+            )
+        end
+        # For constant strings, generate simpler code
+        if analysis_sym == "dc" || analysis_sym == "static"
+            return :(spec.mode == :dcop)
+        elseif analysis_sym == "tran" || analysis_sym == "transient"
+            return :(spec.mode == :tran)
+        elseif analysis_sym == "ac"
+            return :(spec.mode == :ac)
+        else
+            return false
+        end
+    elseif fname == Symbol("\$limit")
+        # $limit(voltage, limiter_fn, ...) - voltage limiting for Newton convergence
+        # In our MNA implementation, we can optionally apply limiting or just return the voltage
+        # For now, we simply return the voltage value without limiting
+        # This allows the model to run, though convergence may be slower
+        voltage_expr = to_julia(stmt.args[1].item)
+        return voltage_expr
     end
 
     # Noise functions - return 0 in MNA (noise not simulated in DC/transient)
@@ -1608,7 +1712,8 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
 
     to_julia_internal = MNAScope(to_julia.parameters, to_julia.node_order,
         to_julia.ninternal_nodes, to_julia.branch_order, to_julia.used_branches, var_types,
-        to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order)
+        to_julia.all_functions, to_julia.undefault_ids, to_julia.ddx_order,
+        to_julia.named_branches)
 
     in_args = [k for k in arg_order if inout_decls[k] in (:input, :inout)]
     out_args = [k for k in arg_order if inout_decls[k] in (:output, :inout)]
@@ -1671,15 +1776,28 @@ function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionS
 
     if length(refs) == 1
         node = refs[1]
-        push!(to_julia.used_branches, node => Symbol("0"))
-        return (kind=kind, p=node, n=Symbol("0"), expr=to_julia(cs.assign_expr))
+        # Check if this is a named branch (e.g., V(br) or I(br) where br is a branch)
+        if haskey(to_julia.named_branches, node)
+            branch_nodes = to_julia.named_branches[node]
+            pos_node, neg_node = branch_nodes.first, branch_nodes.second
+            push!(to_julia.used_branches, pos_node => neg_node)
+            # Return with branch_name to indicate this is a named branch contribution
+            return (kind=kind, p=pos_node, n=neg_node, expr=to_julia(cs.assign_expr),
+                    branch_name=node, is_branch=true)
+        else
+            push!(to_julia.used_branches, node => Symbol("0"))
+            return (kind=kind, p=node, n=Symbol("0"), expr=to_julia(cs.assign_expr),
+                    branch_name=nothing, is_branch=false)
+        end
     elseif length(refs) == 2
         (id1, id2) = refs
         push!(to_julia.used_branches, id1 => id2)
-        return (kind=kind, p=id1, n=id2, expr=to_julia(cs.assign_expr))
+        return (kind=kind, p=id1, n=id2, expr=to_julia(cs.assign_expr),
+                branch_name=nothing, is_branch=false)
     end
 
-    return (kind=:unknown, expr=:(error("Invalid contribution")))
+    return (kind=:unknown, expr=:(error("Invalid contribution")),
+            branch_name=nothing, is_branch=false)
 end
 
 """
@@ -1775,8 +1893,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         end
     end
 
-    # Collect current contributions by branch, and add assignments to contrib_eval
+    # Collect current contributions by branch, and voltage contributions for named branches
     branch_contribs = Dict{Tuple{Symbol,Symbol}, Vector{Any}}()
+    voltage_branch_contribs = Dict{Symbol, NamedTuple}()  # branch_name -> (p, n, exprs)
+
     for c in contributions
         if c.kind == :current
             branch = (c.p, c.n)
@@ -1784,12 +1904,30 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 branch_contribs[branch] = Any[]
             end
             push!(branch_contribs[branch], c.expr)
+        elseif c.kind == :voltage && hasproperty(c, :is_branch) && c.is_branch
+            # Voltage contribution to a named branch (e.g., V(br) <+ expr for inductor)
+            branch_name = c.branch_name
+            if !haskey(voltage_branch_contribs, branch_name)
+                voltage_branch_contribs[branch_name] = (p=c.p, n=c.n, exprs=Any[])
+            end
+            push!(voltage_branch_contribs[branch_name].exprs, c.expr)
         elseif c.kind == :conditional
             push!(contrib_eval.args, c.expr)
         elseif c.kind == :assignment
             # Regular assignment (e.g., cdrain = R*V(g,s)**2)
             push!(contrib_eval.args, c.expr)
         end
+    end
+
+    # Allocate current variables for named branches with voltage contributions
+    branch_current_alloc = Expr(:block)
+    branch_current_vars = Dict{Symbol, Symbol}()  # branch_name -> current_var_name
+    for (branch_name, _) in voltage_branch_contribs
+        I_var = Symbol("_I_branch_", branch_name, "_idx")
+        alloc_name = Symbol(symname, "_I_", branch_name)
+        push!(branch_current_alloc.args,
+            :($I_var = CedarSim.MNA.alloc_current!(ctx, $(QuoteNode(alloc_name)))))
+        branch_current_vars[branch_name] = I_var
     end
 
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
@@ -1971,6 +2109,84 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             :($node_sym = Dual{Nothing}($(Symbol("V_", i)), $partials_tuple...)))
     end
 
+    # Generate branch current extraction for named branches
+    branch_current_extraction = Expr(:block)
+    for (branch_name, I_var) in branch_current_vars
+        I_sym = Symbol("_I_branch_", branch_name)
+        push!(branch_current_extraction.args,
+            :($I_sym = isempty(x) || $I_var > length(x) ? 0.0 : x[$I_var]))
+    end
+
+    # Generate voltage contribution stamping for named branches
+    voltage_stamp_code = Expr(:block)
+    for (branch_name, vc) in voltage_branch_contribs
+        I_var = branch_current_vars[branch_name]
+        p_sym, n_sym = vc.p, vc.n
+        exprs = vc.exprs
+
+        # Look up node indices
+        p_idx = p_sym == Symbol("0") ? nothing : findfirst(==(p_sym), all_node_syms)
+        n_idx = n_sym == Symbol("0") ? nothing : findfirst(==(n_sym), all_node_syms)
+        p_node = p_idx === nothing ? 0 : all_node_params[p_idx]
+        n_node = n_idx === nothing ? 0 : all_node_params[n_idx]
+
+        # Sum all voltage contributions
+        sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
+
+        # Generate stamping code for voltage contribution
+        # V(br) <+ expr means V_p - V_n = expr
+        # With current variable I_br:
+        # - KCL: G[p, I_br] = 1, G[n, I_br] = -1 (current flows from p to n)
+        # - Voltage constraint: G[I_br, p] = 1, G[I_br, n] = -1, b[I_br] = expr
+        #
+        # For inductor: V = L*ddt(I) uses va_ddt which creates Dual{ContributionTag}
+        # - value = resistive part
+        # - partials(1) = reactive part (stamps into C[I_br, I_br])
+
+        v_stamp = quote
+            # Evaluate voltage contribution
+            V_contrib = $sum_expr
+
+            # Stamp KCL: current I flows from p to n
+            if $p_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
+            end
+            if $n_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
+            end
+
+            # Voltage constraint: V_p - V_n = V_contrib
+            CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+            CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
+
+            # Handle reactive (ddt) contributions
+            if V_contrib isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                # Contains ddt() terms
+                V_resist = ForwardDiff.value(V_contrib)
+                V_react = ForwardDiff.partials(V_contrib, 1)
+
+                # V_resist is the resistive voltage part (e.g., R*I)
+                # V_react is the reactive coefficient (e.g., L from L*ddt(I) = L*s*I)
+                V_resist_val = V_resist isa ForwardDiff.Dual ? ForwardDiff.value(V_resist) : Float64(V_resist)
+                V_react_val = V_react isa ForwardDiff.Dual ? ForwardDiff.value(V_react) : Float64(V_react)
+
+                # Stamp RHS with resistive voltage
+                CedarSim.MNA.stamp_b!(ctx, $I_var, V_resist_val)
+
+                # Stamp C matrix for reactive part: V = L*dI/dt
+                # Voltage equation: V_p - V_n - L*dI/dt = 0
+                # This stamps -L into C[I_var, I_var]
+                CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
+            else
+                # Pure resistive voltage
+                V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
+                CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
+            end
+        end
+
+        push!(voltage_stamp_code.args, v_stamp)
+    end
+
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     quote
@@ -1984,8 +2200,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Allocate internal nodes (idempotent - returns existing index if already allocated)
             $internal_node_alloc
 
+            # Allocate current variables for named branches with voltage contributions
+            $branch_current_alloc
+
             # Get operating point voltages (Float64) - used for RHS linearization
             $voltage_extraction
+
+            # Get operating point currents for named branches
+            $branch_current_extraction
 
             # Create duals with partials for each node voltage (terminals + internal)
             # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
@@ -1994,8 +2216,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Evaluate contribution expressions with duals
             $contrib_eval
 
-            # Stamp each branch contribution
+            # Stamp current contributions
             $stamp_code
+
+            # Stamp voltage contributions for named branches (e.g., inductor V = L*dI/dt)
+            $voltage_stamp_code
 
             return nothing
         end
@@ -2021,7 +2246,7 @@ function make_mna_module(va::VANode)
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename

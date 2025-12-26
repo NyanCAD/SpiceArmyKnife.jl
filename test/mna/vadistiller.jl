@@ -994,8 +994,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(ind_va))
             @test !va.ps.errored  # Parsing should succeed
 
-            # The full simulation is broken until branch support is added
-            @test_broken begin
+            # Branch support has been added - test the full simulation
+            @test begin
                 Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
                 function sp_inductor_circuit(params, spec)
@@ -1015,6 +1015,23 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 sol = solve_dc(sys)
                 isapprox(voltage(sol, :mid), 0.0; atol=0.01)
             end
+        end
+
+        @testset "VADistiller sp_diode" begin
+            # The diode model uses:
+            # - analysis() function for checking analysis type
+            # - $limit() for Newton convergence
+            # - Internal node a_int (already supported)
+            # - Complex conditional logic and helper functions
+            #
+            # NOTE: The VerilogAParser doesn't support the analysis() built-in function,
+            # so the parsing fails. MNAScope has analysis() support, but the parser
+            # needs to be extended to recognize it as a valid function call.
+            diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
+            va = VerilogAParser.parse(IOBuffer(diode_va))
+
+            # Parser fails on analysis() - this is a parser limitation
+            @test_broken !va.ps.errored
         end
 
     end
@@ -1055,22 +1072,23 @@ end
 # ✅ Ground node (Symbol("0")) handling in branch contributions
 # ✅ Noise function calls return 0 (appropriate for DC/transient)
 #
-# MISSING PARSER FEATURES (needed for some VADistiller models):
-# ❌ analysis() - check analysis type (used in diode for $limit)
-# ❌ $limit() - voltage limiting for Newton convergence
-# ❌ @(initial_step) - initialization event handling
+# WORKING MNA FEATURES (added):
+# ✅ analysis() - check analysis type in MNAScope (maps to spec.mode)
+# ✅ $limit() - voltage limiting (returns voltage unchanged, model works but may converge slower)
+# ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
 #
-# MISSING MNA FEATURES (needed for complex models):
-# ❌ Branch-based stamping (branch declaration with named branches)
+# MISSING PARSER FEATURES (VerilogAParser needs extension):
+# ❌ analysis() - parser doesn't recognize as built-in function (MNAScope support ready)
+# ❌ @(initial_step) - initialization event handling
 #
 # FULLY WORKING VADISTILLER MODELS:
 # ✅ resistor.va: Parses and simulates correctly (2-terminal passive)
 # ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
+# ✅ inductor.va: Parses and simulates correctly (branch-based with I(br), V(br))
 #
-# PARTIALLY WORKING VADISTILLER MODELS:
-# ⚠️ inductor.va: Parses but needs branch-based stamping (I(br), V(br) <+ ...)
-# ❌ diode.va: Parser error on analysis() function call
-# ❌ bjt.va: Needs internal nodes + analysis() for $limit
-# ❌ mos1.va: Needs internal nodes + analysis() for $limit
+# BLOCKED BY PARSER LIMITATIONS:
+# ❌ diode.va: Parser fails on analysis() function call (MNAScope ready when parser is fixed)
+# ❌ bjt.va: Parser fails on analysis() function call
+# ❌ mos1.va: Parser fails on analysis() function call
 # ❌ bsim4v8.va: Very complex - needs all features above
 #==============================================================================#

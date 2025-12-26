@@ -1411,8 +1411,34 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
     # Check for VA-defined function
     vaf = get(to_julia.all_functions, fname, nothing)
     if vaf !== nothing
+        # Call to a Verilog-A defined function - handle output/inout parameters
         args = map(x -> to_julia(x.item), stmt.args)
-        return Expr(:call, fname, args...)
+        in_args = Any[]
+        out_args = Any[]
+
+        if length(args) != length(vaf.arg_order)
+            return Expr(:call, error, "Wrong number of arguments to function $fname ($args, $(vaf.arg_order))")
+        end
+
+        for (arg, vaarg) in zip(args, vaf.arg_order)
+            kind = vaf.inout_decls[vaarg]
+            if kind == :output || kind == :inout
+                isa(arg, Symbol) || return Expr(:call, error, "Output argument $vaarg to function $fname must be a symbol. Got $arg.")
+                push!(out_args, arg)
+            end
+            if kind == :input || kind == :inout
+                push!(in_args, arg)
+            end
+        end
+        ret = Expr(:call, fname, in_args...)
+        if length(out_args) != 0
+            s = gensym()
+            ret = @nolines quote
+                ($s, ($(out_args...),)) = $ret
+                $s
+            end
+        end
+        return ret
     end
 
     # Default: pass through function call
@@ -1572,8 +1598,12 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     push!(to_julia.used_branches, p_sym => n_sym)
 
     # Get the node variable names (using the convention from generate_mna_stamp_method_nterm)
-    p_idx = findfirst(==(p_sym), to_julia.node_order)
-    n_idx = findfirst(==(n_sym), to_julia.node_order)
+    # Handle ground node (Symbol("0")) specially - it maps to integer 0
+    p_idx = p_sym == Symbol("0") ? nothing : findfirst(==(p_sym), to_julia.node_order)
+    n_idx = n_sym == Symbol("0") ? nothing : findfirst(==(n_sym), to_julia.node_order)
+    # Ground node uses literal 0; other nodes use their parameter symbol
+    p_node = p_idx === nothing ? 0 : Symbol("_node_", p_sym)
+    n_node = n_idx === nothing ? 0 : Symbol("_node_", n_sym)
 
     # For voltage contributions (V(a,b) <+ expr), we need different handling
     if kind == :voltage
@@ -1581,8 +1611,6 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         # This is typically done with a voltage source pattern
         # For now, generate inline stamping (simplified)
         expr = to_julia(cs.assign_expr)
-        p_node = Symbol("_node_", p_sym)
-        n_node = Symbol("_node_", n_sym)
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
             let v_contrib = Float64($expr)
@@ -1606,9 +1634,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     expr = to_julia(cs.assign_expr)
     n_all_nodes = length(to_julia.node_order)
 
-    # Build inline stamping code similar to generate_mna_stamp_method_nterm
-    p_node = Symbol("_node_", p_sym)
-    n_node = Symbol("_node_", n_sym)
+    # p_node and n_node already set above (handles ground node correctly)
 
     # For contributions inside conditionals, we evaluate and stamp inline
     return quote

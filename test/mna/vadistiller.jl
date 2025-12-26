@@ -1028,9 +1028,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(diode_va))
             @test !va.ps.errored  # Parsing now succeeds with analysis() support
 
-            # Full simulation is broken due to complex analog function handling
-            # The model has user-defined functions with output parameters that need
-            # proper handling in MNAScope function call translation
+            # Full simulation is broken - model runs but gives wrong voltage (~1.0V instead of ~0.6V)
+            # Core MNA stamping verified working with simplified test models.
+            # Issue is likely in complex helper functions (DEVpnjlim, etc.) or initialization.
             @test_broken begin
                 Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
@@ -1103,8 +1103,15 @@ end
 # ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
 # ✅ inductor.va: Parses and simulates correctly (branch-based with I(br), V(br))
 #
+# WORKING CORE FEATURES (verified with simplified test models):
+# ✅ Single-node contributions (I(a) <+ expr) - stamps at node and ground correctly
+# ✅ Internal node allocation for VA modules
+# ✅ User-defined function output parameter handling (inout params return tuples)
+#
 # PARTIALLY WORKING VADISTILLER MODELS:
-# ⚠️ diode.va: Parses correctly (analysis() works!), simulation blocked by function translation
+# ⚠️ diode.va: Parses correctly, but simulation gives wrong results
+#    - Core single-node stamping verified working with simplified test
+#    - Issue is likely in complex helper functions (DEVpnjlim) or initialization
 # ⚠️ bjt.va: May parse now with analysis() support - needs testing
 # ⚠️ mos1.va: May parse now with analysis() support - needs testing
 # ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features

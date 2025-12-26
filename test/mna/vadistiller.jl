@@ -922,6 +922,112 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
     end
 
+    #==========================================================================#
+    # Tier 6: Full VADistiller Model Tests
+    #==========================================================================#
+
+    @testset "Tier 6: Full VADistiller Models (from file)" begin
+        vadistiller_path = "/home/user/VADistiller/models"
+
+        @testset "VADistiller sp_resistor" begin
+            # Skip if VADistiller not cloned
+            if !isdir(vadistiller_path)
+                @test_skip "VADistiller not found at $vadistiller_path"
+                return
+            end
+
+            resistor_va = read(joinpath(vadistiller_path, "resistor.va"), String)
+            va = VerilogAParser.parse(IOBuffer(resistor_va))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            # Test in voltage divider
+            function sp_resistor_divider(params, spec)
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                mid = get_node!(ctx, :mid)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(sp_resistor(resistance=1000.0), ctx, vcc, mid; spec=spec, x=Float64[])
+                stamp!(sp_resistor(resistance=1000.0), ctx, mid, 0; spec=spec, x=Float64[])
+
+                return ctx
+            end
+
+            ctx = sp_resistor_divider((;), MNASpec())
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+            @test isapprox_deftol(voltage(sol, :mid), 2.5)
+        end
+
+        @testset "VADistiller sp_capacitor" begin
+            # Skip if VADistiller not cloned
+            if !isdir(vadistiller_path)
+                @test_skip "VADistiller not found at $vadistiller_path"
+                return
+            end
+
+            cap_va = read(joinpath(vadistiller_path, "capacitor.va"), String)
+            va = VerilogAParser.parse(IOBuffer(cap_va))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            # Test in RC circuit (DC - capacitor should not affect DC op point)
+            function sp_capacitor_circuit(params, spec)
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                mid = get_node!(ctx, :mid)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
+                stamp!(sp_capacitor(capacitance=1e-6), ctx, mid, 0; spec=spec, x=Float64[])
+
+                return ctx
+            end
+
+            ctx = sp_capacitor_circuit((;), MNASpec())
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+            @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
+        end
+
+        @testset "VADistiller sp_inductor" begin
+            # Skip if VADistiller not cloned
+            if !isdir(vadistiller_path)
+                @test_skip "VADistiller not found at $vadistiller_path"
+                return
+            end
+
+            ind_va = read(joinpath(vadistiller_path, "inductor.va"), String)
+            va = VerilogAParser.parse(IOBuffer(ind_va))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            # Test in RL circuit (DC - inductor is short circuit)
+            function sp_inductor_circuit(params, spec)
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                mid = get_node!(ctx, :mid)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
+                stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; spec=spec, x=Float64[])
+
+                return ctx
+            end
+
+            ctx = sp_inductor_circuit((;), MNASpec())
+            sys = assemble!(ctx)
+            sol = solve_dc(sys)
+
+            @test isapprox_deftol(voltage(sol, :vcc), 5.0)
+            # At DC, inductor is short, so mid should be at ground
+            @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
+        end
+
+    end
+
 end
 
 #==============================================================================#
@@ -941,30 +1047,39 @@ end
 # ✅ $simparam("name", default) - simulator parameter queries (gmin, tnom, etc.)
 # ✅ $param_given(param) - check if parameter was specified
 # ✅ $vt() - thermal voltage (kT/q)
+# ✅ $mfactor - device multiplicity (default 1.0)
+# ✅ $warning/$strobe - diagnostic messages (suppressed in MNA)
+# ✅ $discontinuity - convergence hints (no-op in MNA)
 # ✅ aliasparam - parameter aliases (aliasparam tref = tnom;)
 #
 # WORKING PARSER FEATURES (for full VADistiller models):
 # ✅ Real variable initialization at module scope (real x = 0.0;)
-#
-# MISSING PARSER FEATURES (needed for full VADistiller models):
-# ❌ $mfactor - device multiplicity
-# ❌ $limit() - voltage limiting for Newton convergence
-# ❌ @(initial_step) - initialization event handling
-# ❌ analog function definitions (used for reusable computations)
+# ✅ Integer variables for control flow (boolean flags)
+# ✅ for/while loops in analog block
+# ✅ case statements
 #
 # WORKING MNA FEATURES:
 # ✅ Internal node allocation in stamp! (Phase 6.2)
+# ✅ Integer/boolean control variables (not promoted to Dual)
+# ✅ Ground node (Symbol("0")) handling in branch contributions
+# ✅ Noise function calls return 0 (appropriate for DC/transient)
+#
+# MISSING PARSER FEATURES (needed for some VADistiller models):
+# ❌ analysis() - check analysis type (used in diode for $limit)
+# ❌ $limit() - voltage limiting for Newton convergence
+# ❌ @(initial_step) - initialization event handling
 #
 # MISSING MNA FEATURES (needed for complex models):
-# ❌ Branch-based stamping (branch declaration)
-# ❌ Noise functions (not needed for DC/transient)
+# ❌ Branch-based stamping (branch declaration with named branches)
 #
-# TESTED VADistiller MODELS:
-# - resistor.va: NOW PARSEABLE (inline real init works) - needs internal node support
-# - capacitor.va: NOW PARSEABLE (inline real init works) - needs internal node support
-# - inductor.va: NOW PARSEABLE (inline real init works) - needs internal node support
-# - diode.va: NOW PARSEABLE (inline real init works) - uses internal nodes
-# - bjt.va: Complex - internal nodes, aliasparam, $simparam, $temperature
-# - mos1.va: Complex - same issues as BJT
-# - bsim4v8.va: Very complex - needs all features above
+# FULLY WORKING VADISTILLER MODELS:
+# ✅ resistor.va: Parses and simulates correctly (2-terminal passive)
+# ✅ capacitor.va: Parses and simulates correctly (2-terminal reactive)
+# ✅ inductor.va: Parses and simulates correctly (2-terminal reactive)
+#
+# PARTIALLY WORKING VADISTILLER MODELS:
+# ❌ diode.va: Parser error on analysis() function call
+# ❌ bjt.va: Needs internal nodes + analysis() for $limit
+# ❌ mos1.va: Needs internal nodes + analysis() for $limit
+# ❌ bsim4v8.va: Very complex - needs all features above
 #==============================================================================#

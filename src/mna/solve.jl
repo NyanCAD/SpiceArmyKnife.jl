@@ -60,6 +60,13 @@ Base.@kwdef struct MNASpec{T<:Real}
     temp::Float64 = 27.0
     mode::Symbol = :tran
     time::T = 0.0
+    # Common simulator parameters (for $simparam access)
+    gmin::Float64 = 1e-12      # Minimum conductance
+    tnom::Float64 = 27.0       # Nominal temperature (Celsius)
+    abstol::Float64 = 1e-12    # Absolute tolerance
+    reltol::Float64 = 1e-3     # Relative tolerance
+    vntol::Float64 = 1e-6      # Voltage tolerance
+    iabstol::Float64 = 1e-12   # Current absolute tolerance
 end
 
 export MNASpec
@@ -69,14 +76,18 @@ export MNASpec
 
 Create new spec with different temperature.
 """
-with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time)
+with_temp(spec::MNASpec, temp::Real) = MNASpec(temp=Float64(temp), mode=spec.mode, time=spec.time,
+    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_mode(spec::MNASpec, mode::Symbol) -> MNASpec
 
 Create new spec with different mode.
 """
-with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time)
+with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time=spec.time,
+    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    vntol=spec.vntol, iabstol=spec.iabstol)
 
 """
     with_time(spec::MNASpec, t::Real) -> MNASpec
@@ -84,7 +95,9 @@ with_mode(spec::MNASpec, mode::Symbol) = MNASpec(temp=spec.temp, mode=mode, time
 Create new spec with different time.
 Note: time type is preserved to support ForwardDiff Dual numbers.
 """
-with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t)
+with_time(spec::MNASpec, t::T) where {T<:Real} = MNASpec(temp=spec.temp, mode=spec.mode, time=t,
+    gmin=spec.gmin, tnom=spec.tnom, abstol=spec.abstol, reltol=spec.reltol,
+    vntol=spec.vntol, iabstol=spec.iabstol)
 
 export with_temp, with_mode, with_time
 

@@ -19,6 +19,7 @@ using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
+using VerilogAParser
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -319,39 +320,189 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
     end
 
     #==========================================================================#
-    # Feature Tests: Parser/Codegen Extensions Needed
-    # These are marked as broken - don't even try to parse them
+    # Feature Tests: VA System Functions
     #==========================================================================#
 
-    @testset "Feature: Parser Extensions Needed" begin
+    @testset "Feature: VA System Functions" begin
 
         @testset "\$temperature access" begin
-            # VADistiller models use $temperature for temp-dependent parameters
-            # Currently broken: $temperature not implemented in MNAScope
-            @test_broken false
+            # Test temperature-dependent resistor using $temperature
+            va_code = raw"""
+            module VATempResistor(p, n);
+                parameter real R0 = 1000.0;
+                parameter real TC = 0.004;
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    I(p,n) <+ V(p,n) / (R0 * (1.0 + TC * ($temperature() - 300.0)));
+                end
+            endmodule
+            """
+            va = VerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            # Test at default temp (27C = 300.15K)
+            function temp_resistor_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(VATempResistor(R0=1000.0, TC=0.004), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            # At 27°C (300.15K), resistance should be ~R0
+            spec = MNASpec(temp=27.0)
+            sol = solve_dc(temp_resistor_circuit, (;), spec)
+            # R = 1000 * (1 + 0.004 * (300.15 - 300)) = 1000 * 1.0006 ≈ 1000.6
+            # I = 5V / 1000.6 ≈ 0.005
+            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-4)
+
+            # At 100°C (373.15K), resistance should be higher
+            spec_hot = MNASpec(temp=100.0)
+            sol_hot = solve_dc(temp_resistor_circuit, (;), spec_hot)
+            # R = 1000 * (1 + 0.004 * (373.15 - 300)) = 1000 * 1.293 ≈ 1292.6
+            # I = 5V / 1292.6 ≈ 0.00387
+            @test isapprox(current(sol_hot, :I_V1), -0.00387; atol=1e-4)
         end
 
         @testset "\$simparam access" begin
-            # VADistiller models use $simparam("gmin", 1e-12) etc.
-            # Currently broken: $simparam not implemented
-            @test_broken false
+            # Test $simparam with default value
+            va_code = raw"""
+            module VAGminResistor(p, n);
+                parameter real R = 1000.0;
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    I(p,n) <+ V(p,n) / R + V(p,n) * $simparam("gmin", 1e-12);
+                end
+            endmodule
+            """
+            va = VerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            function gmin_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAGminResistor(R=1000.0), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            # With default gmin=1e-12
+            spec = MNASpec()
+            sol = solve_dc(gmin_circuit, (;), spec)
+            # I ≈ 5/1000 + 5*1e-12 ≈ 0.005
+            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-6)
+
+            # With custom gmin=1e-3 (very high for testing)
+            spec_gmin = MNASpec(gmin=1e-3)
+            sol_gmin = solve_dc(gmin_circuit, (;), spec_gmin)
+            # I = 5/1000 + 5*1e-3 = 0.005 + 0.005 = 0.01
+            @test isapprox(current(sol_gmin, :I_V1), -0.01; atol=1e-6)
         end
 
         @testset "\$param_given check" begin
-            # VADistiller models use $param_given(param) for optional params
-            # Currently broken: $param_given not implemented
-            @test_broken false
+            # Test $param_given to check if parameter was explicitly set
+            # Uses ternary expression since if/else with contributions needs more work
+            va_code = raw"""
+            module VAOptionalParam(p, n);
+                parameter real R = 1000.0;
+                parameter real Ralt = 500.0;
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    I(p,n) <+ V(p,n) / ($param_given(R) ? R : Ralt);
+                end
+            endmodule
+            """
+            va = VerilogAParser.parse(IOBuffer(va_code))
+            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+            # With explicit R=2000 (R is "given")
+            sol_explicit = solve_dc((p,s; x=Float64[]) -> begin
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                return ctx
+            end, (;), MNASpec())
+            # $param_given(R) is true, so uses R=2000
+            # I = 5V / 2000Ω = 0.0025A
+            @test isapprox(current(sol_explicit, :I_V1), -0.0025; atol=1e-6)
+
+            # With only Ralt given (R is NOT "given")
+            sol_default = solve_dc((p,s; x=Float64[]) -> begin
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+                stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                return ctx
+            end, (;), MNASpec())
+            # $param_given(R) is false, so uses Ralt=500
+            # I = 5V / 500Ω = 0.01A
+            @test isapprox(current(sol_default, :I_V1), -0.01; atol=1e-6)
         end
 
-        @testset "aliasparam declaration" begin
-            # VADistiller uses aliasparam tref = tnom; etc.
-            # Currently broken: parser doesn't handle aliasparam
-            @test_broken false
-        end
+    end
+
+    #==========================================================================#
+    # Feature Tests: Parser Extensions Still Needed
+    #==========================================================================#
+
+    @testset "Feature: aliasparam" begin
+        # Test aliasparam declaration - allows parameter aliases
+        va_code = raw"""
+        module VAAliasTest(p, n);
+            parameter real tnom = 27.0;
+            aliasparam tref = tnom;
+            inout p, n;
+            electrical p, n;
+            analog begin
+                I(p,n) <+ V(p,n) / (1000.0 * (1.0 + 0.001 * (tnom - 27.0)));
+            end
+        endmodule
+        """
+        va = VerilogAParser.parse(IOBuffer(va_code))
+        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+        # Test 1: Using the real parameter name (tnom)
+        sol_tnom = solve_dc((p,s; x=Float64[]) -> begin
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; x=x, spec=s)
+            return ctx
+        end, (;), MNASpec())
+        # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
+        # I = 5V / 1073Ω ≈ 0.00466A
+        @test isapprox(current(sol_tnom, :I_V1), -0.00466; atol=1e-4)
+
+        # Test 2: Using the alias (tref) - should have same effect as tnom
+        sol_tref = solve_dc((p,s; x=Float64[]) -> begin
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; x=x, spec=s)
+            return ctx
+        end, (;), MNASpec())
+        # Same result - alias forwards to tnom
+        @test isapprox(current(sol_tref, :I_V1), -0.00466; atol=1e-4)
+
+        # Test 3: Verify property access - dev.tref should return dev.tnom
+        dev = VAAliasTest(tnom=50.0)
+        @test dev.tnom == dev.tref  # Alias returns target value
+    end
+
+    @testset "Feature: Parser Extensions Needed" begin
 
         @testset "Real variable with initialization" begin
             # VADistiller uses `real G = 0.0;` at module scope
             # Currently broken: parser error at inline initialization
+            # Note: This requires VerilogAParser changes
             @test_broken false
         end
 
@@ -377,13 +528,16 @@ end
 # ✅ 3-terminal MOSFET - I(d,s) <+ Kp/2*(Vgs-Vth)^2 with Newton iteration
 # ✅ 4-terminal NMOS - same as above with bulk terminal
 #
+# WORKING VA SYSTEM FUNCTIONS:
+# ✅ $temperature() - simulator temperature access (returns Kelvin)
+# ✅ $simparam("name", default) - simulator parameter queries (gmin, tnom, etc.)
+# ✅ $param_given(param) - check if parameter was specified
+# ✅ $vt() - thermal voltage (kT/q)
+# ✅ aliasparam - parameter aliases (aliasparam tref = tnom;)
+#
 # MISSING PARSER FEATURES (needed for full VADistiller models):
-# ❌ $temperature - simulator temperature access
-# ❌ $simparam() - simulator parameter queries (gmin, tnom, abstol, etc.)
-# ❌ $param_given() - check if parameter was specified
 # ❌ $mfactor - device multiplicity
 # ❌ $limit() - voltage limiting for Newton convergence
-# ❌ aliasparam - parameter aliases
 # ❌ Real variable initialization at module scope (real x = 0.0;)
 # ❌ @(initial_step) - initialization event handling
 # ❌ analog function definitions (used for reusable computations)

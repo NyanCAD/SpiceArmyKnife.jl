@@ -1061,9 +1061,12 @@ function make_mna_device(vm::VANode{VerilogModule})
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
 
-    # 1. Build plain struct definition
+    # Filter out alias parameters from struct fields (aliases don't need storage)
+    real_params = filter(p -> !haskey(aliases, p), parameter_names)
+
+    # 1. Build plain struct definition (only real parameters, not aliases)
     struct_body = Expr(:block)
-    for paramsym in parameter_names
+    for paramsym in real_params
         push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64})))
     end
     struct_def = Expr(:struct, false,
@@ -1071,21 +1074,48 @@ function make_mna_device(vm::VANode{VerilogModule})
         struct_body)
 
     # 2. Build keyword constructor that mimics @kwdef
-    # Constructor: TypeName(; param1=mkdefault(default1), ...) = TypeName(vaconvert(...), ...)
-    if !isempty(parameter_names)
+    # Constructor accepts both real params and aliases
+    # Aliases forward their value to the target parameter
+    if !isempty(real_params) || !isempty(aliases)
         # Build keyword parameter list with defaults
         kw_params = Expr(:parameters)
         call_args = Any[]
-        for paramsym in parameter_names
+
+        # Add real parameters
+        for paramsym in real_params
             # Each parameter: paramsym = mkdefault(default_value)
             # Use the actual default value from the VA parameter declaration
             default_val = get(param_defaults, paramsym, 0.0)
             push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault($default_val))))
-            # In call, convert using vaconvert
-            push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
-                :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
-                paramsym))
         end
+
+        # Add alias parameters (they default to nothing, meaning "use target's value")
+        for (alias_sym, _) in aliases
+            push!(kw_params.args, Expr(:kw, alias_sym, :nothing))
+        end
+
+        # Build call args: for each real param, check if an alias was provided
+        for paramsym in real_params
+            # Find aliases that target this parameter
+            targeting_aliases = [a for (a, t) in aliases if t == paramsym]
+            if isempty(targeting_aliases)
+                # No aliases, just use the parameter directly
+                push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
+                    :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                    paramsym))
+            else
+                # Has aliases - use alias value if provided, otherwise use parameter
+                # Build: something(alias1, alias2, ..., paramsym) where something picks first non-nothing
+                alias_expr = paramsym
+                for alias_sym in reverse(targeting_aliases)
+                    alias_expr = :($alias_sym !== nothing ? $alias_sym : $alias_expr)
+                end
+                push!(call_args, Expr(:call, :(VerilogAEnvironment.vaconvert),
+                    :(CedarSim.notdefault(fieldtype($symname, $(QuoteNode(paramsym))))),
+                    alias_expr))
+            end
+        end
+
         # Build constructor function
         constructor = Expr(:function,
             Expr(:call, symname, kw_params),
@@ -1094,9 +1124,36 @@ function make_mna_device(vm::VANode{VerilogModule})
         constructor = nothing
     end
 
+    # 3. Build getproperty override to support alias access
+    # Base.getproperty(dev::TypeName, s::Symbol) = s == :alias ? getfield(dev, :target) : getfield(dev, s)
+    getproperty_override = nothing
+    if !isempty(aliases)
+        # Build the if-elseif chain for aliases
+        alias_checks = nothing
+        for (alias_sym, target_sym) in aliases
+            check = :(s == $(QuoteNode(alias_sym)))
+            result = :(getfield(dev, $(QuoteNode(target_sym))))
+            if alias_checks === nothing
+                alias_checks = Expr(:if, check, result)
+            else
+                # Add as elseif
+                push!(alias_checks.args, Expr(:elseif, check, result))
+            end
+        end
+        # Add final else clause
+        push!(alias_checks.args, :(getfield(dev, s)))
+
+        getproperty_override = :(function Base.getproperty(dev::$symname, s::Symbol)
+            $alias_checks
+        end)
+    end
+
     result_args = Any[struct_def]
     if constructor !== nothing
         push!(result_args, constructor)
+    end
+    if getproperty_override !== nothing
+        push!(result_args, getproperty_override)
     end
     push!(result_args, stamp_method)
 
@@ -1201,6 +1258,31 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         return :(spec.temp + 273.15)  # Convert to Kelvin
     elseif fname == Symbol("\$vt")
         return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
+    elseif fname == Symbol("\$param_given")
+        # Check if a parameter was explicitly specified (not using default)
+        id = Symbol(stmt.args[1].item)
+        return Expr(:call, :!, Expr(:call, CedarSim.isdefault,
+            Expr(:., :dev, QuoteNode(id))))
+    elseif fname == Symbol("\$simparam")
+        # Simulator parameter access - $simparam("name") or $simparam("name", default)
+        if stmt.args[1].item isa VANode{StringLiteral}
+            param_str = String(stmt.args[1].item)[2:end-1]  # Strip quotes
+        else
+            param_str = String(stmt.args[1].item)
+        end
+        param_sym = Symbol(param_str)
+        if length(stmt.args) == 1
+            # No default - error if not found
+            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
+                     getproperty(spec, $(QuoteNode(param_sym))) :
+                     error("Unknown simparam: " * $param_str))
+        else
+            # With default value
+            default_expr = to_julia(stmt.args[2].item)
+            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
+                     getproperty(spec, $(QuoteNode(param_sym))) :
+                     $default_expr)
+        end
     end
 
     # Check for VA-defined function
@@ -1589,7 +1671,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[])
+                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[],
+                                     spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
             $(params_to_locals...)
             $(function_defs...)
 
@@ -1629,9 +1712,11 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+        using Base: hasproperty, getproperty, getfield, error, !==
+        import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename

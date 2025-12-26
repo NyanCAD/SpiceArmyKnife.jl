@@ -62,6 +62,9 @@ system_size(sys::MNASystem) = sys.n_nodes + sys.n_currents
 
 Assemble the G (conductance) matrix from COO format stamps.
 Duplicate entries are summed (standard sparse matrix behavior).
+
+Note: Negative indices (representing current variables) are resolved
+to actual indices using resolve_index before assembly.
 """
 function assemble_G(ctx::MNAContext)
     n = system_size(ctx)
@@ -71,7 +74,10 @@ function assemble_G(ctx::MNAContext)
     if isempty(ctx.G_I)
         return spzeros(Float64, n, n)
     end
-    return sparse(ctx.G_I, ctx.G_J, ctx.G_V, n, n)
+    # Resolve any negative indices (current variables)
+    I_resolved = [resolve_index(ctx, i) for i in ctx.G_I]
+    J_resolved = [resolve_index(ctx, j) for j in ctx.G_J]
+    return sparse(I_resolved, J_resolved, ctx.G_V, n, n)
 end
 
 """
@@ -79,6 +85,9 @@ end
 
 Assemble the C (capacitance) matrix from COO format stamps.
 Duplicate entries are summed (standard sparse matrix behavior).
+
+Note: Negative indices (representing current variables) are resolved
+to actual indices using resolve_index before assembly.
 """
 function assemble_C(ctx::MNAContext)
     n = system_size(ctx)
@@ -88,24 +97,43 @@ function assemble_C(ctx::MNAContext)
     if isempty(ctx.C_I)
         return spzeros(Float64, n, n)
     end
-    return sparse(ctx.C_I, ctx.C_J, ctx.C_V, n, n)
+    # Resolve any negative indices (current variables)
+    I_resolved = [resolve_index(ctx, i) for i in ctx.C_I]
+    J_resolved = [resolve_index(ctx, j) for j in ctx.C_J]
+    return sparse(I_resolved, J_resolved, ctx.C_V, n, n)
 end
 
 """
     get_rhs(ctx::MNAContext) -> Vector{Float64}
 
 Get the RHS vector b, properly sized.
+
+Note: Deferred b stamps (for current variables with negative indices)
+are resolved and applied here.
 """
 function get_rhs(ctx::MNAContext)
     n = system_size(ctx)
     if n == 0
         return Float64[]
     end
-    if length(ctx.b) < n
-        resize!(ctx.b, n)
-        # New entries are already 0 from resize
+
+    # Create result vector
+    result = zeros(Float64, n)
+
+    # Copy existing direct stamps
+    for i in 1:min(length(ctx.b), n)
+        result[i] = ctx.b[i]
     end
-    return copy(ctx.b[1:n])
+
+    # Apply deferred stamps (negative indices for current variables)
+    for (i, v) in zip(ctx.b_I, ctx.b_V)
+        idx = resolve_index(ctx, i)
+        if 1 <= idx <= n
+            result[idx] += v
+        end
+    end
+
+    return result
 end
 
 """

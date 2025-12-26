@@ -55,8 +55,8 @@ const r_val_pwl = 2
     # Solve for 10ms using MNACircuit API
     tspan = (0.0, 10e-3)
     spec = MNASpec(temp=27.0, mode=:tran, time=0.0)
-    circuit = Base.invokelatest(MNACircuit, builder, (;), spec, tspan)
-    prob = Base.invokelatest(ODEProblem, circuit)
+    circuit = Base.invokelatest(MNACircuit, builder, (;), spec)
+    prob = Base.invokelatest(ODEProblem, circuit, tspan)
     sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6)
 
     # Get node index for vout
@@ -84,8 +84,8 @@ const r_val_pwl = 2
         return ctx
     end
 
-    circuit2 = MNACircuit(PWLIRcircuit, (;), MNASpec(temp=27.0), tspan)
-    prob2 = ODEProblem(circuit2)
+    circuit2 = MNACircuit(PWLIRcircuit, (;), MNASpec(temp=27.0))
+    prob2 = ODEProblem(circuit2, tspan)
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Check direct API matches
@@ -169,10 +169,10 @@ const ω_val = 1
     sys = CedarSim.MNA.assemble!(ctx)
 
     # Use MNACircuit API with zero initial conditions (capacitor/inductor start uncharged)
-    circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0), tspan)
+    circuit = Base.invokelatest(MNACircuit, builder, (;), MNASpec(temp=27.0))
     n = CedarSim.MNA.system_size(circuit)
     u0 = zeros(n)
-    prob = Base.invokelatest(ODEProblem, circuit; u0=u0)
+    prob = Base.invokelatest(ODEProblem, circuit, tspan; u0=u0)
     sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get node index for vout
@@ -203,10 +203,10 @@ const ω_val = 1
         return ctx
     end
 
-    circuit2 = MNACircuit(butterworth_circuit, (;), MNASpec(temp=27.0), tspan)
+    circuit2 = MNACircuit(butterworth_circuit, (;), MNASpec(temp=27.0))
     n2 = CedarSim.MNA.system_size(circuit2)
     u0_2 = zeros(n2)
-    prob2 = ODEProblem(circuit2; u0=u0_2)
+    prob2 = ODEProblem(circuit2, tspan; u0=u0_2)
     sol2 = OrdinaryDiffEq.solve(prob2, Rodas5P(); reltol=1e-6, abstol=1e-6, maxiters=100000)
 
     # Get vout index from direct API circuit

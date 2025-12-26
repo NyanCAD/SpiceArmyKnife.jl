@@ -17,7 +17,8 @@ using SparseArrays
 using SciMLBase: ReturnCode
 
 # Import MNA module - use explicit imports to avoid conflicts with CedarSim types
-using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!
+using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!, resolve_index
+using CedarSim.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
 using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
 using CedarSim.MNA: stamp!, system_size
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
@@ -65,11 +66,108 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         @test n1_again == 1
         @test ctx.n_nodes == 2
 
-        # Current variables
+        # Current variables (now return deferred negative indices)
         i1 = alloc_current!(ctx, :I_V1)
-        @test i1 == 3  # n_nodes + 1
+        @test i1 < 0  # Deferred index
+        @test resolve_index(ctx, i1) == 3  # n_nodes + 1
         @test ctx.n_currents == 1
         @test system_size(ctx) == 3
+    end
+
+    @testset "Internal node allocation" begin
+        ctx = MNAContext()
+
+        # Initially no internal nodes
+        @test n_internal_nodes(ctx) == 0
+
+        # Regular nodes are not internal
+        a = get_node!(ctx, :a)
+        c = get_node!(ctx, :c)
+        @test is_internal_node(ctx, a) == false
+        @test is_internal_node(ctx, c) == false
+        @test n_internal_nodes(ctx) == 0
+
+        # Allocate internal node
+        a_int = alloc_internal_node!(ctx, Symbol("D1.a_int"))
+        @test a_int == 3  # After a and c
+        @test ctx.n_nodes == 3
+        @test is_internal_node(ctx, a_int) == true
+        @test n_internal_nodes(ctx) == 1
+
+        # Regular nodes still not internal
+        @test is_internal_node(ctx, a) == false
+        @test is_internal_node(ctx, c) == false
+
+        # Allocate another internal node
+        b_int = alloc_internal_node!(ctx, Symbol("D1.b_int"))
+        @test b_int == 4
+        @test n_internal_nodes(ctx) == 2
+
+        # Ground is never internal
+        @test is_internal_node(ctx, 0) == false
+
+        # Invalid indices return false
+        @test is_internal_node(ctx, -1) == false
+        @test is_internal_node(ctx, 100) == false
+
+        # String name works too
+        c_int = alloc_internal_node!(ctx, "D2.c_int")
+        @test c_int == 5
+        @test n_internal_nodes(ctx) == 3
+
+        # Existing internal node returns same index
+        a_int_again = alloc_internal_node!(ctx, Symbol("D1.a_int"))
+        @test a_int_again == a_int
+        @test n_internal_nodes(ctx) == 3  # No change
+
+        # Internal nodes participate in system size
+        @test system_size(ctx) == 5  # 5 nodes, 0 currents
+
+        # Can stamp to/from internal nodes
+        stamp_conductance!(ctx, a, a_int, 0.001)  # R = 1k between a and a_int
+        @test length(ctx.G_V) == 4
+
+        # Current variables work alongside internal nodes (deferred indices)
+        i1 = alloc_current!(ctx, :I_V1)
+        @test i1 < 0  # Deferred index
+        @test resolve_index(ctx, i1) == 6  # n_nodes + 1 = 5 + 1
+        @test system_size(ctx) == 6
+    end
+
+    @testset "Internal node in circuit simulation" begin
+        # Simulate a simple diode with series resistance pattern:
+        # V1 --[Rs]-- a_int --[Rd]-- gnd
+        # Where Rs is 10Ω and Rd is 1000Ω (representing junction conductance)
+
+        ctx = MNAContext()
+        anode = get_node!(ctx, :anode)
+        a_int = alloc_internal_node!(ctx, Symbol("D1.a_int"))
+
+        # Voltage source at anode
+        stamp!(VoltageSource(5.0; name=:V1), ctx, anode, 0)
+
+        # Series resistance: anode to a_int (Rs = 10Ω)
+        stamp!(Resistor(10.0), ctx, anode, a_int)
+
+        # Junction as simple resistor: a_int to ground (Rd = 1000Ω)
+        stamp!(Resistor(1000.0), ctx, a_int, 0)
+
+        sys = assemble!(ctx)
+        sol = solve_dc(sys)
+
+        # Check internal node is marked correctly in solution
+        @test is_internal_node(ctx, a_int) == true
+        @test is_internal_node(ctx, anode) == false
+
+        # Verify voltages using voltage divider
+        # V(anode) = 5.0 (forced by voltage source)
+        # V(a_int) = 5.0 * 1000 / (10 + 1000) ≈ 4.9505
+        @test voltage(sol, :anode) ≈ 5.0
+        @test isapprox(sol.x[a_int], 5.0 * 1000 / 1010; rtol=1e-6)
+
+        # Current through circuit
+        # I = 5.0 / (10 + 1000) = 5.0 / 1010 ≈ 4.95mA
+        @test isapprox(-current(sol, :I_V1), 5.0 / 1010; rtol=1e-6)
     end
 
     @testset "Stamping primitives" begin
@@ -184,7 +282,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         V = VoltageSource(5.0; name=:V1)
         I_idx = stamp!(V, ctx, vcc, 0)  # vcc to ground
 
-        @test I_idx == 2  # n_nodes + 1
+        # I_idx is now a deferred index (negative), resolved at assembly time
+        @test I_idx < 0  # Current variable index (deferred)
+        @test resolve_index(ctx, I_idx) == 2  # n_nodes + 1
 
         sys = assemble!(ctx)
         @test size(sys.G) == (2, 2)
@@ -224,7 +324,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         L = Inductor(1e-3; name=:L1)  # 1mH
         I_idx = stamp!(L, ctx, n1, n2)
 
-        @test I_idx == 3  # After 2 nodes
+        # I_idx is now a deferred index (negative)
+        @test I_idx < 0  # Current variable index (deferred)
+        @test resolve_index(ctx, I_idx) == 3  # After 2 nodes
 
         sys = assemble!(ctx)
         @test size(sys.G) == (3, 3)
@@ -279,7 +381,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         E = VCVS(10.0; name=:E1)  # Gain = 10
         I_idx = stamp!(E, ctx, out_p, out_n, in_p, in_n)
 
-        @test I_idx == 5  # After 4 nodes
+        # I_idx is now a deferred index (negative)
+        @test I_idx < 0  # Current variable index (deferred)
+        @test resolve_index(ctx, I_idx) == 5  # After 4 nodes
 
         sys = assemble!(ctx)
         @test size(sys.G) == (5, 5)
@@ -310,8 +414,10 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         (I_out_idx, I_in_idx) = stamp!(H, ctx, out_p, out_n, in_p, in_n)
 
         # I_in allocated first (index 5), I_out second (index 6)
-        @test I_in_idx == 5   # First current variable (after 4 nodes)
-        @test I_out_idx == 6  # Second current variable
+        # Indices are now deferred (negative)
+        @test I_in_idx < 0 && I_out_idx < 0
+        @test resolve_index(ctx, I_in_idx) == 5   # First current variable (after 4 nodes)
+        @test resolve_index(ctx, I_out_idx) == 6  # Second current variable
 
         sys = assemble!(ctx)
         @test size(sys.G) == (6, 6)
@@ -347,7 +453,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         F = CCCS(2.0; name=:F1)  # Current gain = 2
         I_in_idx = stamp!(F, ctx, out_p, out_n, in_p, in_n)
 
-        @test I_in_idx == 5  # After 4 nodes
+        # Index is now deferred (negative)
+        @test I_in_idx < 0
+        @test resolve_index(ctx, I_in_idx) == 5  # After 4 nodes
 
         sys = assemble!(ctx)
         @test size(sys.G) == (5, 5)
@@ -885,9 +993,12 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
 
         stamp!(VoltageSource(Vcc), ctx, vcc, 0)
         stamp!(Resistor(R_val), ctx, vcc, mid)
-        I_L = stamp!(Inductor(L_val), ctx, mid, 0)  # Returns current index
+        I_L_deferred = stamp!(Inductor(L_val), ctx, mid, 0)  # Returns deferred current index
 
         sys = assemble!(ctx)
+
+        # Resolve the deferred index to actual system index
+        I_L = resolve_index(ctx, I_L_deferred)
 
         # Initial condition: inductor starts with 0 current
         n = system_size(sys)
@@ -1806,9 +1917,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (Vmax=5.0, ramp_time=1e-3, R=1000.0, C=1e-6)
         τ = params.R * params.C  # 1ms
 
-        # Create ODE problem using MNACircuit (time-dependent sources handled automatically)
-        circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
-        prob = SciMLODEProblem(circuit)
+        # Create ODE problem using MNACircuit (tspan passed to Problem, not circuit)
+        circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0))
+        prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 
@@ -1849,9 +1960,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (vo=0.0, va=5.0, freq=1000.0, R=1000.0, C=1e-6)
         fc = 1.0 / (2π * params.R * params.C)  # ~159 Hz
 
-        # Create ODE problem using MNACircuit
-        circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
-        prob = SciMLODEProblem(circuit)
+        # Create ODE problem using MNACircuit (tspan passed to Problem)
+        circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0))
+        prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 

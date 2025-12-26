@@ -19,7 +19,7 @@ using CedarSim: ParamLens
 # We'll vary `R1` and `R2` with parameter sweeps,
 # then verify that the current out of `V` is correct.
 # Default values are R1=1000.0, R2=1000.0 (matching the old @kwdef struct)
-function build_two_resistor(params, spec)
+function build_two_resistor(params, spec; x=Float64[])
     # Merge with defaults (like @kwdef did for the struct)
     defaults = (R1=1000.0, R2=1000.0)
     p = merge(defaults, params)

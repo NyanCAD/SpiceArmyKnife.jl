@@ -164,9 +164,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @testset "Diode with series resistance" begin
             # Diode with Rs for more realistic behavior
             # This tests internal nodes which require phase 6 features
-            # NOTE: VA definition commented out - internal nodes not yet supported
-            # Once internal node support is added, uncomment this:
-            #=
             va"""
             module VADDiodeRs(a, c);
                 parameter real Is = 1e-14;
@@ -180,11 +177,28 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
             endmodule
             """
-            =#
 
             # Forward bias test with internal node
-            # This will fail until we add internal node support
-            @test_broken false  # Placeholder: internal nodes not yet supported
+            function diode_rs_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                anode = get_node!(ctx, :anode)
+
+                stamp!(VoltageSource(0.7; name=:V1), ctx, anode, 0)
+                stamp!(VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0), ctx, anode, 0; x=x)
+
+                return ctx
+            end
+
+            # Solve with Newton iteration
+            sol = solve_dc(diode_rs_circuit, (;), MNASpec())
+
+            # With Rs=10Ω, at 0.7V forward bias:
+            # V_internal ≈ 0.6V (drops ~0.1V across Rs)
+            # I ≈ 10mA (rough estimate)
+            # The exact current depends on Newton convergence
+            actual_I = -current(sol, :I_V1)
+            @test actual_I > 0  # Current should flow
+            @test actual_I < 0.1  # Should be less than 100mA
         end
 
     end
@@ -315,6 +329,272 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Same result as 3-terminal MOSFET
             @test isapprox(voltage(sol, :drain), 4.5; atol=0.1)
+        end
+
+    end
+
+    #==========================================================================#
+    # Tier 5: MOSFET with Capacitances and Internal Nodes
+    #==========================================================================#
+
+    @testset "Tier 5: MOSFET with Capacitances" begin
+
+        @testset "MOSFET with gate capacitances (DC)" begin
+            # MOSFET with Cgs and Cgd - tests reactive contributions
+            va"""
+            module VAMOSCap(d, g, s);
+                parameter real Kp = 1e-4;
+                parameter real Vth = 0.5;
+                parameter real Cgs = 1e-12;
+                parameter real Cgd = 0.5e-12;
+                inout d, g, s;
+                electrical d, g, s;
+                analog begin
+                    // Square-law drain current
+                    I(d,s) <+ (Kp/2.0) * (V(g,s) - Vth) * (V(g,s) - Vth);
+                    // Gate capacitances
+                    I(g,s) <+ Cgs * ddt(V(g,s));
+                    I(g,d) <+ Cgd * ddt(V(g,d));
+                end
+            endmodule
+            """
+
+            # DC test - capacitors should not affect DC operating point
+            function moscap_dc_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                gate = get_node!(ctx, :gate)
+                drain = get_node!(ctx, :drain)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol = solve_dc(moscap_dc_circuit, (;), MNASpec())
+
+            # Ids = (1e-4/2) * (2.0 - 0.5)² = 0.5e-4 * 2.25 = 112.5µA
+            # Vdrain = 5 - 112.5e-6 * 10000 = 5 - 1.125 = 3.875V
+            @test isapprox(voltage(sol, :drain), 3.875; atol=0.1)
+            @test isapprox(voltage(sol, :gate), 2.0; atol=1e-6)
+        end
+
+        @testset "MOSFET with gate capacitances (Transient)" begin
+            using OrdinaryDiffEq
+
+            # Transient test - verify C matrix is correctly stamped
+            function moscap_tran_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                gate = get_node!(ctx, :gate)
+                drain = get_node!(ctx, :drain)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            ctx = moscap_tran_circuit((;), MNASpec(mode=:tran))
+            sys = assemble!(ctx)
+
+            # Check C matrix has correct entries
+            C = Matrix(sys.C)
+            gate_idx = findfirst(n -> n == :gate, sys.node_names)
+            drain_idx = findfirst(n -> n == :drain, sys.node_names)
+
+            # Cgs + Cgd at gate node diagonal
+            @test C[gate_idx, gate_idx] ≈ 1.5e-12 atol=1e-15
+            # -Cgd at gate-drain (Miller capacitance)
+            @test C[gate_idx, drain_idx] ≈ -0.5e-12 atol=1e-15
+            @test C[drain_idx, gate_idx] ≈ -0.5e-12 atol=1e-15
+            # Cgd at drain diagonal
+            @test C[drain_idx, drain_idx] ≈ 0.5e-12 atol=1e-15
+
+            # Run transient simulation
+            tspan = (0.0, 10e-9)  # 10ns
+            prob_data = make_ode_problem(sys, tspan)
+
+            f = ODEFunction(prob_data.f;
+                mass_matrix=prob_data.mass_matrix,
+                jac=prob_data.jac,
+                jac_prototype=prob_data.jac_prototype)
+            prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+
+            @test sol.retcode == SciMLBase.ReturnCode.Success
+        end
+
+        @testset "MOSFET with source/drain resistances (internal nodes)" begin
+            # MOSFET with Rs and Rd - tests internal node handling
+            va"""
+            module VAMOSRsd(d, g, s);
+                parameter real Kp = 1e-4;
+                parameter real Vth = 0.5;
+                parameter real Rs = 10.0;
+                parameter real Rd = 10.0;
+                inout d, g, s;
+                electrical d, g, s, d_int, s_int;
+                analog begin
+                    // External drain to internal drain resistance
+                    I(d, d_int) <+ V(d, d_int) / Rd;
+                    // External source to internal source resistance
+                    I(s, s_int) <+ V(s, s_int) / Rs;
+                    // Intrinsic MOSFET between internal nodes
+                    I(d_int, s_int) <+ (Kp/2.0) * (V(g,s_int) - Vth) * (V(g,s_int) - Vth);
+                end
+            endmodule
+            """
+
+            function mosrsd_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                gate = get_node!(ctx, :gate)
+                drain = get_node!(ctx, :drain)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
+                stamp!(VAMOSRsd(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0), ctx, drain, gate, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol = solve_dc(mosrsd_circuit, (;), MNASpec())
+
+            # With small Rs/Rd, drain voltage should be close to ideal MOSFET
+            # Ids ≈ 112.5µA, voltage drops: Ids*Rs ≈ 1.1mV, Ids*Rd ≈ 1.1mV
+            # So drain voltage should be very close to 3.875V
+            @test isapprox(voltage(sol, :drain), 3.875; atol=0.1)
+        end
+
+        @testset "MOSFET with capacitances AND internal nodes" begin
+            using OrdinaryDiffEq
+
+            # Full MOSFET model: Rs, Rd, Cgs, Cgd
+            va"""
+            module VAMOSFull(d, g, s);
+                parameter real Kp = 1e-4;
+                parameter real Vth = 0.5;
+                parameter real Rs = 10.0;
+                parameter real Rd = 10.0;
+                parameter real Cgs = 1e-12;
+                parameter real Cgd = 0.5e-12;
+                inout d, g, s;
+                electrical d, g, s, d_int, s_int;
+                analog begin
+                    // Series resistances
+                    I(d, d_int) <+ V(d, d_int) / Rd;
+                    I(s, s_int) <+ V(s, s_int) / Rs;
+                    // Intrinsic MOSFET
+                    I(d_int, s_int) <+ (Kp/2.0) * (V(g,s_int) - Vth) * (V(g,s_int) - Vth);
+                    // Gate capacitances to internal nodes
+                    I(g, s_int) <+ Cgs * ddt(V(g, s_int));
+                    I(g, d_int) <+ Cgd * ddt(V(g, d_int));
+                end
+            endmodule
+            """
+
+            # DC test
+            function mosfull_dc_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                gate = get_node!(ctx, :gate)
+                drain = get_node!(ctx, :drain)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
+                stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
+                       ctx, drain, gate, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol_dc = solve_dc(mosfull_dc_circuit, (;), MNASpec())
+            @test isapprox(voltage(sol_dc, :drain), 3.875; atol=0.1)
+
+            # Transient test
+            function mosfull_tran_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                gate = get_node!(ctx, :gate)
+                drain = get_node!(ctx, :drain)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
+                stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
+                       ctx, drain, gate, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            ctx = mosfull_tran_circuit((;), MNASpec(mode=:tran))
+            sys = assemble!(ctx)
+
+            # Verify internal nodes were allocated
+            @test length(sys.node_names) >= 5  # vdd, gate, drain + 2 internal
+
+            # C matrix should have capacitance entries
+            C = Matrix(sys.C)
+            @test count(!=(0), C) > 0  # Should have non-zero entries
+
+            # Run transient
+            tspan = (0.0, 10e-9)
+            prob_data = make_ode_problem(sys, tspan)
+
+            f = ODEFunction(prob_data.f;
+                mass_matrix=prob_data.mass_matrix,
+                jac=prob_data.jac,
+                jac_prototype=prob_data.jac_prototype)
+            prob = ODEProblem(f, prob_data.u0, prob_data.tspan)
+            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
+
+            @test sol.retcode == SciMLBase.ReturnCode.Success
+        end
+
+        @testset "MOSFET inverter DC and small-signal" begin
+            # Test a simple inverter with capacitive load
+
+            # DC operating point
+            function inverter_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                stamp!(VoltageSource(2.5; name=:Vin), ctx, vin, 0)  # Mid-rail input
+                stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, vout)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, vout, vin, 0; x=x, spec=spec)
+                # Load capacitance
+                stamp!(Capacitor(1e-12; name=:Cload), ctx, vout, 0)
+
+                return ctx
+            end
+
+            sol_dc = solve_dc(inverter_circuit, (;), MNASpec())
+
+            # At Vgs=2.5V: Ids = (1e-4/2) * (2.5-0.5)² = 200µA
+            # Vout = 5 - 200e-6 * 10000 = 3V
+            @test isapprox(voltage(sol_dc, :vout), 3.0; atol=0.2)
+
+            # Verify capacitances are present in the system matrix
+            ctx = inverter_circuit((;), MNASpec(mode=:tran))
+            sys = assemble!(ctx)
+
+            C = Matrix(sys.C)
+            vout_idx = findfirst(n -> n == :vout, sys.node_names)
+
+            # Should have load capacitance + Cgd at vout
+            # Cload = 1e-12, Cgd = 0.5e-12
+            @test C[vout_idx, vout_idx] ≈ 1.5e-12 atol=1e-15
         end
 
     end
@@ -575,8 +855,69 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "Internal nodes" begin
             # VADistiller models like BJT have internal nodes (b_int, c_int, etc.)
-            # Current stamp! doesn't allocate internal nodes automatically
-            @test_broken false
+            # Phase 6.2: Internal node support is now implemented!
+
+            # Test 1: Simple resistor with internal node (Rs in series)
+            va"""
+            module VAInternalResistor(p, n);
+                parameter real R1 = 1000.0;
+                parameter real R2 = 1000.0;
+                inout p, n;
+                electrical p, n, mid;
+                analog begin
+                    I(p, mid) <+ V(p, mid) / R1;
+                    I(mid, n) <+ V(mid, n) / R2;
+                end
+            endmodule
+            """
+
+            # Voltage divider using internal node
+            function internal_resistor_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAInternalResistor(R1=1000.0, R2=1000.0), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol = solve_dc(internal_resistor_circuit, (;), MNASpec())
+
+            # With two 1kΩ in series across 10V:
+            # Total R = 2kΩ, I = 10V / 2kΩ = 5mA
+            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
+            @test isapprox(voltage(sol, :vcc), 10.0; atol=1e-6)
+
+            # Test 2: Multiple internal nodes (3 resistors in series)
+            va"""
+            module VAMultiInternal(p, n);
+                parameter real R = 1000.0;
+                inout p, n;
+                electrical p, n, mid1, mid2;
+                analog begin
+                    I(p, mid1) <+ V(p, mid1) / R;
+                    I(mid1, mid2) <+ V(mid1, mid2) / R;
+                    I(mid2, n) <+ V(mid2, n) / R;
+                end
+            endmodule
+            """
+
+            function multi_internal_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(9.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAMultiInternal(R=1000.0), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol2 = solve_dc(multi_internal_circuit, (;), MNASpec())
+
+            # With three 1kΩ in series across 9V:
+            # Total R = 3kΩ, I = 9V / 3kΩ = 3mA
+            @test isapprox(current(sol2, :I_V1), -0.003; atol=1e-5)
         end
 
     end
@@ -611,8 +952,10 @@ end
 # ❌ @(initial_step) - initialization event handling
 # ❌ analog function definitions (used for reusable computations)
 #
+# WORKING MNA FEATURES:
+# ✅ Internal node allocation in stamp! (Phase 6.2)
+#
 # MISSING MNA FEATURES (needed for complex models):
-# ❌ Internal node allocation in stamp!
 # ❌ Branch-based stamping (branch declaration)
 # ❌ Noise functions (not needed for DC/transient)
 #

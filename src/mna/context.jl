@@ -8,7 +8,8 @@
 #==============================================================================#
 
 export MNAContext, MNASystem
-export get_node!, alloc_current!, get_current_idx, has_current
+export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
+export alloc_internal_node!, is_internal_node, n_internal_nodes
 export stamp_G!, stamp_C!, stamp_b!
 export stamp_conductance!, stamp_capacitance!
 export system_size
@@ -33,6 +34,7 @@ sparse matrix construction.
 - `node_names::Vector{Symbol}`: Names of nodes (for debugging/output)
 - `node_to_idx::Dict{Symbol,Int}`: Map node names to indices
 - `n_nodes::Int`: Number of nodes (excluding ground)
+- `internal_node_flags::BitVector`: Flags indicating which nodes are internal (not terminals)
 - `current_names::Vector{Symbol}`: Names of current variables
 - `n_currents::Int`: Number of current variables
 - `G_I, G_J, G_V`: COO format for conductance matrix G
@@ -63,6 +65,9 @@ mutable struct MNAContext
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
 
+    # Internal node tracking (nodes not accessible as terminals)
+    internal_node_flags::BitVector
+
     # Current variables (for V-sources, inductors, VCVS, etc.)
     current_names::Vector{Symbol}
     n_currents::Int
@@ -80,6 +85,11 @@ mutable struct MNAContext
     # RHS vector (pre-allocated for known size, or extended dynamically)
     b::Vector{Float64}
 
+    # Deferred b vector stamps for negative indices (current variables)
+    # These are resolved at assembly time when n_nodes is final
+    b_I::Vector{Int}
+    b_V::Vector{Float64}
+
     # Track if system has been finalized
     finalized::Bool
 end
@@ -94,6 +104,7 @@ function MNAContext()
         Symbol[],           # node_names
         Dict{Symbol,Int}(), # node_to_idx
         0,                  # n_nodes
+        BitVector(),        # internal_node_flags
         Symbol[],           # current_names
         0,                  # n_currents
         Int[],              # G_I
@@ -103,6 +114,8 @@ function MNAContext()
         Int[],              # C_J
         Float64[],          # C_V
         Float64[],          # b
+        Int[],              # b_I (deferred b stamps)
+        Float64[],          # b_V (deferred b stamps)
         false               # finalized
     )
 end
@@ -142,6 +155,9 @@ function get_node!(ctx::MNAContext, name::Symbol)::Int
     push!(ctx.node_names, name)
     ctx.node_to_idx[name] = ctx.n_nodes
 
+    # Extend internal_node_flags (default: not internal)
+    push!(ctx.internal_node_flags, false)
+
     # Extend b vector if needed
     if length(ctx.b) < system_size(ctx)
         resize!(ctx.b, system_size(ctx))
@@ -179,44 +195,61 @@ x = [V₁, V₂, ..., Vₙ, I₁, I₂, ..., Iₘ]
 ```julia
 # Voltage source needs a current variable
 i_idx = alloc_current!(ctx, :I_V1)
-# i_idx = n_nodes + 1 (for first current variable)
+# i_idx is negative (deferred index), resolved to n_nodes + k at assembly time
 ```
+
+Note: Returns a NEGATIVE index representing current variable k.
+This allows n_nodes to change (e.g., from internal node allocation)
+without invalidating previously stamped indices.
+The negative index is translated to the actual index (n_nodes + k)
+at assembly time by `resolve_index`.
 """
 function alloc_current!(ctx::MNAContext, name::Symbol)::Int
     ctx.n_currents += 1
     push!(ctx.current_names, name)
 
-    # Current variable index in system
-    idx = ctx.n_nodes + ctx.n_currents
-
-    # Extend b vector if needed
-    if length(ctx.b) < idx
-        resize!(ctx.b, idx)
-        ctx.b[end] = 0.0
-    end
-
-    return idx
+    # Return negative index representing current variable k
+    # This is resolved to n_nodes + k at assembly time
+    return -ctx.n_currents
 end
 
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
 
 """
+    resolve_index(ctx::MNAContext, idx::Int) -> Int
+
+Resolve an index that may be negative (current variable) to an actual system index.
+- Positive indices (node indices) are returned unchanged
+- Zero (ground) is returned unchanged
+- Negative indices (-k) are translated to n_nodes + k (current variable k)
+
+This allows current variable indices to be stamped before all nodes are known,
+and resolved at assembly time when n_nodes is final.
+"""
+@inline function resolve_index(ctx::MNAContext, idx::Int)::Int
+    idx >= 0 && return idx  # Node index or ground
+    return ctx.n_nodes - idx  # -k → n_nodes + k
+end
+
+"""
     get_current_idx(ctx::MNAContext, name::Symbol) -> Int
 
 Look up a current variable index by name.
-Returns the system index (n_nodes + position in current_names).
+Returns a negative index (-k) representing current variable k.
+Use `resolve_index` to get the actual system index.
 Throws an error if the current variable doesn't exist.
 
 # Example
 ```julia
 # After stamping a voltage source V1
-i_idx = get_current_idx(ctx, :I_V1)
+i_idx = get_current_idx(ctx, :I_V1)  # Returns -1
+actual_idx = resolve_index(ctx, i_idx)  # Returns n_nodes + 1
 ```
 """
 function get_current_idx(ctx::MNAContext, name::Symbol)::Int
     idx = findfirst(==(name), ctx.current_names)
     idx === nothing && error("Current variable $name not found in MNA context")
-    return ctx.n_nodes + idx
+    return -idx  # Return negative index
 end
 
 get_current_idx(ctx::MNAContext, name::String) = get_current_idx(ctx, Symbol(name))
@@ -228,6 +261,91 @@ Check if a current variable with the given name exists.
 """
 function has_current(ctx::MNAContext, name::Symbol)::Bool
     return name in ctx.current_names
+end
+
+#==============================================================================#
+# Internal Node Allocation
+#==============================================================================#
+
+"""
+    alloc_internal_node!(ctx::MNAContext, name::Symbol) -> Int
+
+Allocate an internal node (not accessible as a terminal).
+
+Internal nodes are used within device models for nodes that are not
+externally accessible. For example, a diode with series resistance has
+an internal node between the resistor and the junction.
+
+Internal nodes participate in KCL equations but are not visible outside
+the device. They are marked in the context for debugging and analysis.
+
+# Arguments
+- `ctx`: MNA context to allocate in
+- `name`: Unique name for the internal node (typically instance-qualified)
+
+# Returns
+The node index for use in stamping operations.
+
+# Example
+```julia
+# In a diode with series resistance:
+function stamp!(dev::DiodeRs, ctx::MNAContext, a::Int, c::Int; instance_name=:D1, ...)
+    # Allocate internal node between Rs and junction
+    a_int = alloc_internal_node!(ctx, Symbol(instance_name, ".a_int"))
+
+    # Stamp series resistance: a to a_int
+    stamp_conductance!(ctx, a, a_int, 1/dev.Rs)
+
+    # Stamp junction: a_int to c
+    # ...
+end
+```
+
+# Notes
+- Internal nodes are algebraic in transient analysis (no capacitance to ground)
+- Each device instance should use unique internal node names
+- Use `is_internal_node(ctx, idx)` to query if a node is internal
+"""
+function alloc_internal_node!(ctx::MNAContext, name::Symbol)::Int
+    # Check if node already exists (shouldn't happen with proper naming)
+    idx = get(ctx.node_to_idx, name, 0)
+    if idx != 0
+        # Node exists - mark as internal if not already
+        ctx.internal_node_flags[idx] = true
+        return idx
+    end
+
+    # Create new node (via get_node!)
+    idx = get_node!(ctx, name)
+
+    # Mark as internal
+    ctx.internal_node_flags[idx] = true
+
+    return idx
+end
+
+alloc_internal_node!(ctx::MNAContext, name::String) = alloc_internal_node!(ctx, Symbol(name))
+
+"""
+    is_internal_node(ctx::MNAContext, idx::Int) -> Bool
+
+Check if a node at the given index is an internal node.
+
+Returns `false` for ground (idx=0) or invalid indices.
+"""
+function is_internal_node(ctx::MNAContext, idx::Int)::Bool
+    idx <= 0 && return false
+    idx > length(ctx.internal_node_flags) && return false
+    return ctx.internal_node_flags[idx]
+end
+
+"""
+    n_internal_nodes(ctx::MNAContext) -> Int
+
+Return the number of internal nodes in the context.
+"""
+function n_internal_nodes(ctx::MNAContext)::Int
+    return count(ctx.internal_node_flags)
 end
 
 #==============================================================================#
@@ -315,6 +433,17 @@ The b vector contains source terms:
     v = extract_value(val)
     v == 0 && return nothing
 
+    # Resolve negative index (current variable) to actual index
+    # Note: For b vector, we need to resolve at assembly time since n_nodes may change.
+    # Instead of storing directly, we'll store the stamp and resolve later.
+    # For now, handle negative indices by deferring to assembly time.
+    if i < 0
+        # Store in deferred b stamps (need to add this)
+        push!(ctx.b_I, i)
+        push!(ctx.b_V, v)
+        return nothing
+    end
+
     # Extend b if needed
     if i > length(ctx.b)
         resize!(ctx.b, i)
@@ -391,6 +520,7 @@ function clear!(ctx::MNAContext)
     empty!(ctx.node_names)
     empty!(ctx.node_to_idx)
     ctx.n_nodes = 0
+    empty!(ctx.internal_node_flags)
     empty!(ctx.current_names)
     ctx.n_currents = 0
     empty!(ctx.G_I)
@@ -400,24 +530,39 @@ function clear!(ctx::MNAContext)
     empty!(ctx.C_J)
     empty!(ctx.C_V)
     empty!(ctx.b)
+    empty!(ctx.b_I)
+    empty!(ctx.b_V)
     ctx.finalized = false
     return nothing
 end
 
 function Base.show(io::IO, ctx::MNAContext)
+    n_int = n_internal_nodes(ctx)
     print(io, "MNAContext(")
-    print(io, "nodes=$(ctx.n_nodes), ")
-    print(io, "currents=$(ctx.n_currents), ")
+    print(io, "nodes=$(ctx.n_nodes)")
+    if n_int > 0
+        print(io, " ($(n_int) internal)")
+    end
+    print(io, ", currents=$(ctx.n_currents), ")
     print(io, "G_nnz=$(length(ctx.G_V)), ")
     print(io, "C_nnz=$(length(ctx.C_V))")
     print(io, ")")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", ctx::MNAContext)
+    n_int = n_internal_nodes(ctx)
     println(io, "MNAContext:")
-    println(io, "  Nodes ($(ctx.n_nodes)):")
+    if n_int > 0
+        println(io, "  Nodes ($(ctx.n_nodes), $(n_int) internal):")
+    else
+        println(io, "  Nodes ($(ctx.n_nodes)):")
+    end
     for (i, name) in enumerate(ctx.node_names)
-        println(io, "    [$i] $name")
+        if is_internal_node(ctx, i)
+            println(io, "    [$i] $name (internal)")
+        else
+            println(io, "    [$i] $name")
+        end
     end
     if ctx.n_currents > 0
         println(io, "  Current variables ($(ctx.n_currents)):")

@@ -1,6 +1,6 @@
 using Accessors
 using AxisKeys
-using OrdinaryDiffEq, SciMLBase
+using OrdinaryDiffEq, SciMLBase, Sundials
 using Base.Iterators
 
 # Phase 0: Use stubs instead of DAECompiler
@@ -11,6 +11,7 @@ else
 end
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
+export MNACircuit  # Re-export from MNA module for convenience
 
 # This `alter()` is to make it easy to apply directly to a struct or named tuple with the optics.
 function alter(x::T, params) where {T}
@@ -422,6 +423,10 @@ function Base.iterate(cs::CircuitSweep, state...)
     return (new_sim, next[2])
 end
 
+#==============================================================================#
+# DC Analysis
+#==============================================================================#
+
 """
     dc!(sim::MNASim)
 
@@ -430,6 +435,23 @@ Returns a `DCSolution` with voltage/current accessors.
 """
 function dc!(sim::MNASim)
     return MNA.solve_dc(sim)
+end
+
+"""
+    dc!(circuit::MNACircuit)
+
+DC operating point analysis for MNACircuit.
+Returns a `DCSolution` with voltage/current accessors.
+
+# Example
+```julia
+circuit = MNACircuit(build_divider, (R1=1k, R2=1k), MNASpec())
+sol = dc!(circuit)
+voltage(sol, :out)  # Voltage at output node
+```
+"""
+function dc!(circuit::MNA.MNACircuit)
+    return MNA.solve_dc(circuit)
 end
 
 """
@@ -442,11 +464,18 @@ function dc!(cs::CircuitSweep; kwargs...)
     return [dc!(sim; kwargs...) for sim in cs]
 end
 
+#==============================================================================#
+# Transient Analysis
+#==============================================================================#
+
 """
     tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
 
-Transient analysis for MNA circuits.
-Returns an ODESolution that can be indexed by time.
+Transient analysis for MNA circuits using ODE formulation.
+
+This uses static matrix assembly (G, C, b computed once at t=0).
+For nonlinear circuits with voltage-dependent capacitors, use `tran!` with
+`MNACircuit` instead, which uses DAEProblem formulation.
 
 # Example
 ```julia
@@ -471,6 +500,50 @@ function tran!(sim::MNASim, tspan::Tuple{Real,Real};
     end
 
     return solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+end
+
+"""
+    tran!(circuit::MNACircuit; solver=IDA(), abstol=1e-10, reltol=1e-8, kwargs...)
+
+Transient analysis for MNACircuit using DAEProblem formulation.
+
+This is the recommended method for nonlinear circuits with voltage-dependent
+capacitors (MOSFETs, junction capacitors). The circuit matrices are rebuilt
+at each Newton iteration, ensuring correct handling of nonlinear devices.
+
+# Arguments
+- `circuit`: The MNA circuit (must have valid tspan)
+- `solver`: DAE solver (default: IDA from Sundials.jl)
+- `abstol`, `reltol`: Solver tolerances
+
+# Example
+```julia
+circuit = MNACircuit(build_inverter, params, MNASpec(), (0.0, 1e-6))
+sol = tran!(circuit)
+sol(1e-7)  # Get state at t=0.1μs
+```
+
+# Notes
+For linear circuits with constant capacitance, you can also use:
+```julia
+prob = ODEProblem(circuit)
+sol = solve(prob, Rodas5P())
+```
+"""
+function tran!(circuit::MNA.MNACircuit; solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+    if circuit.tspan == (0.0, 0.0)
+        throw(ArgumentError("MNACircuit must have valid tspan for transient analysis. " *
+                           "Use MNACircuit(builder, params, spec, tspan) constructor."))
+    end
+
+    prob = SciMLBase.DAEProblem(circuit)
+
+    if solver === nothing
+        # Default to IDA (Sundials) for robustness with nonlinear circuits
+        solver = Sundials.IDA()
+    end
+
+    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
 end
 
 """

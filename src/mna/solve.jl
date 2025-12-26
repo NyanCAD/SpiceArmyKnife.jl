@@ -1476,3 +1476,31 @@ end
 
 # NOTE: make_nonlinear_dae_* removed - use MNACircuit + DAEProblem instead
 # MNACircuit automatically handles nonlinear devices by rebuilding matrices each step.
+
+#==============================================================================#
+# MNACircuit Convenience Constructor
+#==============================================================================#
+
+"""
+    MNACircuit(builder, params, spec)
+
+Create an MNA circuit for DC/AC analysis (no transient).
+
+For transient analysis, use the 4-argument form with tspan.
+"""
+function MNACircuit(builder::F, params::P, spec::S) where {F,P,S}
+    MNACircuit{F,P,S}(builder, params, spec, (0.0, 0.0))
+end
+
+# Internal solve_dc/solve_ac methods for MNACircuit (called from sweeps.jl)
+function solve_dc(circuit::MNACircuit)
+    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
+    return solve_dc(circuit.builder, circuit.params, dc_spec)
+end
+
+function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
+    ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
+    ctx = circuit.builder(circuit.params, ac_spec; x=Float64[])
+    sys = assemble!(ctx)
+    return solve_ac(sys, freqs; kwargs...)
+end

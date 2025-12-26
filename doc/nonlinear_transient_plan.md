@@ -1,12 +1,25 @@
 # Nonlinear Transient Analysis Implementation Plan
 
+## Status: Phases 1-2 Complete ✓
+
+**Completed (commit ef67fc4):**
+- Phase 1: Validated DAEProblem path with VAMOSCap model
+- Phase 2: Added high-level API (`dc!`/`tran!` on `MNACircuit`)
+- `tran!(circuit::MNACircuit)` now uses DAEProblem with IDA solver
+- Tested: MOSFET with capacitances maintains DC equilibrium in transient
+
+**Remaining:**
+- Phase 3: Performance optimization (preallocate matrices)
+- Phase 4: More MOSFET validation (junction caps, ring oscillator)
+
 ## Executive Summary
 
-This document describes the plan for implementing proper nonlinear transient analysis in the MNA backend. The core infrastructure (`MNACircuit` + `DAEProblem`) already exists but is underutilized. The main work is:
+This document describes the plan for implementing proper nonlinear transient analysis in the MNA backend. The core infrastructure (`MNACircuit` + `DAEProblem`) already exists and is now exposed via user-friendly API.
 
-1. Exposing the DAE path via a user-friendly API
-2. Testing with voltage-dependent capacitors (MOSFET Cgs/Cgd)
-3. Optimizing performance for repeated matrix assembly
+Key changes:
+1. `tran!(circuit::MNACircuit)` uses DAEProblem (rebuilds matrices each Newton step)
+2. `tran!(sim::MNASim, tspan)` uses ODEProblem (static matrices, for linear circuits)
+3. Default solver is IDA (Sundials) for robustness
 
 ## Current Limitations
 

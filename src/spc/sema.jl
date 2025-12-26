@@ -688,19 +688,24 @@ function resolve_scopes!(sr::SemaResult)
     graph = SimpleDiGraph(length(sr.params) + length(sr.conditionals)); # vertices are symbol ids in [params; conditionals]
     idx_lookup = Dict{Symbol, Int}(sym=>id for (id, (sym, _)) in enumerate(sr.params))
     conditional(idx) = length(sr.params) + abs(idx)
+    # Track params with self-references - these refer to outer scope even though locally defined
+    self_referencing_params = Set{Symbol}()
     for (n, (name, defs)) in enumerate(sr.params)
         def = defs[end]
         cd = def[2]
         if cd.cond != 0
             add_edge!(graph, conditional(cd.cond), n)
         end
-        sema_visit_ids!(cd.val.val) do name
-            push!(sr.exposed_parameters, name)
-            if haskey(idx_lookup, name)
-                m = idx_lookup[name]
+        sema_visit_ids!(cd.val.val) do ref_name
+            push!(sr.exposed_parameters, ref_name)
+            if haskey(idx_lookup, ref_name)
+                m = idx_lookup[ref_name]
                 if m != n
+                    add_edge!(graph, idx_lookup[ref_name], n)
+                else
                     # Self-parameter reference refers to outer scope
-                    add_edge!(graph, idx_lookup[name], n)
+                    # Track this so we keep it in exposed_parameters
+                    push!(self_referencing_params, ref_name)
                 end
             end
         end
@@ -741,6 +746,9 @@ function resolve_scopes!(sr::SemaResult)
 
     for param in sr.exposed_parameters
         if !haskey(sr.params, param)
+            push!(new_exposed_parameters, param)
+        elseif param in self_referencing_params
+            # Self-referencing params need values from outer scope
             push!(new_exposed_parameters, param)
         end
     end

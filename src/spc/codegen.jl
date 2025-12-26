@@ -220,6 +220,77 @@ end
 
 cg_expr!(state::CodegenState, n::Union{SNode{SP.Brace}, SNode{SC.Parens}, SNode{SP.Parens}, SNode{SP.Prime}}) = cg_expr!(state, n.inner)
 
+"""
+    cg_expr_with_parent_params!(state, node, exposed_params)
+
+Generate an expression where exposed parameters are referenced via `parent_params.name`
+instead of directly as `name`. This is used for subcircuit default expressions that
+reference parameters from the parent scope.
+"""
+function cg_expr_with_parent_params!(state::CodegenState, node, exposed_params::AbstractSet{Symbol})
+    # Recursively transform the expression, replacing exposed param references
+    _cg_with_parent(x) = cg_expr_with_parent_params!(state, x, exposed_params)
+
+    if node isa Symbol
+        if node in exposed_params
+            # Reference via parent_params
+            return :(parent_params.$node)
+        else
+            return cg_expr!(state, node)
+        end
+    elseif node isa SNode{SP.Identifier} || node isa SNode{SC.Identifier}
+        id = LSymbol(node)
+        if id in exposed_params
+            return :(parent_params.$id)
+        else
+            return cg_expr!(state, node)
+        end
+    elseif node isa SNode{SP.BinaryExpression} || node isa SNode{SC.BinaryExpression}
+        lhs = _cg_with_parent(node.lhs)
+        rhs = _cg_with_parent(node.rhs)
+        op = Symbol(node.op)
+        if op == :(||)
+            return Expr(:call, (|), lhs, rhs)
+        elseif op == :(&&)
+            return Expr(:call, (&), lhs, rhs)
+        elseif op == Symbol("**")
+            return Expr(:call, (^), lhs, rhs)
+        elseif op == Symbol("^")
+            return Expr(:call, (⊻), lhs, rhs)
+        elseif op == Symbol("~^") || op == Symbol("^~")
+            return Expr(:call, (~), Expr(:call, (⊻), lhs, rhs))
+        else
+            return Expr(:call, op, lhs, rhs)
+        end
+    elseif node isa SNode{SP.UnaryOp} || node isa SNode{SC.UnaryOp}
+        inner = _cg_with_parent(node.operand)
+        op = Symbol(node.op)
+        return Expr(:call, op, inner)
+    elseif node isa SNode{SP.FunctionCall} || node isa SNode{SC.FunctionCall}
+        fname = LSymbol(node.id)
+        id = lowercase(String(node.id))
+        if isdefined(CedarSim.SpectreEnvironment, Symbol(id))
+            args = map(x -> _cg_with_parent(x.item), node.args)
+            return Expr(:call, GlobalRef(SpectreEnvironment, Symbol(id)), args...)
+        else
+            args = map(x -> _cg_with_parent(x.item), node.args)
+            return Expr(:call, fname, args...)
+        end
+    elseif node isa SNode{SP.TernaryExpr} || node isa SNode{SC.TernaryExpr}
+        return Expr(:if,
+            _cg_with_parent(node.condition),
+            _cg_with_parent(node.ifcase),
+            _cg_with_parent(node.elsecase))
+    elseif node isa SNode{SP.Brace} || node isa SNode{SC.Parens} || node isa SNode{SP.Parens} || node isa SNode{SP.Prime}
+        return _cg_with_parent(node.inner)
+    elseif node isa SNode{SP.NumberLiteral} || node isa SNode{SC.NumberLiteral}
+        return cg_expr!(state, node)
+    else
+        # Fall back to regular cg_expr! for other node types
+        return cg_expr!(state, node)
+    end
+end
+
 function cg_params!(state::CodegenState, params)
     ret = Expr[]
     for param in params
@@ -1161,11 +1232,102 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
 end
 
 """
-Generate MNA subcircuit call.
+Collect exposed_parameters from a subcircuit and all nested subcircuits it calls.
+Uses a Dict{Symbol, SemaResult} for subcircuit lookups.
+
+This is needed because when calling a subcircuit, we need to pass not only its
+direct exposed_parameters, but also any parameters that its nested subcircuit
+calls need.
+"""
+function collect_exposed_parameters_from_dict(subckt_semas::Dict{Symbol, SemaResult}, ssema::SemaResult,
+                                               visited::Set{Symbol}=Set{Symbol}())
+    result = OrderedSet{Symbol}()
+
+    # Add direct exposed_parameters
+    for name in ssema.exposed_parameters
+        push!(result, name)
+    end
+
+    # Check for subcircuit calls and collect their exposed_parameters transitively
+    for (_, instances) in ssema.instances
+        for (_, instance) in instances
+            instance = instance.val
+            if isa(instance, SNode{SP.SubcktCall})
+                subckt_name = LSymbol(instance.model)
+
+                # Avoid infinite recursion
+                subckt_name in visited && continue
+                push!(visited, subckt_name)
+
+                # Look up the subcircuit in the dict
+                nested_sema = get(subckt_semas, subckt_name, nothing)
+                if nested_sema !== nothing
+                    # Recursively collect exposed_parameters
+                    for name in collect_exposed_parameters_from_dict(subckt_semas, nested_sema, visited)
+                        push!(result, name)
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+"""
+Collect exposed_parameters from a subcircuit and all nested subcircuits it calls.
+Uses the parent's SemaResult for subcircuit lookups.
+
+This is needed because when calling a subcircuit, we need to pass not only its
+direct exposed_parameters, but also any parameters that its nested subcircuit
+calls need.
+"""
+function collect_exposed_parameters_recursively(parent_sema::SemaResult, ssema::SemaResult,
+                                                 visited::Set{Symbol}=Set{Symbol}())
+    result = OrderedSet{Symbol}()
+
+    # Add direct exposed_parameters
+    for name in ssema.exposed_parameters
+        push!(result, name)
+    end
+
+    # Check for subcircuit calls and collect their exposed_parameters transitively
+    for (_, instances) in ssema.instances
+        for (_, instance) in instances
+            instance = instance.val
+            if isa(instance, SNode{SP.SubcktCall})
+                subckt_name = LSymbol(instance.model)
+
+                # Avoid infinite recursion
+                subckt_name in visited && continue
+                push!(visited, subckt_name)
+
+                # Look up the subcircuit in the parent's subckts (since it might not be locally defined)
+                subckt_sema = get(parent_sema.subckts, subckt_name, nothing)
+                if subckt_sema !== nothing && !isempty(subckt_sema)
+                    nested_sema = first(subckt_sema)[2].val
+                    # Recursively collect exposed_parameters
+                    for name in collect_exposed_parameters_recursively(parent_sema, nested_sema, visited)
+                        push!(result, name)
+                    end
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+"""
+Generate MNA subcircuit call at top level (where lens is var"*lens#").
 
 Explicit params from the netlist (e.g., `X1 vcc 0 myres factor=2`) become
 kwargs to the builder call. The builder then passes these to the lens,
 which merges them with any sweep overrides.
+
+Also passes exposed_parameters from the caller's scope so the callee's
+default expressions can reference them. This includes transitively collecting
+exposed_parameters from nested subcircuits.
 """
 function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
     subckt_name = LSymbol(instance.model)
@@ -1208,16 +1370,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Regular subcircuit handling
     ssema = resolve_subckt(state.sema, subckt_name)
 
-    callee_codegen = CodegenState(ssema)
+    # Collect exposed_parameters transitively (including from nested subcircuits)
+    # This is needed because nested subcircuit calls may need parameters from the outer scope
+    all_exposed = collect_exposed_parameters_recursively(state.sema, ssema)
+
+    # Build parent_params NamedTuple with all exposed parameters from caller's scope
+    # This is passed to the subcircuit so it can evaluate default expressions
+    parent_param_pairs = Expr[]
+    for name in all_exposed
+        # Reference the variable in the caller's scope
+        push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
+    end
 
     # Build kwargs from explicit parameters passed to the subcircuit call
+    # Use the caller's state for cg_expr! since that's where the values are defined
     explicit_kwargs = Expr[]
 
     # Find Parameter children in the AST (SubcktCall exposes params as children)
     for child in SpectreNetlistParser.RedTree.children(instance)
         if child !== nothing && isa(child, SNode{SP.Parameter})
             name = LSymbol(child.name)
-            def = cg_expr!(callee_codegen, child.val)
+            def = cg_expr!(state, child.val)  # Use caller's state, not callee's
             push!(explicit_kwargs, Expr(:kw, name, def))
         end
     end
@@ -1228,20 +1401,31 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
 
+    # Build parent_params NamedTuple expression
+    parent_params_expr = if isempty(parent_param_pairs)
+        :((;))
+    else
+        Expr(:tuple, Expr(:parameters, parent_param_pairs...))
+    end
+
     # Generate code that:
     # 1. Navigates to subcircuit's portion of the lens via getproperty
-    # 2. Calls builder with navigated lens and explicit params as kwargs
+    # 2. Calls builder with navigated lens, parent_params as positional arg, and explicit params as kwargs
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
         let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
         end
     end
 end
 
 # Version for use in subcircuit context (lens is named `lens`)
-function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.SubcktCall}, subckt_builders::Dict{Symbol, Symbol})
+# subckt_semas is a Dict{Symbol, SemaResult} mapping subcircuit names to their semantic analysis
+function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.SubcktCall},
+                                     subckt_builders::Dict{Symbol, Symbol},
+                                     subckt_semas::Dict{Symbol, SemaResult})
     subckt_name = LSymbol(instance.model)
+    instance_name = LSymbol(instance.name)
 
     # Check if this is a VA module from imported_hdl_modules
     va_module_ref = nothing
@@ -1273,30 +1457,54 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
         end
     end
 
-    # Regular subcircuit handling
-    ssema = resolve_subckt(state.sema, subckt_name)
+    # Get the callee's sema to find exposed_parameters
+    callee_sema = get(subckt_semas, subckt_name, nothing)
 
-    callee_codegen = CodegenState(ssema)
+    # Build parent_params NamedTuple with all exposed parameters from caller's scope
+    # This is passed to the subcircuit so it can evaluate default expressions
+    # For exposed params that the caller defines locally, reference them directly
+    # For exposed params that come from caller's parent_params, forward them
+    parent_param_pairs = Expr[]
+    if callee_sema !== nothing
+        # Collect exposed_parameters transitively using subckt_semas as the lookup
+        all_exposed = collect_exposed_parameters_from_dict(subckt_semas, callee_sema)
+        # Get the set of locally-defined params in the caller
+        locally_defined = Set{Symbol}(keys(state.sema.params))
+        for name in all_exposed
+            if name in locally_defined
+                # Param is locally defined in caller - reference it directly
+                push!(parent_param_pairs, Expr(:(=), name, name))
+            else
+                # Param comes from caller's parent_params - forward it
+                push!(parent_param_pairs, Expr(:(=), name, :(parent_params.$name)))
+            end
+        end
+    end
 
     # Build kwargs from explicit parameters passed to the subcircuit call
+    # Use the caller's state for cg_expr! since that's where the values are defined
     explicit_kwargs = Expr[]
-
     for child in SpectreNetlistParser.RedTree.children(instance)
         if child !== nothing && isa(child, SNode{SP.Parameter})
             name = LSymbol(child.name)
-            def = cg_expr!(callee_codegen, child.val)
+            def = cg_expr!(state, child.val)  # Use caller's state, not callee's
             push!(explicit_kwargs, Expr(:kw, name, def))
         end
     end
 
     port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
-
-    instance_name = LSymbol(instance.name)
     builder_name = get(subckt_builders, subckt_name, Symbol(subckt_name, "_mna_builder"))
+
+    # Build parent_params NamedTuple expression
+    parent_params_expr = if isempty(parent_param_pairs)
+        :((;))
+    else
+        Expr(:tuple, Expr(:parameters, parent_param_pairs...))
+    end
 
     return quote
         let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
         end
     end
 end
@@ -1523,10 +1731,23 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                 push!(explicit_kwargs, Expr(:kw, param_name, param_val))
             end
 
+            # Build parent_params NamedTuple with exposed parameters from caller's scope
+            ssema = resolve_subckt(state.sema, master_sym)
+            all_exposed = collect_exposed_parameters_recursively(state.sema, ssema)
+            parent_param_pairs = Expr[]
+            for name in all_exposed
+                push!(parent_param_pairs, Expr(:(=), name, cg_expr!(state, name)))
+            end
+            parent_params_expr = if isempty(parent_param_pairs)
+                :((;))
+            else
+                Expr(:tuple, Expr(:parameters, parent_param_pairs...))
+            end
+
             # Generate subcircuit call similar to SPICE SubcktCall
             return quote
                 let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...); $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
                 end
             end
         else
@@ -1751,7 +1972,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 end
 
 """
-    codegen_mna!(state::CodegenState; skip_nets=Symbol[])
+    codegen_mna!(state::CodegenState; skip_nets=Symbol[], is_subcircuit=false, subckt_semas=Dict{Symbol,SemaResult}())
 
 Generate MNA builder function body from semantic analysis result.
 Returns code that builds an MNAContext with all devices stamped.
@@ -1761,8 +1982,12 @@ Returns code that builds an MNAContext with all devices stamped.
 
 When `is_subcircuit=true`, params are function kwargs and lens is named `lens`.
 When `is_subcircuit=false` (top-level), params come from the `params` argument.
+
+`subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
+to look up exposed_parameters when generating subcircuit instance calls.
 """
-function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false)
+function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], is_subcircuit::Bool=false,
+                      subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
     block = Expr(:block)
     ret = block
 
@@ -1828,6 +2053,8 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     # The parameter_order loop below handles formal_parameters with proper defaults.
 
     # Codegen parameter defs
+    # For subcircuits, param resolution is handled in codegen_mna_subcircuit's param_resolution_exprs
+    # which uses parent_params for default expression evaluation
     params_in_order = collect(state.sema.params)
     cond_syms = Vector{Symbol}(undef, length(state.sema.conditionals))
 
@@ -1842,20 +2069,16 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     for n in param_indices
         if n <= length(params_in_order)
             (name, defs) = params_in_order[n]
+            # Skip param assignment for subcircuits - handled in codegen_mna_subcircuit
+            is_subcircuit && continue
             for def in defs
                 cd = def[2]
                 def_expr = cg_expr!(state, cd.val.val)
                 # In SPICE, any .param can be overridden from outside the subcircuit call
                 # Use lens callable interface for ParamObserver support and parameter overrides
                 if needs_lens
-                    if is_subcircuit
-                        # Subcircuit: params are function kwargs, use variable name in lens call
-                        # lens(; name=name) where `name` is the function kwarg
-                        expr = :($name = $lens_var(; $(Expr(:kw, name, name))).$name)
-                    else
-                        # Top-level: use default expression as kwarg to lens call
-                        expr = :($name = $lens_var(; $(Expr(:kw, name, def_expr))).$name)
-                    end
+                    # Top-level: use default expression as kwarg to lens call
+                    expr = :($name = $lens_var(; $(Expr(:kw, name, def_expr))).$name)
                 else
                     expr = :($name = $def_expr)
                 end
@@ -1946,7 +2169,7 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
     # For SubcktCall, we need to use the appropriate function based on context
     function codegen_instance(inst)
         if inst isa SNode{SP.SubcktCall} && is_subcircuit
-            cg_mna_instance_subcircuit!(state, inst, Dict{Symbol, Symbol}())
+            cg_mna_instance_subcircuit!(state, inst, Dict{Symbol, Symbol}(), subckt_semas)
         else
             cg_mna_instance!(state, inst)
         end
@@ -2017,7 +2240,7 @@ function extract_subcircuit_ports(sema::SemaResult)
 end
 
 """
-    codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+    codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol, subckt_semas::Dict{Symbol,SemaResult})
 
 Generate an MNA subcircuit builder function from semantic analysis.
 
@@ -2026,8 +2249,12 @@ The generated function has signature:
 
 Explicit params from the subcircuit call are passed as kwargs. The builder
 calls `lens(; param1=param1, ...)` to merge with any sweep overrides.
+
+`subckt_semas` is a Dict mapping subcircuit names to their SemaResult, used
+to look up exposed_parameters when this subcircuit calls other subcircuits.
 """
-function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
+function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
+                                 subckt_semas::Dict{Symbol,SemaResult}=Dict{Symbol,SemaResult}())
     state = CodegenState(sema)
 
     # Extract ports from AST
@@ -2040,30 +2267,55 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol)
     port_mappings = Expr[:($internal_name = $arg)
         for (internal_name, arg) in zip(subckt_ports, port_args)]
 
-    # Build kwargs for subcircuit params with their defaults
-    # These allow the caller to override via kwargs, then lens merges with sweep params
+    # Build kwargs for subcircuit params that have locally-defined defaults
+    # These can be overridden by explicit parameters in the subcircuit call
     param_kwargs = Expr[]
+    local_params_with_defaults = Dict{Symbol, Any}()  # name => default expression (can be Expr or literal)
     for (name, defs) in sema.params
         if !isempty(defs)
             # Use the first definition's default value
             def = first(defs)[2]
             if def.cond == 0  # non-conditional
-                def_expr = cg_expr!(state, def.val.val)
-                push!(param_kwargs, Expr(:kw, name, def_expr))
+                # Generate a temporary state that references parent_params for exposed parameters
+                def_expr = cg_expr_with_parent_params!(state, def.val.val, sema.exposed_parameters)
+                local_params_with_defaults[name] = def_expr
+                # Use nothing as default - we'll compute the actual value in the body
+                push!(param_kwargs, Expr(:kw, name, nothing))
             end
+        end
+    end
+
+    # Generate parameter resolution code for the body
+    # For each local param: use kwarg if provided, else lens override, else default expression
+    param_resolution_exprs = Expr[]
+    for (name, defs) in sema.params
+        if haskey(local_params_with_defaults, name)
+            def_expr = local_params_with_defaults[name]
+            # Check kwarg first, then lens, then default
+            push!(param_resolution_exprs, quote
+                $name = if $name !== nothing
+                    $name  # Explicit kwarg override
+                else
+                    # Try lens override, falling back to default expression
+                    lens_params = lens(; $name = $def_expr)
+                    hasfield(typeof(lens_params), $(QuoteNode(name))) ? getfield(lens_params, $(QuoteNode(name))) : $def_expr
+                end
+            end)
         end
     end
 
     # Generate body, skipping get_node! for ports (they're passed as args)
     # is_subcircuit=true means params are function kwargs and lens is named `lens`
-    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true)
+    body = codegen_mna!(state; skip_nets=subckt_ports, is_subcircuit=true, subckt_semas=subckt_semas)
 
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...); $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params; $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
+            # Make parent_params available for default expression evaluation
+            $(param_resolution_exprs...)
             $body
             return nothing
         end
@@ -2093,19 +2345,29 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
     sema_result = sema(ast; imported_hdl_modules)
     state = CodegenState(sema_result)
 
+    # Build a dictionary mapping subcircuit names to their SemaResult
+    # This is used to look up exposed_parameters when generating subcircuit calls
+    subckt_semas = Dict{Symbol, SemaResult}()
+    for (name, subckt_list) in sema_result.subckts
+        if !isempty(subckt_list)
+            _, subckt_sema = first(subckt_list)
+            subckt_semas[name] = subckt_sema.val
+        end
+    end
+
     # Generate subcircuit builders first
     subckt_defs = Expr[]
     for (name, subckt_list) in sema_result.subckts
         if !isempty(subckt_list)
             # Take the first (non-conditional) subcircuit definition
             _, subckt_sema = first(subckt_list)
-            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name)
+            subckt_def = codegen_mna_subcircuit(subckt_sema.val, name, subckt_semas)
             push!(subckt_defs, subckt_def)
         end
     end
 
-    # Generate the body
-    body = codegen_mna!(state)
+    # Generate the body - pass subckt_semas in case top-level has subcircuit instances
+    body = codegen_mna!(state; subckt_semas=subckt_semas)
 
     # Wrap in function definition
     return quote

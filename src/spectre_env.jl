@@ -103,7 +103,6 @@ import Base:
     asinh, acosh, atanh,
     zero, atan,
     floor, ceil, trunc
-import Base.Experimental: @overlay
 import ..rem_right_semi, ..time_periodic_singularities!, ..pwl_at_time, ..wave_split
 
 const arctan = atan

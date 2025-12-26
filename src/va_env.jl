@@ -33,25 +33,25 @@ export !, +, *, -, ==, !=, /, ^, var"**", >, <,  <=, >=,
     sin, cos, tan, atan,
     floor, %, NaN
 
-using Base: @inbounds, @inline, @noinline
-using Base.Experimental: @overlay
-export @inbounds, @inline, @overlay, var"$temperature"
+# Note: @inbounds, @inline, @noinline, @overlay are NOT exported
+# Generated code should use Base.@inline etc directly
+export var"$temperature"
 
 export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10
 
-@noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
-@noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
-@noinline Base.@assume_effects :total ln(x) = NaNMath.log(x)
+Base.@noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
+Base.@noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
+Base.@noinline Base.@assume_effects :total ln(x) = NaNMath.log(x)
 log(x) = cedarerror("log not supported, use $log10 or $ln instead")
 !(a) = Base.:!(a)
 !(a::Int64) = a == zero(a)
 atan2(x,y) = Base.atan(x,y)
 var"**"(a, b) = pow(a, b)
 ^ = Base.:(⊻)
-@noinline Base.@assume_effects :total sqrt(x) = NaNMath.sqrt(x)
-@noinline Base.@assume_effects :total sin(x) = NaNMath.sin(x)
-@noinline Base.@assume_effects :total cos(x) = NaNMath.cos(x)
-@noinline Base.@assume_effects :total tan(x) = Base.tan(x)
+Base.@noinline Base.@assume_effects :total sqrt(x) = NaNMath.sqrt(x)
+Base.@noinline Base.@assume_effects :total sin(x) = NaNMath.sin(x)
+Base.@noinline Base.@assume_effects :total cos(x) = NaNMath.cos(x)
+Base.@noinline Base.@assume_effects :total tan(x) = Base.tan(x)
 log10(x) = NaNMath.log10(x)
 
 function ChainRules.frule((_, Δx), ::typeof(sqrt), x)

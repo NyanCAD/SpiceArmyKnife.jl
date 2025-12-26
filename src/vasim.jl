@@ -407,7 +407,7 @@ function (to_julia::Scope)(stmt::VANode{FunctionCall})
             probe = Symbol(item.args[1].item)
             id_idx = findfirst(==(probe), to_julia.ddx_order)
             return :(let x = $(to_julia(stmt.args[1].item))
-                $(isa)(x, $(Dual)) ? (@inbounds $(ForwardDiff.partials)($(SimTag), x, $id_idx)) : 0.0
+                $(isa)(x, $(Dual)) ? (Base.@inbounds $(ForwardDiff.partials)($(SimTag), x, $id_idx)) : 0.0
             end)
         else
             probe1 = Symbol(item.args[1].item)
@@ -415,8 +415,8 @@ function (to_julia::Scope)(stmt::VANode{FunctionCall})
             probe2 = Symbol(item.args[2].item)
             id2_idx = findfirst(==(probe2), to_julia.ddx_order)
             return :(let x = $(to_julia(stmt.args[1].item)),
-                        dx1 = $(isa)(x, $(Dual)) ? (@inbounds $(ForwardDiff.partials)($(SimTag), x, $id1_idx)) : 0.0,
-                        dx2 = $(isa)(x, $(Dual)) ? (@inbounds $(ForwardDiff.partials)($(SimTag), x, $id2_idx)) : 0.0
+                        dx1 = $(isa)(x, $(Dual)) ? (Base.@inbounds $(ForwardDiff.partials)($(SimTag), x, $id1_idx)) : 0.0,
+                        dx2 = $(isa)(x, $(Dual)) ? (Base.@inbounds $(ForwardDiff.partials)($(SimTag), x, $id2_idx)) : 0.0
                 (dx1-dx2)/2
             end)
         end
@@ -569,7 +569,7 @@ function (to_julia::Scope)(fd::VANode{AnalogFunctionDeclaration})
     end
 
     return @nolines quote
-        @inline function $fname($(in_args...))
+        Base.@inline function $fname($(in_args...))
             $(localize_vars...)
             local $fname = $(VerilogAEnvironment.vaconvert)($rt, 0)
             $(to_julia_internal(fd.stmt))
@@ -1238,7 +1238,7 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # Use node_order for partial index (duals indexed by port position)
             id_idx = findfirst(==(probe), to_julia.node_order)
             return :(let x = $(to_julia(stmt.args[1].item))
-                isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
+                isa(x, Dual) ? Base.@inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
             end)
         else
             probe1 = Symbol(item.args[1].item)
@@ -1249,8 +1249,8 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # This works because V(a,b) = V_a - V_b, so:
             # ∂expr/∂V_a = ∂expr/∂V(a,b) and ∂expr/∂V_b = -∂expr/∂V(a,b)
             return :(let x = $(to_julia(stmt.args[1].item)),
-                        dx1 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
-                        dx2 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
+                        dx1 = isa(x, Dual) ? Base.@inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
+                        dx2 = isa(x, Dual) ? Base.@inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
                 (dx1 - dx2) / 2
             end)
         end
@@ -1404,7 +1404,7 @@ function (to_julia::MNAScope)(fd::VANode{AnalogFunctionDeclaration})
     end
 
     return @nolines quote
-        @inline function $fname($(in_args...))
+        Base.@inline function $fname($(in_args...))
             $(localize_vars...)
             local $fname = VerilogAEnvironment.vaconvert($rt, 0)
             $(to_julia_internal(fd.stmt))
@@ -1712,7 +1712,8 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
-        using Base: hasproperty, getproperty, getfield, error, !==
+        using Base: hasproperty, getproperty, getfield, error, !==, isa, typeof
+        using Base: Nothing  # For Dual{Nothing} type parameter
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
@@ -1740,6 +1741,7 @@ function make_module(va::VANode)
     vamod = va.stmts[end]
     s = Symbol(String(vamod.id), "_module")
     Expr(:toplevel, :(baremodule $s
+        import Base  # For Base.@inline etc in generated code
         using ..CedarSim.VerilogAEnvironment
         export $(Symbol(vamod.id))
         $(CedarSim.make_spice_device(vamod))

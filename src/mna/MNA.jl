@@ -53,13 +53,14 @@ include("build.jl")
 # Basic device stamps
 include("devices.jl")
 
-# Analysis solvers
-include("solve.jl")
-
 # VA contribution function support (Phase 5)
 include("contrib.jl")
 
 # Precompiled circuit optimization (Phase 7)
+# Must be before solve.jl since solve.jl uses PrecompiledCircuit
 include("precompile.jl")
+
+# Analysis solvers (uses precompile.jl types)
+include("solve.jl")
 
 end # module MNA

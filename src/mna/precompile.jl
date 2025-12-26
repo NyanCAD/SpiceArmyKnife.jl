@@ -15,6 +15,12 @@
 
 using SparseArrays
 using LinearAlgebra
+using ForwardDiff: Dual, value
+
+# Extract real value from ForwardDiff.Dual (for tgrad compatibility)
+# Needed for time-dependent sources with Rosenbrock solvers
+real_time(t::Real) = Float64(t)
+real_time(t::Dual) = Float64(value(t))
 
 export PrecompiledCircuit, compile_circuit, fast_residual!, fast_jacobian!
 export reset_coo_values!, update_sparse_from_coo!
@@ -668,124 +674,8 @@ function detect_differential_vars_from_C(C::SparseMatrixCSC, n::Int)
     return diff_vars
 end
 
-"""
-    make_fast_dae_residual(circuit::MNACircuitCompiled) -> Function
-
-Create the fast DAE residual function using precompiled circuit.
-"""
-function make_fast_dae_residual(circuit::MNACircuitCompiled)
-    pc = circuit.pc
-
-    function dae_residual!(resid, du, u, p, t)
-        fast_residual!(resid, du, u, pc, real_time(t))
-        return nothing
-    end
-
-    return dae_residual!
-end
-
-"""
-    make_fast_dae_jacobian(circuit::MNACircuitCompiled) -> Function
-
-Create the fast DAE Jacobian function.
-"""
-function make_fast_dae_jacobian(circuit::MNACircuitCompiled)
-    pc = circuit.pc
-
-    function dae_jac!(J, du, u, p, gamma, t)
-        fast_jacobian!(J, du, u, pc, gamma, real_time(t))
-        return nothing
-    end
-
-    return dae_jac!
-end
-
-"""
-    SciMLBase.DAEProblem(circuit::MNACircuitCompiled, tspan; kwargs...)
-
-Convert MNACircuitCompiled to SciML DAEProblem.
-"""
-function SciMLBase.DAEProblem(circuit::MNACircuitCompiled, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, du0=nothing, kwargs...)
-    # Get initial conditions
-    if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(circuit)
-        u0 = u0 === nothing ? u0_computed : u0
-        du0 = du0 === nothing ? du0_computed : du0
-    end
-
-    # Create residual function
-    residual! = make_fast_dae_residual(circuit)
-
-    # Detect differential variables
-    pc = circuit.pc
-    diff_vars = detect_differential_vars_from_C(pc.C, pc.n)
-
-    return SciMLBase.DAEProblem(
-        residual!,
-        du0,
-        u0,
-        Float64.(tspan);
-        differential_vars = diff_vars,
-        kwargs...
-    )
-end
-
-"""
-    SciMLBase.ODEProblem(circuit::MNACircuitCompiled, tspan; kwargs...)
-
-Convert MNACircuitCompiled to SciML ODEProblem with mass matrix.
-"""
-function SciMLBase.ODEProblem(circuit::MNACircuitCompiled, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, kwargs...)
-    pc = circuit.pc
-
-    # Get initial conditions via DC solve
-    if u0 === nothing
-        dc_spec = MNASpec(temp=pc.spec.temp, mode=:dcop, time=0.0)
-        u0 = solve_dc(pc.builder, pc.params, dc_spec).x
-    end
-
-    # RHS function: C * du/dt = b(t) - G*u
-    function rhs!(du, u, p, t)
-        fast_rebuild!(pc, u, real_time(t))
-        mul!(du, pc.G, u)
-        du .*= -1
-        du .+= pc.b
-        return nothing
-    end
-
-    # Jacobian: d(rhs)/du = -G
-    function jac!(J, u, p, t)
-        fast_rebuild!(pc, u, real_time(t))
-        copyto!(J, -pc.G)
-        return nothing
-    end
-
-    # Get initial C matrix for mass matrix
-    fast_rebuild!(pc, u0, 0.0)
-
-    f = SciMLBase.ODEFunction(
-        rhs!;
-        mass_matrix = copy(pc.C),
-        jac = jac!,
-        jac_prototype = -pc.G
-    )
-
-    return SciMLBase.ODEProblem(f, u0, Float64.(tspan); kwargs...)
-end
-
-#==============================================================================#
-# DC Solve for Compiled Circuit
-#==============================================================================#
-
-"""
-    solve_dc(circuit::MNACircuitCompiled) -> DCSolution
-
-Solve DC operating point for compiled circuit.
-"""
-function solve_dc(circuit::MNACircuitCompiled)
-    pc = circuit.pc
-    dc_spec = MNASpec(temp=pc.spec.temp, mode=:dcop, time=0.0)
-    return solve_dc(pc.builder, pc.params, dc_spec)
-end
+# NOTE: SciML integration (DAEProblem, ODEProblem) for MNACircuitCompiled
+# is not needed here since MNACircuit now uses PrecompiledCircuit by default
+# in solve.jl. Users should use MNACircuit, not MNACircuitCompiled.
+#
+# The MNACircuitCompiled type is kept for explicit precompilation when needed.

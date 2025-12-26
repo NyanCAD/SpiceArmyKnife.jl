@@ -25,6 +25,7 @@ if PHASE0_MINIMAL
     # Phase 1: MNA core tests (standalone, no DAECompiler required)
     @testset "Phase 1: MNA Core" begin
         @testset "mna/core.jl" include("mna/core.jl")
+        @testset "mna/precompile.jl" include("mna/precompile.jl")
     end
 
     # Phase 5: VA integration tests (s-dual contribution stamping)

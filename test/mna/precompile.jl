@@ -10,8 +10,7 @@ using LinearAlgebra
 using CedarSim.MNA: MNAContext, get_node!, resolve_index, get_rhs
 using CedarSim.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
 using CedarSim.MNA: MNASpec, DCSolution, solve_dc, voltage, current
-using CedarSim.MNA: PrecompiledCircuit, compile_circuit, fast_residual!
-using CedarSim.MNA: MNACircuitCompiled, system_size, alter
+using CedarSim.MNA: PrecompiledCircuit, compile_circuit, fast_residual!, system_size
 import CedarSim.MNA as MNA
 
 @testset "COO to CSC Mapping" begin
@@ -138,7 +137,7 @@ end
     @test voltage(sol, :vin) ≈ 10.0 atol=1e-10
 end
 
-@testset "MNACircuitCompiled basic" begin
+@testset "PrecompiledCircuit with DC solve" begin
     function build_rc(params, spec; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
@@ -151,12 +150,13 @@ end
         return ctx
     end
 
-    circuit = MNACircuitCompiled(build_rc; V=5.0, R=1000.0, C=1e-6)
+    # Compile circuit
+    pc = compile_circuit(build_rc, (V=5.0, R=1000.0, C=1e-6), MNASpec())
 
-    @test system_size(circuit) == 3
+    @test system_size(pc) == 3
 
-    # DC solve
-    sol = solve_dc(circuit)
+    # DC solve using builder
+    sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
     @test voltage(sol, :vin) ≈ 5.0 atol=1e-10
     @test voltage(sol, :out) ≈ 5.0 atol=1e-10  # No load, so V_out = V_in
 end
@@ -222,7 +222,7 @@ end
     @test G_nnz_0 == G_nnz_1
 end
 
-@testset "alter for compiled circuit" begin
+@testset "alter with compiled circuit" begin
     function build_r(params, spec; x=Float64[])
         ctx = MNAContext()
         vin = get_node!(ctx, :vin)
@@ -233,11 +233,12 @@ end
         return ctx
     end
 
-    circuit1 = MNACircuitCompiled(build_r; V=10.0, R=1000.0)
-    circuit2 = alter(circuit1; R=500.0)
+    # Test that compiling different parameter sets works
+    pc1 = compile_circuit(build_r, (V=10.0, R=1000.0), MNASpec(mode=:dcop))
+    pc2 = compile_circuit(build_r, (V=10.0, R=500.0), MNASpec(mode=:dcop))
 
-    sol1 = solve_dc(circuit1)
-    sol2 = solve_dc(circuit2)
+    sol1 = solve_dc(pc1.builder, pc1.params, MNASpec(mode=:dcop))
+    sol2 = solve_dc(pc2.builder, pc2.params, MNASpec(mode=:dcop))
 
     # Current I = V/R
     I1 = current(sol1, :I_V1)

@@ -164,9 +164,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @testset "Diode with series resistance" begin
             # Diode with Rs for more realistic behavior
             # This tests internal nodes which require phase 6 features
-            # NOTE: VA definition commented out - internal nodes not yet supported
-            # Once internal node support is added, uncomment this:
-            #=
             va"""
             module VADDiodeRs(a, c);
                 parameter real Is = 1e-14;
@@ -180,11 +177,28 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 end
             endmodule
             """
-            =#
 
             # Forward bias test with internal node
-            # This will fail until we add internal node support
-            @test_broken false  # Placeholder: internal nodes not yet supported
+            function diode_rs_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                anode = get_node!(ctx, :anode)
+
+                stamp!(VoltageSource(0.7; name=:V1), ctx, anode, 0)
+                stamp!(VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0), ctx, anode, 0; x=x)
+
+                return ctx
+            end
+
+            # Solve with Newton iteration
+            sol = solve_dc(diode_rs_circuit, (;), MNASpec())
+
+            # With Rs=10Ω, at 0.7V forward bias:
+            # V_internal ≈ 0.6V (drops ~0.1V across Rs)
+            # I ≈ 10mA (rough estimate)
+            # The exact current depends on Newton convergence
+            actual_I = -current(sol, :I_V1)
+            @test actual_I > 0  # Current should flow
+            @test actual_I < 0.1  # Should be less than 100mA
         end
 
     end
@@ -575,8 +589,69 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
         @testset "Internal nodes" begin
             # VADistiller models like BJT have internal nodes (b_int, c_int, etc.)
-            # Current stamp! doesn't allocate internal nodes automatically
-            @test_broken false
+            # Phase 6.2: Internal node support is now implemented!
+
+            # Test 1: Simple resistor with internal node (Rs in series)
+            va"""
+            module VAInternalResistor(p, n);
+                parameter real R1 = 1000.0;
+                parameter real R2 = 1000.0;
+                inout p, n;
+                electrical p, n, mid;
+                analog begin
+                    I(p, mid) <+ V(p, mid) / R1;
+                    I(mid, n) <+ V(mid, n) / R2;
+                end
+            endmodule
+            """
+
+            # Voltage divider using internal node
+            function internal_resistor_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAInternalResistor(R1=1000.0, R2=1000.0), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol = solve_dc(internal_resistor_circuit, (;), MNASpec())
+
+            # With two 1kΩ in series across 10V:
+            # Total R = 2kΩ, I = 10V / 2kΩ = 5mA
+            @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
+            @test isapprox(voltage(sol, :vcc), 10.0; atol=1e-6)
+
+            # Test 2: Multiple internal nodes (3 resistors in series)
+            va"""
+            module VAMultiInternal(p, n);
+                parameter real R = 1000.0;
+                inout p, n;
+                electrical p, n, mid1, mid2;
+                analog begin
+                    I(p, mid1) <+ V(p, mid1) / R;
+                    I(mid1, mid2) <+ V(mid1, mid2) / R;
+                    I(mid2, n) <+ V(mid2, n) / R;
+                end
+            endmodule
+            """
+
+            function multi_internal_circuit(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vcc = get_node!(ctx, :vcc)
+
+                stamp!(VoltageSource(9.0; name=:V1), ctx, vcc, 0)
+                stamp!(VAMultiInternal(R=1000.0), ctx, vcc, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            sol2 = solve_dc(multi_internal_circuit, (;), MNASpec())
+
+            # With three 1kΩ in series across 9V:
+            # Total R = 3kΩ, I = 9V / 3kΩ = 3mA
+            @test isapprox(current(sol2, :I_V1), -0.003; atol=1e-5)
         end
 
     end
@@ -611,8 +686,10 @@ end
 # ❌ @(initial_step) - initialization event handling
 # ❌ analog function definitions (used for reusable computations)
 #
+# WORKING MNA FEATURES:
+# ✅ Internal node allocation in stamp! (Phase 6.2)
+#
 # MISSING MNA FEATURES (needed for complex models):
-# ❌ Internal node allocation in stamp!
 # ❌ Branch-based stamping (branch declaration)
 # ❌ Noise functions (not needed for DC/transient)
 #

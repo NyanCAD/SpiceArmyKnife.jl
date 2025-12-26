@@ -1071,7 +1071,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     # (works for any number of terminals, including 2)
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
-        symname, ps, port_args, params_to_locals, local_var_decls,
+        symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
         function_defs, contributions, to_julia_mna)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
@@ -1483,20 +1483,40 @@ function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionS
 end
 
 """
-Generate stamp! method for n-terminal device.
+Generate stamp! method for n-terminal device (potentially with internal nodes).
 
-For n-terminal devices, we use a vector-valued dual approach:
-1. Create duals with partials for each node voltage
-2. Evaluate the contribution expression
-3. Extract ∂I/∂V_k for each node k and stamp into G matrix
+For n-terminal devices with internal nodes, we use a vector-valued dual approach:
+1. Allocate internal nodes using alloc_internal_node! (done once per context)
+2. Create duals with partials for each node voltage (terminals + internal)
+3. Evaluate the contribution expression
+4. Extract ∂I/∂V_k for each node k and stamp into G matrix
+
+# Arguments
+- `symname`: Module/device name symbol
+- `ps`: Port/terminal symbols (e.g., [:p, :n])
+- `port_args`: Port argument symbols for the stamp method
+- `internal_nodes`: Internal node symbols declared in the module
+- `params_to_locals`: Parameter extraction expressions
+- `local_var_decls`: Local variable declarations
+- `function_defs`: VA function definitions
+- `contributions`: Branch contribution tuples
+- `to_julia`: MNAScope for code translation
 """
-function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_locals,
+function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia)
     n_ports = length(port_args)
+    n_internal = length(internal_nodes)
+    n_all_nodes = n_ports + n_internal
 
     # Create unique node parameter names (prefixed to avoid conflict with voltage vars)
+    # Terminal nodes come from function arguments
     node_params = [Symbol("_node_", p) for p in port_args]
+    # Internal node indices will be allocated at runtime
+    internal_node_params = [Symbol("_node_", n) for n in internal_nodes]
+    # All node symbols for dual creation (terminals + internal)
+    all_node_syms = [port_args; internal_nodes]
+    all_node_params = [node_params; internal_node_params]
 
     # Build the contribution evaluation body - includes local vars and expressions
     # that compute the current contributions
@@ -1557,12 +1577,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
     end
 
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
+    # Now handles both terminal nodes and internal nodes
     stamp_code = Expr(:block)
     for ((p_sym, n_sym), exprs) in branch_contribs
-        p_idx = findfirst(==(p_sym), port_args)
-        n_idx = findfirst(==(n_sym), port_args)
-        p_node = node_params[p_idx]
-        n_node = node_params[n_idx]
+        # Look up node indices in combined list (terminals + internal)
+        p_idx = findfirst(==(p_sym), all_node_syms)
+        n_idx = findfirst(==(n_sym), all_node_syms)
+        p_node = all_node_params[p_idx]
+        n_node = all_node_params[n_idx]
 
         # Sum all contributions to this branch
         sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
@@ -1584,13 +1606,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
                 I_resist = ForwardDiff.value(I_branch)   # Inner dual for resistive I
                 I_react = ForwardDiff.partials(I_branch, 1)  # Inner dual for charge q
 
-                # Extract scalar value and port partials from resistive part
+                # Extract scalar value and node partials from resistive part
                 I_val = ForwardDiff.value(I_resist)
-                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_ports]...)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
 
-                # Extract scalar value and port partials from reactive part (charge)
+                # Extract scalar value and node partials from reactive part (charge)
                 q_val = ForwardDiff.value(I_react)
-                $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_ports]...)
+                $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
             elseif I_branch isa ForwardDiff.Dual
                 # Dual{Nothing} is outer - check if value contains ContributionTag
                 _val = ForwardDiff.value(I_branch)
@@ -1613,23 +1635,23 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
                         else
                             $(Symbol("dI_dV", k)) = _part_k isa ForwardDiff.Dual ? ForwardDiff.value(_part_k) : Float64(_part_k)
                         end
-                    end for k in 1:n_ports]...)
+                    end for k in 1:n_all_nodes]...)
 
                     # Extract dq/dVk from inner_react partials
-                    $([:($(Symbol("dq_dV", k)) = inner_react isa ForwardDiff.Dual ? ForwardDiff.partials(inner_react, $k) : 0.0) for k in 1:n_ports]...)
+                    $([:($(Symbol("dq_dV", k)) = inner_react isa ForwardDiff.Dual ? ForwardDiff.partials(inner_react, $k) : 0.0) for k in 1:n_all_nodes]...)
                 else
                     # Case 1: Pure resistive (e.g., V/R)
                     I_val = _val isa ForwardDiff.Dual ? ForwardDiff.value(_val) : Float64(_val)
-                    $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_ports]...)
+                    $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
                     q_val = 0.0
-                    $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_ports]...)
+                    $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 end
             else
                 # Case 0: Scalar result (e.g., Ids=0 in cutoff)
                 I_val = I_branch isa Real ? Float64(I_branch) : 0.0
-                $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_ports]...)
+                $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 q_val = 0.0
-                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_ports]...)
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
             end
         end
 
@@ -1637,8 +1659,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         # MNA sign convention: I(p,n) flows from p to n
         # G[p,k] = +dI/dVk (current leaving p)
         # G[n,k] = -dI/dVk (current entering n)
-        for k in 1:n_ports
-            k_node = node_params[k]
+        for k in 1:n_all_nodes
+            k_node = all_node_params[k]
             push!(branch_stamp.args, quote
                 if $p_node != 0 && $k_node != 0
                     CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, $(Symbol("dI_dV", k)))
@@ -1651,8 +1673,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
 
         # Stamp reactive Jacobians (capacitances) into C matrix
         # Same sign convention as G matrix
-        for k in 1:n_ports
-            k_node = node_params[k]
+        for k in 1:n_all_nodes
+            k_node = all_node_params[k]
             push!(branch_stamp.args, quote
                 if $p_node != 0 && $k_node != 0
                     CedarSim.MNA.stamp_C!(ctx, $p_node, $k_node, $(Symbol("dq_dV", k)))
@@ -1667,7 +1689,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         # MNA sign convention: b[p] -= Ieq, b[n] += Ieq
         # (matches stamp_contribution! in contrib.jl)
         ieq_terms = Any[:I_val]
-        for k in 1:n_ports
+        for k in 1:n_all_nodes
             push!(ieq_terms, :(- $(Symbol("dI_dV", k)) * $(Symbol("V_", k))))
         end
         ieq_expr = Expr(:call, :+, ieq_terms...)
@@ -1691,10 +1713,48 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
         push!(stamp_code.args, branch_stamp)
     end
 
-    # Generate voltage variable names for RHS computation (V_1, V_2, etc.)
-    # These are Float64 values, not duals
+    # Generate internal node allocation code (runs once per stamp! call)
+    # This allocates matrix/vector entries for internal nodes
+    internal_node_alloc = Expr(:block)
+    for (i, (int_sym, int_param)) in enumerate(zip(internal_nodes, internal_node_params))
+        # Allocate internal node using alloc_internal_node!
+        # The name is unique per device instance using module name + node name
+        alloc_name = Symbol(symname, "_", int_sym)
+        push!(internal_node_alloc.args,
+            :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+    end
+
+    # Generate voltage extraction for all nodes (terminals + internal)
+    # V_1..V_n_ports are for terminal nodes
+    # V_(n_ports+1)..V_n_all_nodes are for internal nodes
+    voltage_extraction = Expr(:block)
+    # Terminal nodes (from function arguments)
+    for i in 1:n_ports
+        np = node_params[i]
+        push!(voltage_extraction.args,
+            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$np])))
+    end
+    # Internal nodes (from alloc_internal_node!)
+    for i in 1:n_internal
+        idx = n_ports + i
+        inp = internal_node_params[i]
+        push!(voltage_extraction.args,
+            :($(Symbol("V_", idx)) = isempty(x) || $inp > length(x) ? 0.0 : x[$inp]))
+    end
+
+    # Generate dual creation for all nodes (terminals + internal)
+    # Each node gets a dual with identity partials: ∂V_i/∂V_k = δ_ik
+    dual_creation = Expr(:block)
+    for i in 1:n_all_nodes
+        node_sym = all_node_syms[i]
+        # Create dual with partials: (0,...,1,...,0) where 1 is at position i
+        partials_tuple = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
+        push!(dual_creation.args,
+            :($node_sym = Dual{Nothing}($(Symbol("V_", i)), $partials_tuple...)))
+    end
 
     # Build the stamp method
+    # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
@@ -1703,15 +1763,15 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, params_to_local
             $(params_to_locals...)
             $(function_defs...)
 
-            # Get operating point voltages (Float64) - used for RHS linearization
-            $([:($(Symbol("V_", i)) = $(node_params[i]) == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$(node_params[i])]))
-               for i in 1:n_ports]...)
+            # Allocate internal nodes (idempotent - returns existing index if already allocated)
+            $internal_node_alloc
 
-            # Create duals with partials for each node voltage
+            # Get operating point voltages (Float64) - used for RHS linearization
+            $voltage_extraction
+
+            # Create duals with partials for each node voltage (terminals + internal)
             # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
-            $([:($(port_args[i]) = Dual{Nothing}($(Symbol("V_", i)),
-                    $(Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_ports]...))...))
-               for i in 1:n_ports]...)
+            $dual_creation
 
             # Evaluate contribution expressions with duals
             $contrib_eval
@@ -1738,12 +1798,12 @@ function make_mna_module(va::VANode)
     device_expr = CedarSim.make_mna_device(vamod)
 
     Expr(:toplevel, :(baremodule $s
-        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero
+        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero, length
         using Base: hasproperty, getproperty, getfield, error, !==
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename

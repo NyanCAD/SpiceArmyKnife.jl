@@ -11,7 +11,6 @@ else
 end
 
 export alter, dc!, tran!, Sweep, CircuitSweep, ProductSweep, TandemSweep, SerialSweep, sweepvars, split_axes, sweepify
-export MNACircuit  # Re-export from MNA module for convenience
 
 # This `alter()` is to make it easy to apply directly to a struct or named tuple with the optics.
 function alter(x::T, params) where {T}
@@ -386,25 +385,32 @@ Examples:
     # Or use dc!/tran! directly on the sweep:
     sols = dc!(cs)
 """
-struct CircuitSweep{T<:Function}
+struct CircuitSweep{T<:Function,C<:MNA.MNACircuit}
     builder::T       # Builder function that takes (params, spec) and returns MNAContext
-    sim::MNASim      # Base simulation for alter()
+    circuit::C       # Base circuit for alter()
     iterator::SweepLike
 
-    function CircuitSweep(builder::T, sim::MNASim, iterator::SweepLike) where {T<:Function}
+    function CircuitSweep(builder::T, circuit::C, iterator::SweepLike) where {T<:Function,C<:MNA.MNACircuit}
         if !applicable(iterate, iterator)
             throw(ArgumentError("Must give some kind of iterator!"))
         end
-        return new{T}(builder, sim, iterator)
+        return new{T,C}(builder, circuit, iterator)
     end
 end
 
-# Convenience constructor: create an MNASim from a builder function with default params
-function CircuitSweep(builder::Function, iterator::SweepLike; default_params...)
+# Convenience constructor: create an MNACircuit from a builder function with default params
+function CircuitSweep(builder::Function, iterator::SweepLike; spec=MNA.MNASpec(), default_params...)
     first_params = sweep_example(iterator)
     merged_params = merge(NamedTuple(default_params), NamedTuple(first_params))
-    sim = MNASim(builder; merged_params...)
-    return CircuitSweep(builder, sim, iterator)
+    circuit = MNA.MNACircuit(builder; spec=spec, merged_params...)
+    return CircuitSweep(builder, circuit, iterator)
+end
+
+# Legacy constructor for backwards compatibility with MNASim
+function CircuitSweep(builder::T, sim::MNA.MNASim, iterator::SweepLike) where {T<:Function}
+    # Convert MNASim to MNACircuit
+    circuit = MNA.MNACircuit(sim.builder, sim.params, sim.spec)
+    return CircuitSweep(builder, circuit, iterator)
 end
 
 Base.length(cs::CircuitSweep) = length(cs.iterator)
@@ -413,14 +419,14 @@ Base.size(cs::CircuitSweep, d::Integer) = get(size(cs), d, 1)
 Base.IteratorSize(cs::CircuitSweep) = Base.IteratorSize(cs.iterator)
 sweepvars(cs::CircuitSweep) = sweepvars(cs.iterator)
 
-# Iteration returns MNASim objects via alter()
+# Iteration returns MNACircuit objects via alter()
 function Base.iterate(cs::CircuitSweep, state...)
     next = iterate(cs.iterator, state...)
     if next === nothing
         return nothing
     end
-    new_sim = MNA.alter(cs.sim; next[1]...)
-    return (new_sim, next[2])
+    new_circuit = MNA.alter(cs.circuit; next[1]...)
+    return (new_circuit, next[2])
 end
 
 #==============================================================================#
@@ -461,7 +467,7 @@ DC operating point analysis for a circuit sweep.
 Returns a vector of `DCSolution` objects.
 """
 function dc!(cs::CircuitSweep; kwargs...)
-    return [dc!(sim; kwargs...) for sim in cs]
+    return [dc!(circuit; kwargs...) for circuit in cs]
 end
 
 #==============================================================================#
@@ -503,46 +509,56 @@ function tran!(sim::MNASim, tspan::Tuple{Real,Real};
 end
 
 """
-    tran!(circuit::MNACircuit; solver=IDA(), abstol=1e-10, reltol=1e-8, kwargs...)
+    tran!(circuit::MNACircuit, tspan; solver=IDA(), abstol=1e-10, reltol=1e-8, kwargs...)
 
-Transient analysis for MNACircuit using DAEProblem formulation.
+Transient analysis for MNACircuit.
 
-This is the recommended method for nonlinear circuits with voltage-dependent
-capacitors (MOSFETs, junction capacitors). The circuit matrices are rebuilt
-at each Newton iteration, ensuring correct handling of nonlinear devices.
+Automatically dispatches based on solver type:
+- DAE solvers (IDA, DFBDF): Uses DAEProblem with full nonlinear handling
+- ODE solvers (Rodas5P, etc.): Uses ODEProblem with mass matrix
+
+For nonlinear circuits with voltage-dependent capacitors (MOSFETs, junction
+capacitors), use a DAE solver. The circuit matrices are rebuilt at each Newton
+iteration, ensuring correct handling of nonlinear devices.
 
 # Arguments
-- `circuit`: The MNA circuit (must have valid tspan)
-- `solver`: DAE solver (default: IDA from Sundials.jl)
+- `circuit`: The MNA circuit
+- `tspan`: Time span for simulation `(t0, tf)`
+- `solver`: Solver algorithm (default: IDA from Sundials.jl)
 - `abstol`, `reltol`: Solver tolerances
 
 # Example
 ```julia
-circuit = MNACircuit(build_inverter, params, MNASpec(), (0.0, 1e-6))
-sol = tran!(circuit)
+circuit = MNACircuit(build_inverter; Vdd=1.8, W=1e-6, L=100e-9)
+sol = tran!(circuit, (0.0, 1e-6))           # Uses IDA (default)
+sol = tran!(circuit, (0.0, 1e-6); solver=Rodas5P())  # Uses ODEProblem
 sol(1e-7)  # Get state at t=0.1μs
 ```
-
-# Notes
-For linear circuits with constant capacitance, you can also use:
-```julia
-prob = ODEProblem(circuit)
-sol = solve(prob, Rodas5P())
-```
 """
-function tran!(circuit::MNA.MNACircuit; solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
-    if circuit.tspan == (0.0, 0.0)
-        throw(ArgumentError("MNACircuit must have valid tspan for transient analysis. " *
-                           "Use MNACircuit(builder, params, spec, tspan) constructor."))
-    end
-
-    prob = SciMLBase.DAEProblem(circuit)
-
+function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
+               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+    # Default to IDA (DAE solver) for robustness with nonlinear circuits
     if solver === nothing
-        # Default to IDA (Sundials) for robustness with nonlinear circuits
         solver = Sundials.IDA()
     end
 
+    # Dispatch based on solver type
+    return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, kwargs...)
+end
+
+# DAE solver dispatch (IDA, DFBDF, etc.)
+function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
+                        solver::SciMLBase.AbstractDAEAlgorithm;
+                        abstol=1e-10, reltol=1e-8, kwargs...)
+    prob = SciMLBase.DAEProblem(circuit, tspan)
+    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+end
+
+# ODE solver dispatch (Rodas5P, etc.)
+function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
+                        solver::SciMLBase.AbstractODEAlgorithm;
+                        abstol=1e-10, reltol=1e-8, kwargs...)
+    prob = SciMLBase.ODEProblem(circuit, tspan)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
 end
 
@@ -550,10 +566,15 @@ end
     tran!(cs::CircuitSweep, tspan; kwargs...)
 
 Transient analysis for a circuit sweep.
-Returns a vector of ODESolution objects.
+Returns a vector of solution objects.
+
+# Arguments
+- `cs`: The circuit sweep
+- `tspan`: Time span for simulation `(t0, tf)`
+- `solver`: Solver algorithm (default: IDA from Sundials.jl)
 """
-function tran!(cs::CircuitSweep, tspan::Tuple{Real,Real}; kwargs...)
-    return [tran!(sim, tspan; kwargs...) for sim in cs]
+function tran!(cs::CircuitSweep, tspan::Tuple{<:Real,<:Real}; kwargs...)
+    return [tran!(circuit, tspan; kwargs...) for circuit in cs]
 end
 
 # Base case; a single parameter mapped on certain values:

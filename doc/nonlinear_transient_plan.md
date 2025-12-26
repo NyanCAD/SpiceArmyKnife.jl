@@ -2,10 +2,12 @@
 
 ## Status: Phases 1-2 Complete ✓
 
-**Completed (commit ef67fc4):**
+**Completed:**
 - Phase 1: Validated DAEProblem path with VAMOSCap model
 - Phase 2: Added high-level API (`dc!`/`tran!` on `MNACircuit`)
-- `tran!(circuit::MNACircuit)` now uses DAEProblem with IDA solver
+- Unified API around MNACircuit (removed tspan from circuit, moved to tran!)
+- Automatic solver dispatch: DAE solvers use DAEProblem, ODE solvers use ODEProblem
+- `tran!(circuit, tspan)` now dispatches on solver type
 - Tested: MOSFET with capacitances maintains DC equilibrium in transient
 
 **Remaining:**
@@ -17,8 +19,10 @@
 This document describes the plan for implementing proper nonlinear transient analysis in the MNA backend. The core infrastructure (`MNACircuit` + `DAEProblem`) already exists and is now exposed via user-friendly API.
 
 Key changes:
-1. `tran!(circuit::MNACircuit)` uses DAEProblem (rebuilds matrices each Newton step)
-2. `tran!(sim::MNASim, tspan)` uses ODEProblem (static matrices, for linear circuits)
+1. `tran!(circuit, tspan)` dispatches automatically based on solver type:
+   - DAE solvers (IDA, DFBDF): Uses DAEProblem (rebuilds matrices each Newton step)
+   - ODE solvers (Rodas5P, etc.): Uses ODEProblem with mass matrix
+2. MNACircuit no longer stores tspan (system vs problem separation)
 3. Default solver is IDA (Sundials) for robustness
 
 ## Current Limitations

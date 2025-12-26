@@ -1917,9 +1917,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (Vmax=5.0, ramp_time=1e-3, R=1000.0, C=1e-6)
         τ = params.R * params.C  # 1ms
 
-        # Create ODE problem using MNACircuit (time-dependent sources handled automatically)
-        circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
-        prob = SciMLODEProblem(circuit)
+        # Create ODE problem using MNACircuit (tspan passed to Problem, not circuit)
+        circuit = MNACircuit(build_pwl_rc, params, MNASpec(temp=27.0))
+        prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 
@@ -1960,9 +1960,9 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         params = (vo=0.0, va=5.0, freq=1000.0, R=1000.0, C=1e-6)
         fc = 1.0 / (2π * params.R * params.C)  # ~159 Hz
 
-        # Create ODE problem using MNACircuit
-        circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0), (0.0, 5e-3))
-        prob = SciMLODEProblem(circuit)
+        # Create ODE problem using MNACircuit (tspan passed to Problem)
+        circuit = MNACircuit(build_sin_rc, params, MNASpec(temp=27.0))
+        prob = SciMLODEProblem(circuit, (0.0, 5e-3))
 
         sol = solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
 

@@ -22,6 +22,9 @@ function parse_and_cache_va!(cache::CedarParseCache, path::String)
     end
     abspath = isabspath(path) ? path : joinpath(dirname(pathof(cache.thismod)), "..", path)
     va = VerilogAParser.parsefile(abspath)
+    if va.ps.errored
+        cedarthrow(LoadError(abspath, 0, VAParseError(va)))
+    end
     cache_va!(cache.thismod, path, va; abspath)
     return va
 end

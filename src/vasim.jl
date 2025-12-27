@@ -2263,11 +2263,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$np])))
     end
     # Internal nodes (from alloc_internal_node!)
+    # Note: Internal nodes can be aliased to terminals (including ground) via short-circuit detection
     for i in 1:n_internal
         idx = n_ports + i
         inp = internal_node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", idx)) = isempty(x) || $inp > length(x) ? 0.0 : x[$inp]))
+            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(x) || $inp > length(x) ? 0.0 : x[$inp])))
     end
 
     # Generate dual creation for all nodes (terminals + internal)

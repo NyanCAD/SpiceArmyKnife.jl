@@ -130,6 +130,12 @@ end
 
 var"$temperature"() = CedarSim.undefault(CedarSim.spec[].temp)+273.15 # Kelvin
 
+# $port_connected(port) - returns 1 if the port is connected, 0 if floating
+# In MNA simulation, we assume all ports are connected
+export var"$port_connected", port_connected
+var"$port_connected"(port) = 1
+port_connected(port) = 1
+
 abstract type VAModel <: CedarSim.CircuitElement; end
 
 end

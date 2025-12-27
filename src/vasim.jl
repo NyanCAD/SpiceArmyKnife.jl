@@ -1056,6 +1056,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     analog_body = Expr(:block)
     contributions = Any[]
     function_defs = Any[]
+    analog_block_ast = nothing  # Store for short circuit detection
 
     for child in vm.items
         item = child.item
@@ -1072,9 +1073,17 @@ function make_mna_device(vm::VANode{VerilogModule})
             AnalogBlock => begin
                 # Collect contributions from analog block
                 mna_collect_contributions!(contributions, to_julia_mna, item.stmt)
+                analog_block_ast = item.stmt  # Store for short circuit detection
             end
             _ => nothing
         end
+    end
+
+    # Detect short circuits (V(internal, external) <+ 0) for node aliasing
+    short_circuits = if analog_block_ast !== nothing && !isempty(internal_nodes)
+        detect_short_circuits(analog_block_ast, to_julia_mna, internal_nodes)
+    else
+        Dict{Symbol, NamedTuple{(:external, :condition), Tuple{Symbol, Any}}}()
     end
 
     # Generate parameter extraction
@@ -1097,7 +1106,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     port_args = ps
     stamp_method = generate_mna_stamp_method_nterm(
         symname, ps, port_args, internal_nodes, params_to_locals, local_var_decls,
-        function_defs, contributions, to_julia_mna)
+        function_defs, contributions, to_julia_mna, short_circuits)
 
     # Build struct and constructor directly without @kwdef to avoid macro hygiene issues
     # that rename field symbols in baremodule contexts
@@ -1615,24 +1624,27 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         I_alloc_name = QuoteNode(Symbol("I_V_", p_sym, "_", n_sym))
         return quote
             # Voltage contribution V($p_sym, $n_sym) <+ $expr
-            # Allocate branch current (idempotent - returns existing index if already allocated)
-            let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_name)
-                v_contrib_raw = $expr
-                v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
+            # Skip if nodes are aliased (short circuit optimization)
+            if $p_node != $n_node
+                # Allocate branch current (idempotent - returns existing index if already allocated)
+                let I_var = CedarSim.MNA.alloc_current!(ctx, $I_alloc_name)
+                    v_contrib_raw = $expr
+                    v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
 
-                # Stamp proper MNA voltage source:
-                # - KCL at p: current I flows out → G[p, I] = 1
-                # - KCL at n: current I flows in → G[n, I] = -1
-                # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
-                if $p_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
-                    CedarSim.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
+                    # Stamp proper MNA voltage source:
+                    # - KCL at p: current I flows out → G[p, I] = 1
+                    # - KCL at n: current I flows in → G[n, I] = -1
+                    # - Voltage constraint: V_p - V_n = v_val → G[I, p] = 1, G[I, n] = -1, b[I] = v_val
+                    if $p_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $p_node, I_var, 1.0)
+                        CedarSim.MNA.stamp_G!(ctx, I_var, $p_node, 1.0)
+                    end
+                    if $n_node != 0
+                        CedarSim.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
+                        CedarSim.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
+                    end
+                    CedarSim.MNA.stamp_b!(ctx, I_var, v_val)
                 end
-                if $n_node != 0
-                    CedarSim.MNA.stamp_G!(ctx, $n_node, I_var, -1.0)
-                    CedarSim.MNA.stamp_G!(ctx, I_var, $n_node, -1.0)
-                end
-                CedarSim.MNA.stamp_b!(ctx, I_var, v_val)
             end
         end
     end
@@ -1797,6 +1809,113 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
 end
 
 """
+Detect short circuit patterns from VA conditionals.
+
+Scans the VA AST for patterns like:
+    if (rs==0) V(a_int, a) <+ 0;
+
+Returns a Dict mapping internal_node => (external_node, condition_expr) for each short circuit.
+These can be used for node aliasing to reduce system size.
+"""
+function detect_short_circuits(analog_block, to_julia::MNAScope, internal_nodes::Vector{Symbol})
+    internal_set = Set(internal_nodes)
+    short_circuits = Dict{Symbol, NamedTuple{(:external, :condition), Tuple{Symbol, Any}}}()
+
+    # Helper to check if expression is constant zero
+    function is_zero_expr(expr)
+        # Handle different node types
+        try
+            form = formof(expr)
+            if form == Literal
+                # Try to get the value - it might be in .v or we might need to parse String(expr)
+                if hasproperty(expr, :v)
+                    return expr.v == 0
+                else
+                    # Fallback: try to parse the string representation
+                    return String(expr) == "0"
+                end
+            elseif form == FloatLiteral
+                return parse(Float64, String(expr)) == 0.0
+            end
+        catch
+            # Not a recognized form, continue checking
+        end
+        # Check if it's wrapped in something
+        if hasproperty(expr, :item)
+            return is_zero_expr(expr.item)
+        end
+        return false
+    end
+
+    # Scan a conditional block for V(internal, external) <+ 0 patterns
+    function scan_conditional(aif_stmt, condition_expr)
+        # Recursively scan statements for contribution statements
+        function scan_stmts(stmts_or_stmt)
+            stmts = if formof(stmts_or_stmt) == AnalogSeqBlock
+                stmts_or_stmt.stmts
+            else
+                [stmts_or_stmt]
+            end
+
+            for stmt in stmts
+                unwrapped = formof(stmt) == AnalogStatement ? stmt.stmt : stmt
+                form = formof(unwrapped)
+
+                if form == ContributionStatement
+                    cs = unwrapped
+                    bpfc = cs.lvalue
+                    kind_sym = Symbol(bpfc.id)
+
+                    if kind_sym == :V && is_zero_expr(cs.assign_expr)
+                        refs = map(x -> Symbol(assemble_id_string(x.item)), bpfc.references)
+                        if length(refs) == 2
+                            p, n = refs[1], refs[2]
+                            # Check if one is internal and one is external (port)
+                            if p in internal_set && !(n in internal_set)
+                                short_circuits[p] = (external=n, condition=condition_expr)
+                            elseif n in internal_set && !(p in internal_set)
+                                short_circuits[n] = (external=p, condition=condition_expr)
+                            end
+                        end
+                    end
+                elseif form == AnalogSeqBlock
+                    # Recurse into nested sequence blocks
+                    scan_stmts(unwrapped)
+                end
+            end
+        end
+
+        scan_stmts(aif_stmt.stmt)
+    end
+
+    # Walk the analog block looking for conditionals
+    function walk(stmt)
+        form = formof(stmt)
+        if form == AnalogSeqBlock
+            for s in stmt.stmts
+                walk(s)
+            end
+        elseif form == AnalogStatement
+            walk(stmt.stmt)
+        elseif form == AnalogConditionalBlock
+            # Scan the if-branch for short circuits
+            aif = stmt.aif
+            condition_expr = to_julia(aif.condition)
+            scan_conditional(aif, condition_expr)
+            # Also check else-if branches
+            for case in stmt.elsecases
+                if formof(case.stmt) == AnalogIf
+                    walk(case.stmt)
+                end
+            end
+        end
+    end
+
+    walk(analog_block)
+    return short_circuits
+end
+
+"""
 Translate a contribution statement for MNA.
 """
 function mna_translate_contribution(to_julia::MNAScope, cs::VANode{ContributionStatement})
@@ -1839,6 +1958,7 @@ Generate stamp! method for n-terminal device (potentially with internal nodes).
 
 For n-terminal devices with internal nodes, we use a vector-valued dual approach:
 1. Allocate internal nodes using alloc_internal_node! (done once per context)
+   - If a short circuit is detected (V(internal, external) <+ 0), alias instead
 2. Create duals with partials for each node voltage (terminals + internal)
 3. Evaluate the contribution expression
 4. Extract ∂I/∂V_k for each node k and stamp into G matrix
@@ -1853,10 +1973,11 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `function_defs`: VA function definitions
 - `contributions`: Branch contribution tuples
 - `to_julia`: MNAScope for code translation
+- `short_circuits`: Dict mapping internal_node => (external, condition) for node aliasing
 """
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
-                                          to_julia)
+                                          to_julia, short_circuits=Dict{Symbol, NamedTuple}())
     n_ports = length(port_args)
     n_internal = length(internal_nodes)
     n_all_nodes = n_ports + n_internal
@@ -2127,13 +2248,38 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     # Generate internal node allocation code (runs once per stamp! call)
     # This allocates matrix/vector entries for internal nodes
+    # If a short circuit is detected, alias to external node instead of allocating
     internal_node_alloc = Expr(:block)
     for (i, (int_sym, int_param)) in enumerate(zip(internal_nodes, internal_node_params))
-        # Allocate internal node using alloc_internal_node!
-        # The name is unique per device instance using module name + node name
         alloc_name = Symbol(symname, "_", int_sym)
-        push!(internal_node_alloc.args,
-            :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+
+        if haskey(short_circuits, int_sym)
+            # This internal node can be aliased to an external node when condition is true
+            sc = short_circuits[int_sym]
+            ext_sym = sc.external
+            condition = sc.condition
+
+            # Find the external node's parameter symbol
+            ext_idx = findfirst(==(ext_sym), port_args)
+            if ext_idx !== nothing
+                ext_param = node_params[ext_idx]
+                # Conditional allocation: alias if short circuit, else allocate
+                push!(internal_node_alloc.args,
+                    :($int_param = if !(iszero($condition))
+                        $ext_param  # Alias to external node
+                    else
+                        CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))
+                    end))
+            else
+                # External node not found in ports, fall back to regular allocation
+                push!(internal_node_alloc.args,
+                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+            end
+        else
+            # Regular allocation (no short circuit detected)
+            push!(internal_node_alloc.args,
+                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $(QuoteNode(alloc_name)))))
+        end
     end
 
     # Generate voltage extraction for all nodes (terminals + internal)
@@ -2264,29 +2410,33 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # - KCL at p: current I flows out of p → G[p, I] = 1
         # - KCL at n: current I flows into n → G[n, I] = -1
         # - Voltage constraint: V_p - V_n = expr → G[I, p] = 1, G[I, n] = -1, b[I] = expr
+        # Skip if nodes are aliased (short circuit optimization)
         v_stamp = quote
-            # Evaluate voltage contribution
-            V_contrib = $sum_expr
+            # Skip if nodes are aliased (p and n point to same index)
+            if $p_node != $n_node
+                # Evaluate voltage contribution
+                V_contrib = $sum_expr
 
-            # Extract scalar value from dual if needed
-            V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
+                # Extract scalar value from dual if needed
+                V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
 
-            # Stamp KCL: current I flows from p to n
-            if $p_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
-            end
-            if $n_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
-            end
+                # Stamp KCL: current I flows from p to n
+                if $p_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $p_node, $I_var, 1.0)
+                end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $n_node, $I_var, -1.0)
+                end
 
-            # Voltage constraint: V_p - V_n = V_val
-            if $p_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+                # Voltage constraint: V_p - V_n = V_val
+                if $p_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
+                end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
+                end
+                CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
             end
-            if $n_node != 0
-                CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
-            end
-            CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
         end
 
         push!(twonode_voltage_stamp_code.args, v_stamp)

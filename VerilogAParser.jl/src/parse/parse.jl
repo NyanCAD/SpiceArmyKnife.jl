@@ -641,14 +641,8 @@ function parse_analog_assignment(ps)
     lvalue = parse_lvalue(ps)
     if isa(lvalue, EXPR{FunctionCall})
         if kind(nt(ps)) == SEMICOLON
-            # This is probaly a procedural assignment with a missing LHS.
-            # Parse it as such.
-            # TODO: We'd kinda like to steam the whitespace from the first token here and put it on the
-            # error, but that's a bit complicated and requires rebuilding the tree.
-            err = EXPR(UInt32(0), UInt32(0), UInt32(0), Error(MissingAssignment, nothing, nothing))
-            return EXPR(AnalogProceduralAssignment(
-                EXPR(AnalogVariableAssignment(err, EXPRList{ArraySpec}(), err, lvalue)),
-                accept(ps, SEMICOLON)))
+            # Function call statement - valid Verilog-A for functions with inout/output parameters
+            return EXPR(FunctionCallStatement(lvalue, accept(ps, SEMICOLON)))
         end
         lvalue = fc_to_bpfc(lvalue)
         cassign = accept(ps, CASSIGN)
@@ -664,7 +658,24 @@ function parse_analog_assignment(ps)
 end
 
 function parse_analog_function_assignment(ps)
-    return parse_analog_procedural_assignment(ps)
+    # Check for function call statement (like in parse_analog_assignment)
+    lvalue = parse_lvalue(ps)
+    if lvalue === nothing
+        # Normal case: not a function call, parse as procedural assignment
+        return parse_analog_procedural_assignment(ps)
+    elseif isa(lvalue, EXPR{FunctionCall})
+        if kind(nt(ps)) == SEMICOLON
+            # Function call statement - valid for functions with inout/output parameters
+            return EXPR(FunctionCallStatement(lvalue, accept(ps, SEMICOLON)))
+        end
+        # Function call not followed by semicolon - error case
+        # Fall through to create error node
+    end
+    # Got an expression that's not a valid statement - create error
+    err = EXPR(UInt32(0), UInt32(0), UInt32(0), Error(MissingAssignment, nothing, nothing))
+    return EXPR(AnalogProceduralAssignment(
+        EXPR(AnalogVariableAssignment(err, EXPRList{ArraySpec}(), err, lvalue)),
+        accept(ps, SEMICOLON)))
 end
 
 function parse_analog_loop_statement(parse_statement, ps)

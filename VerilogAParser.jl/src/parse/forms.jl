@@ -179,6 +179,13 @@ struct FunctionCall
 end
 allchildren(fc::FunctionCall) = (fc.id, fc.attrs, fc.lparen, fc.args..., fc.rparen)
 
+# Function call as a statement (for functions with inout/output parameters called for side effects)
+struct FunctionCallStatement
+    call::EXPR{FunctionCall}
+    semi::EXPRErr{Notation}
+end
+allchildren(fcs::FunctionCallStatement) = (fcs.call, fcs.semi)
+
 struct ContributionStatement
     lvalue::EXPR
     cassign::EXPRErr{Notation}

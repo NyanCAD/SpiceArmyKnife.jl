@@ -11,7 +11,7 @@ using VerilogAParser.VerilogACSTParser:
     AnalogConditionalBlock, AnalogVariableAssignment, AnalogProceduralAssignment,
     Parens, AnalogIf, AnalogFor, AnalogWhile, AnalogRepeat, UnaryOp, Function,
     AnalogSystemTaskEnable, StringLiteral,
-    CaseStatement, FunctionCall, TernaryExpr,
+    CaseStatement, FunctionCall, FunctionCallStatement, TernaryExpr,
     FloatLiteral, ChunkTree, virtrange,
     filerange, LineNumbers, compute_line,
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
@@ -468,6 +468,9 @@ end
 
 function (to_julia::Scope)(stmt::VANode{AnalogProceduralAssignment})
     return to_julia(stmt.assign)
+end
+function (to_julia::Scope)(stmt::VANode{FunctionCallStatement})
+    return to_julia(stmt.call)
 end
 function (to_julia::Scope)(stmt::VANode{AnalogVariableAssignment})
     assignee = Symbol(stmt.lvalue)
@@ -1477,6 +1480,9 @@ end
 
 function (to_julia::MNAScope)(stmt::VANode{AnalogProceduralAssignment})
     return to_julia(stmt.assign)
+end
+function (to_julia::MNAScope)(stmt::VANode{FunctionCallStatement})
+    return to_julia(stmt.call)
 end
 
 function (to_julia::MNAScope)(asb::VANode{AnalogSeqBlock})

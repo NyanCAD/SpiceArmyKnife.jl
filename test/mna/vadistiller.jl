@@ -1190,6 +1190,75 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
         end
 
+        @testset "VADistiller sp_mos1" begin
+            # MOS1 model: 4-terminal (d, g, s, b)
+            mos1_va = read(joinpath(vadistiller_path, "mos1.va"), String)
+            va = VerilogAParser.parse(IOBuffer(mos1_va))
+            @test !va.ps.errored  # Parsing should succeed (FunctionCallStatement fix)
+
+            # Test that MNA module generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                # Simple NMOS common-source circuit
+                function sp_mos1_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    # Power supply
+                    stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
+                    # Gate bias (above threshold)
+                    stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
+                    # Drain load resistor
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    # NMOS with proper dimensions (source and bulk grounded)
+                    # l and w must be set for proper operation
+                    stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_mos1_circuit, (;), MNASpec())
+                true
+            end
+        end
+
+        @testset "VADistiller sp_jfet2" begin
+            # JFET2 model: 3-terminal (d, g, s)
+            jfet2_va = read(joinpath(vadistiller_path, "jfet2.va"), String)
+            va = VerilogAParser.parse(IOBuffer(jfet2_va))
+            @test !va.ps.errored  # Parsing should succeed (FunctionCallStatement fix)
+
+            # Test that MNA module generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+
+                # Simple common-source circuit
+                function sp_jfet2_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    # Power supply
+                    stamp!(VoltageSource(10.0; name=:V1), ctx, vdd, 0)
+                    # Gate bias (0V for N-channel JFET)
+                    stamp!(VoltageSource(0.0; name=:Vg), ctx, gate, 0)
+                    # Drain load
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    # N-channel JFET (source grounded)
+                    stamp!(sp_jfet2(; vto=-2.0, beta=1e-3), ctx, drain, gate, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_jfet2_circuit, (;), MNASpec())
+                true
+            end
+        end
+
     end
 
 end
@@ -1244,20 +1313,17 @@ end
 # ✅ bjt.va: Parses and simulates correctly (4-terminal NPN/PNP)
 # ✅ jfet1.va: Parses and simulates correctly (3-terminal JFET)
 # ✅ mes1.va: Parses and simulates correctly (3-terminal GaAs MESFET)
+# ✅ mos1.va: Parses and simulates correctly (4-terminal NMOS/PMOS level 1)
+# ✅ jfet2.va: Parses and simulates correctly (3-terminal JFET with capacitances)
+#
+# PARSING OK, SIMULATION NEEDS TESTING:
+# ⚠️ mos2.va, mos3.va, mos6.va, mos9.va: Parse correctly, need circuit tests
 #
 # WORKING CORE FEATURES (verified with simplified test models):
 # ✅ Single-node contributions (I(a) <+ expr) - stamps at node and ground correctly
 # ✅ Internal node allocation for VA modules
 # ✅ User-defined function output parameter handling (inout params return tuples)
-#
-# MODELS WITH PARSER ISSUES (VAS14: function call without assignment):
-# ❌ mos1.va: Uses DEVqmeyer() without assignment (function with inout params)
-# ❌ mos2.va: Same issue
-# ❌ mos3.va: Same issue
-# ❌ mos6.va: Same issue
-# ❌ mos9.va: Same issue
-# ❌ jfet2.va: Uses qgg() without assignment (function with inout params)
-# These require VerilogAParser fix to support calling analog functions for side effects
+# ✅ FunctionCallStatement: calling functions for side effects (DEVqmeyer, qgg, etc.)
 #
 # COMPLEX MODELS (need additional features):
 # ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features

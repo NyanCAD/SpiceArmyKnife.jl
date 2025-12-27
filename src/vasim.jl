@@ -312,11 +312,16 @@ function (to_julia::Scope)(stmt::VANode{AnalogConditionalBlock})
         end
     end
 
-    ifex = ex = Expr(:if, to_julia(aif.condition), if_body_to_julia(aif.stmt))
+    # Convert VA condition to boolean - in VA, integers are truthy (non-zero = true)
+    function va_condition_to_bool(cond_expr)
+        :(!(iszero($(to_julia(cond_expr)))))
+    end
+
+    ifex = ex = Expr(:if, va_condition_to_bool(aif.condition), if_body_to_julia(aif.stmt))
     for case in stmt.elsecases
         if formof(case.stmt) == AnalogIf
             elif = case.stmt
-            newex = Expr(:elseif, to_julia(elif.condition), if_body_to_julia(elif.stmt))
+            newex = Expr(:elseif, va_condition_to_bool(elif.condition), if_body_to_julia(elif.stmt))
             push!(ex.args, newex)
             ex = newex
         else
@@ -329,13 +334,17 @@ end
 function (to_julia::Scope)(stmt::VANode{AnalogFor})
     body = to_julia(stmt.stmt)
     push!(body.args, to_julia(stmt.update_stmt))
-    while_expr = Expr(:while, to_julia(stmt.cond_expr), body)
+    # Convert condition to bool (VA integers are truthy)
+    cond_bool = :(!(iszero($(to_julia(stmt.cond_expr)))))
+    while_expr = Expr(:while, cond_bool, body)
     Expr(:block, to_julia(stmt.init_stmt), while_expr)
 end
 
 function (to_julia::Scope)(stmt::VANode{AnalogWhile})
     body = to_julia(stmt.stmt)
-    Expr(:while, to_julia(stmt.cond_expr), body)
+    # Convert condition to bool (VA integers are truthy)
+    cond_bool = :(!(iszero($(to_julia(stmt.cond_expr)))))
+    Expr(:while, cond_bool, body)
 end
 
 function (to_julia::Scope)(stmt::VANode{AnalogRepeat})
@@ -512,7 +521,9 @@ function (to_julia::Scope)(stmt::VANode{Parens})
 end
 
 function (to_julia::Scope)(cs::VANode{TernaryExpr})
-    return Expr(:if, to_julia(cs.condition), to_julia(cs.ifcase), to_julia(cs.elsecase))
+    # Convert condition to bool (VA integers are truthy)
+    cond_bool = :(!(iszero($(to_julia(cs.condition)))))
+    return Expr(:if, cond_bool, to_julia(cs.ifcase), to_julia(cs.elsecase))
 end
 
 
@@ -1255,7 +1266,9 @@ function (to_julia::MNAScope)(stmt::VANode{Parens})
 end
 
 function (to_julia::MNAScope)(cs::VANode{TernaryExpr})
-    return Expr(:if, to_julia(cs.condition), to_julia(cs.ifcase), to_julia(cs.elsecase))
+    # Convert condition to bool (VA integers are truthy)
+    cond_bool = :(!(iszero($(to_julia(cs.condition)))))
+    return Expr(:if, cond_bool, to_julia(cs.ifcase), to_julia(cs.elsecase))
 end
 
 function (to_julia::MNAScope)(stmt::VANode{FunctionCall})

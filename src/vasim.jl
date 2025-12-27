@@ -1637,31 +1637,26 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
     # p_node and n_node already set above (handles ground node correctly)
 
     # For contributions inside conditionals, we evaluate and stamp inline
+    # Tag ordering (ContributionTag ≺ Nothing) ensures ContributionTag is always outer
     return quote
         # Contribution I($p_sym, $n_sym) <+ ...
         let I_branch = $expr
-            # Extract value and partials from the dual
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                # Pure reactive
+                # Has ddt: extract from ContributionTag wrapper
                 I_val = ForwardDiff.value(ForwardDiff.value(I_branch))
                 q_val = ForwardDiff.value(ForwardDiff.partials(I_branch, 1))
             elseif I_branch isa ForwardDiff.Dual
-                _val = ForwardDiff.value(I_branch)
-                if _val isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                    I_val = ForwardDiff.value(ForwardDiff.value(_val))
-                    q_val = ForwardDiff.value(ForwardDiff.partials(_val, 1))
-                else
-                    I_val = _val isa ForwardDiff.Dual ? ForwardDiff.value(_val) : Float64(_val)
-                    q_val = 0.0
-                end
+                # Pure resistive: just voltage dual
+                I_val = ForwardDiff.value(I_branch)
+                q_val = 0.0
             else
-                I_val = I_branch isa Real ? Float64(I_branch) : 0.0
+                # Scalar result
+                I_val = Float64(I_branch)
                 q_val = 0.0
             end
 
-            # For now, stamp simplified Jacobian based on known nodes
-            # This is approximate - proper handling requires full partials extraction
-            # like in generate_mna_stamp_method_nterm
+            # Stamp RHS (simplified - no Jacobian for conditional contributions)
+            # Full Jacobian stamping is in generate_mna_stamp_method_nterm
             if $p_node != 0
                 CedarSim.MNA.stamp_b!(ctx, $p_node, -I_val)
             end
@@ -1972,65 +1967,40 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         sum_expr = length(exprs) == 1 ? exprs[1] : Expr(:call, :+, exprs...)
 
         # Generate unrolled stamping code
-        # The result can be:
-        # 1. Dual{Nothing, Float64, N} - pure resistive (no ddt)
-        # 2. Dual{ContributionTag, Dual{Nothing}, 1} - pure reactive (only ddt terms)
-        # 3. Dual{Nothing, Dual{ContributionTag}, N} - mixed resistive+reactive
-        #    (when adding Dual{Nothing} + Dual{ContributionTag}, Nothing becomes outer)
+        # Result structure depends on whether va_ddt() was called:
+        #
+        # 1. Pure resistive (no ddt): Dual{Nothing}(I, dI/dV₁, ..., dI/dVₙ)
+        # 2. Has ddt (pure or mixed): Dual{ContributionTag}(resist_dual, react_dual)
+        #    where resist_dual = Dual{Nothing}(I, dI/dV...) and react_dual = Dual{Nothing}(q, dq/dV...)
+        # 3. Scalar: constant value (e.g., Ids=0 in cutoff)
+        #
+        # Tag ordering (ContributionTag ≺ Nothing) guarantees ContributionTag is always
+        # the outer wrapper when present. No need to check for reversed nesting.
         branch_stamp = quote
             # Evaluate the branch current
             I_branch = $sum_expr
 
-            # Handle nested dual structure for mixed resistive/reactive contributions
-            # See mna_ad_stamping.md and evaluate_contribution in contrib.jl
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                # Case 2: ContributionTag is outer - pure reactive (e.g., C*ddt(V))
-                I_resist = ForwardDiff.value(I_branch)   # Inner dual for resistive I
-                I_react = ForwardDiff.partials(I_branch, 1)  # Inner dual for charge q
+                # Has ddt: ContributionTag wraps voltage duals
+                I_resist = ForwardDiff.value(I_branch)       # Dual{Nothing} for I and ∂I/∂V
+                I_react = ForwardDiff.partials(I_branch, 1)  # Dual{Nothing} for q and ∂q/∂V
 
-                # Extract scalar value and node partials from resistive part
                 I_val = ForwardDiff.value(I_resist)
                 $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
 
-                # Extract scalar value and node partials from reactive part (charge)
                 q_val = ForwardDiff.value(I_react)
                 $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
+
             elseif I_branch isa ForwardDiff.Dual
-                # Dual{Nothing} is outer - check if value contains ContributionTag
-                _val = ForwardDiff.value(I_branch)
-                if _val isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                    # Case 3: Mixed resistive+reactive (e.g., V/R + C*ddt(V))
-                    # value(I_branch) = Dual{ContributionTag}(inner_I, inner_q)
-                    # partials(I_branch, k) = Dual{ContributionTag}(dI/dVk, dq/dVk)
-                    inner_resist = ForwardDiff.value(_val)
-                    inner_react = ForwardDiff.partials(_val, 1)
+                # Pure resistive: just voltage dual, no ContributionTag
+                I_val = ForwardDiff.value(I_branch)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
+                q_val = 0.0
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
 
-                    # Extract I value and q value from innermost level
-                    I_val = inner_resist isa ForwardDiff.Dual ? ForwardDiff.value(inner_resist) : Float64(inner_resist)
-                    q_val = inner_react isa ForwardDiff.Dual ? ForwardDiff.value(inner_react) : Float64(inner_react)
-
-                    # Extract dI/dVk from partials - each partial is Dual{ContributionTag}
-                    $([quote
-                        _part_k = ForwardDiff.partials(I_branch, $k)
-                        if _part_k isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                            $(Symbol("dI_dV", k)) = ForwardDiff.value(ForwardDiff.value(_part_k))
-                        else
-                            $(Symbol("dI_dV", k)) = _part_k isa ForwardDiff.Dual ? ForwardDiff.value(_part_k) : Float64(_part_k)
-                        end
-                    end for k in 1:n_all_nodes]...)
-
-                    # Extract dq/dVk from inner_react partials
-                    $([:($(Symbol("dq_dV", k)) = inner_react isa ForwardDiff.Dual ? ForwardDiff.partials(inner_react, $k) : 0.0) for k in 1:n_all_nodes]...)
-                else
-                    # Case 1: Pure resistive (e.g., V/R)
-                    I_val = _val isa ForwardDiff.Dual ? ForwardDiff.value(_val) : Float64(_val)
-                    $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
-                    q_val = 0.0
-                    $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
-                end
             else
-                # Case 0: Scalar result (e.g., Ids=0 in cutoff)
-                I_val = I_branch isa Real ? Float64(I_branch) : 0.0
+                # Scalar result (constant contribution)
+                I_val = Float64(I_branch)
                 $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)

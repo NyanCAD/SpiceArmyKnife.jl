@@ -33,11 +33,11 @@ so it becomes the outermost dual when nested with voltage duals.
 """
 struct ContributionTag end
 
-# Define tag ordering: ContributionTag < all other tags
-# This ensures that when mixing ContributionTag duals with voltage duals,
-# the ContributionTag becomes the outer wrapper
-ForwardDiff.:≺(::Type{ContributionTag}, ::Type) = true
-ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = false
+# Define tag ordering: ContributionTag has HIGHER precedence than all other tags
+# In ForwardDiff, A ≺ B means A is "inner" (lower precedence), B is "outer" (higher)
+# We want ContributionTag to be outer, so other tags must be ≺ ContributionTag
+ForwardDiff.:≺(::Type{ContributionTag}, ::Type) = false  # ContributionTag is NOT less than any tag
+ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = true   # All other tags ARE less than ContributionTag
 ForwardDiff.:≺(::Type{ContributionTag}, ::Type{ContributionTag}) = false
 
 """
@@ -180,16 +180,9 @@ result = evaluate_contribution(contrib, 1.0, 0.0)
 # result.dq_dVp ≈ C
 ```
 """
-# Helper to extract scalar value from possibly nested duals
-_extract_scalar(x::Real) = Float64(x)
-function _extract_scalar(x::Dual)
-    v = value(x)
-    return v isa Dual ? _extract_scalar(v) : Float64(v)
-end
-
 function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
-    # Create duals for voltage differentiation
-    # We use a different tag to distinguish from ContributionTag
+    # Create voltage duals for Jacobian computation
+    # Tag Nothing is used; ContributionTag ≺ Nothing ensures ContributionTag is always outer
     Vp_dual = Dual{Nothing}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
     Vn_dual = Dual{Nothing}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
 
@@ -198,76 +191,40 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
 
     result = contrib_fn(Vpn_dual)
 
-    # The result can have different structures depending on whether the contribution
-    # contains only reactive parts, only resistive parts, or both:
+    # Result structure depends on whether va_ddt() was called:
     #
-    # 1. Pure resistive (V/R): Dual{Nothing}(I, dI/dVp, dI/dVn)
-    # 2. Pure reactive (C*ddt(V)): Dual{ContributionTag}(Dual{Nothing}(0,...), Dual{Nothing}(q,...))
-    # 3. Mixed (V/R + C*ddt(V)): Dual{Nothing}(Dual{ContributionTag}(...), ...)
+    # 1. Pure resistive (no ddt): Dual{Nothing}(I, dI/dVp, dI/dVn)
+    # 2. Has ddt (pure or mixed): Dual{ContributionTag}(resist_dual, react_dual)
+    #    where resist_dual = Dual{Nothing}(I, dI/dVp, dI/dVn)
+    #    and   react_dual  = Dual{Nothing}(q, dq/dVp, dq/dVn)
     #
-    # We need to handle all three cases.
+    # Tag ordering (ContributionTag ≺ Nothing) guarantees ContributionTag is always
+    # the outer wrapper when present. No need to check for reversed nesting.
 
-    if result isa Dual{ContributionTag}
-        # Cases 2: ContributionTag is outer (pure reactive)
-        # value(result) = Dual{Nothing}(I, dI/dVp, dI/dVn) where I=0 for capacitor
-        # partials(result,1) = Dual{Nothing}(q, dq/dVp, dq/dVn)
-        resist_dual = value(result)    # Dual{Nothing} for I and derivatives
-        react_dual = partials(result, 1)  # Dual{Nothing} for q and derivatives
+    if result isa ForwardDiff.Dual{ContributionTag}
+        # Has ddt: ContributionTag wraps voltage duals
+        resist_dual = value(result)       # Dual{Nothing} for I and ∂I/∂V
+        react_dual = partials(result, 1)  # Dual{Nothing} for q and ∂q/∂V
 
-        I = _extract_scalar(value(resist_dual))
-        dI_dVp = _extract_scalar(partials(resist_dual, 1))
-        dI_dVn = _extract_scalar(partials(resist_dual, 2))
+        I = Float64(value(resist_dual))
+        dI_dVp = Float64(partials(resist_dual, 1))
+        dI_dVn = Float64(partials(resist_dual, 2))
 
-        q = _extract_scalar(value(react_dual))
-        dq_dVp = _extract_scalar(partials(react_dual, 1))
-        dq_dVn = _extract_scalar(partials(react_dual, 2))
+        q = Float64(value(react_dual))
+        dq_dVp = Float64(partials(react_dual, 1))
+        dq_dVn = Float64(partials(react_dual, 2))
 
-    elseif result isa Dual  # Dual{Nothing} is outer
-        val = value(result)
-        dVp_part = partials(result, 1)
-        dVn_part = partials(result, 2)
+    elseif result isa ForwardDiff.Dual
+        # Pure resistive: just voltage dual, no ContributionTag
+        I = Float64(value(result))
+        dI_dVp = Float64(partials(result, 1))
+        dI_dVn = Float64(partials(result, 2))
+        q = 0.0
+        dq_dVp = 0.0
+        dq_dVn = 0.0
 
-        if val isa Dual{ContributionTag}
-            # Case 3: Mixed - voltage dual outside, ContributionTag inside
-            # value(result) = Dual{ContributionTag}(Dual{Nothing}(I,...), Dual{Nothing}(q,...))
-            inner_resist = value(val)  # Could be nested dual
-            inner_react = partials(val, 1)
-
-            I = _extract_scalar(inner_resist)
-            q = _extract_scalar(inner_react)
-
-            # Get dI/dV from the Jacobian parts
-            if dVp_part isa Dual{ContributionTag}
-                dI_dVp = _extract_scalar(value(dVp_part))
-            else
-                dI_dVp = _extract_scalar(dVp_part)
-            end
-
-            if dVn_part isa Dual{ContributionTag}
-                dI_dVn = _extract_scalar(value(dVn_part))
-            else
-                dI_dVn = _extract_scalar(dVn_part)
-            end
-
-            # Get dq/dV from inner_react partials
-            if inner_react isa Dual
-                dq_dVp = _extract_scalar(partials(inner_react, 1))
-                dq_dVn = _extract_scalar(partials(inner_react, 2))
-            else
-                dq_dVp = 0.0
-                dq_dVn = 0.0
-            end
-        else
-            # Case 1: Pure resistive
-            I = _extract_scalar(val)
-            dI_dVp = _extract_scalar(dVp_part)
-            dI_dVn = _extract_scalar(dVn_part)
-            q = 0.0
-            dq_dVp = 0.0
-            dq_dVn = 0.0
-        end
     else
-        # Scalar result (shouldn't happen with duals, but handle it)
+        # Scalar result (constant contribution)
         I = Float64(result)
         dI_dVp = 0.0
         dI_dVn = 0.0
@@ -420,7 +377,7 @@ result = evaluate_charge_contribution(q_fn, 0.3, 0.0)
 ```
 """
 function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
-    # Create duals for voltage differentiation
+    # Create voltage duals for Jacobian computation
     Vp_dual = Dual{Nothing}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
     Vn_dual = Dual{Nothing}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
 
@@ -429,10 +386,10 @@ function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
 
     result = q_fn(Vpn_dual)
 
-    # Extract values
-    q = _extract_scalar(value(result))
-    dq_dVp = _extract_scalar(partials(result, 1))
-    dq_dVn = _extract_scalar(partials(result, 2))
+    # Result should be Dual{Nothing}(q, dq/dVp, dq/dVn) - no ContributionTag
+    q = Float64(value(result))
+    dq_dVp = Float64(partials(result, 1))
+    dq_dVn = Float64(partials(result, 2))
 
     # Effective capacitance for branch:
     # For q(Vpn) where Vpn = Vp - Vn, via chain rule:
@@ -580,17 +537,17 @@ function stamp_multiport_charge!(
     q_duals = q_fn(V_duals...)
 
     # Extract values and stamp
+    # Result qi should be Dual{Nothing}(qi, ∂qi/∂V1, ..., ∂qi/∂VN) - no ContributionTag
     for i in 1:N
         qi = q_duals[i]
         node_i = nodes[i]
 
         if node_i != 0
-            qi_val = _extract_scalar(value(qi))
             for j in 1:N
                 node_j = nodes[j]
                 if node_j != 0
                     # ∂qi/∂Vj
-                    dqi_dVj = _extract_scalar(partials(qi, j))
+                    dqi_dVj = Float64(partials(qi, j))
                     stamp_C!(ctx, node_i, node_j, dqi_dVj)
                 end
             end

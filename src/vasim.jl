@@ -22,12 +22,6 @@ using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
 
-# DAECompiler primitive stubs (legacy Scope code paths - MNA uses different approach)
-ddt(x) = error("ddt() requires DAECompiler - use MNA.va_ddt() for time derivatives")
-variable(args...) = error("variable() requires DAECompiler")
-equation!(args...) = error("equation!() requires DAECompiler")
-observed!(args...) = nothing  # No-op for legacy code
-
 const VAT = VerilogAParser.VerilogATokenize
 
 const VANode = VerilogAParser.VerilogACSTParser.Node

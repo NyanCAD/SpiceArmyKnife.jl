@@ -70,7 +70,7 @@ end
 end
 
 @testset "spectre parsing" begin
-    # Additional parsing tests for Phase 0
+    # Test parsing and MNA codegen
     spectre_code = """
     c1 (Y 0) capacitor c=100f
     r2 (Y VDD) resistor R=10k
@@ -80,7 +80,7 @@ end
     @test ast !== nothing
     @test length(ast.stmts) >= 3
 
-    code = CedarSim.make_spectre_circuit(ast)
+    code = CedarSim.make_mna_circuit(ast)
     @test code isa Expr
 end
 
@@ -94,7 +94,7 @@ end
     ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice)
     @test ast !== nothing
 
-    code = CedarSim.make_spectre_circuit(ast)
+    code = CedarSim.make_mna_circuit(ast)
     @test code isa Expr
 end
 

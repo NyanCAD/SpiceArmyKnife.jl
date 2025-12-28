@@ -12,12 +12,12 @@ using Sundials
 # DAECompiler has been removed - MNA is the only backend
 const HAS_DAECOMPILER = false
 
-# Legacy device type aliases (stub types that error when called)
-const R = CedarSim.SimpleResistor
-const C = CedarSim.SimpleCapacitor
-const L = CedarSim.SimpleInductor
-const V(v) = CedarSim.VoltageSource(dc=v)
-const I(i) = CedarSim.CurrentSource(dc=i)
+# Legacy device type aliases - stub functions that error (DAECompiler-only tests are skipped)
+R(args...; kwargs...) = error("R() requires DAECompiler - use MNA Resistor instead")
+C(args...; kwargs...) = error("C() requires DAECompiler - use MNA Capacitor instead")
+L(args...; kwargs...) = error("L() requires DAECompiler - use MNA Inductor instead")
+V(args...; kwargs...) = error("V() requires DAECompiler - use MNA VoltageSource instead")
+I(args...; kwargs...) = error("I() requires DAECompiler - use MNA CurrentSource instead")
 
 # sim_time stub - use MNA time parameter in actual circuits
 sim_time() = error("sim_time() requires DAECompiler - use MNA spec.mode for time-dependent simulation")

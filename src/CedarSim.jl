@@ -12,25 +12,6 @@ include("mna/MNA.jl")
 using .MNA
 export MNA
 
-# Minimal type stubs for legacy code paths (AC analysis, etc.)
-# These are placeholder types for code that hasn't been ported to MNA yet
-# Note: vasim.jl defines its own Scope struct for VA parsing, so we use DebugScope here
-abstract type AbstractScope end
-struct DebugScope <: AbstractScope
-    parent::Union{DebugScope, Nothing}
-    name::Symbol
-    DebugScope() = new(nothing, :root)
-    DebugScope(parent::DebugScope, name::Symbol) = new(parent, name)
-end
-const DScope = DebugScope
-struct GenScope <: AbstractScope
-    parent::AbstractScope
-    name::Symbol
-end
-GenScope(parent, name::Symbol) = GenScope(parent, name)
-GenScope(parent, name::String) = GenScope(parent, Symbol(name))
-struct IRODESystem end  # Stub type for AC analysis
-
 # re-exports
 export DAEProblem
 export @dyn, @requires, @provides, @isckt_or
@@ -42,12 +23,49 @@ export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
 
 include("util.jl")
 include("vasim.jl")
-include("simulate_ir.jl")
-# simpledevices.jl removed - DAECompiler-only devices replaced by MNA.devices
-# Stub types for backwards compatibility with DAECompiler code paths
-include("simpledevices_stubs.jl")
+
+# Minimal runtime support for SpectreEnvironment and VA codegen
+using Base.ScopedValues
+Base.@kwdef struct SimSpec
+    time::Float64=0.0
+    temp::DefaultOr{Float64}=mkdefault(27.0)
+    rng::Nothing=nothing
+end
+const spec = ScopedValue{SimSpec}(SimSpec())
+const sim_mode = ScopedValue{Symbol}(:dcop)
+abstract type CircuitElement end  # Base type for VA models
+
 include("spectre_env.jl")
-include("circuitodesystem.jl")
+
+# Stubs for spectre.jl (DAECompiler codegen) - allows codegen without DAECompiler runtime
+struct ParallelInstances end
+struct SubCircuit{T}; ckt::T end
+(X::SubCircuit)(args...; kwargs...) = error("SubCircuit requires DAECompiler")
+macro subckt(args...) error("@subckt requires DAECompiler") end
+abstract type AbstractSim{T} end
+abstract type AbstractScope end
+struct DebugScope <: AbstractScope
+    parent::Union{DebugScope, Nothing}
+    name::Symbol
+    DebugScope() = new(nothing, :root)
+    DebugScope(parent::DebugScope, name::Symbol) = new(parent, name)
+end
+const DScope = DebugScope
+const debug_scope = ScopedValue{AbstractScope}(DScope())
+observed!(args...) = nothing
+struct ParamSim{T,S,P} <: AbstractSim{T}  # Stub type for alter()
+    circuit::T
+    mode::Symbol
+    spec::S
+    params::P
+end
+struct Named{T}  # Stub for DAECompiler codegen
+    element::T
+    name::Symbol
+    Named(element::T, name::Union{String, Symbol}) where {T} = new{Core.Typeof(element)}(element, Symbol(name))
+end
+(n::Named)(args...; kwargs...) = error("Named circuit elements require DAECompiler")
+
 include("spectre.jl")
 
 # Phase 4: New SPC SPICE codegen (used by MNA backend)
@@ -62,9 +80,7 @@ include("sweeps.jl")
 # AC/noise analysis not loaded - requires DAECompiler porting to MNA
 # See ac.jl for reference implementation
 include("ModelLoader.jl")
-include("aliasextract.jl")
-include("netlist_utils.jl")
-include("circsummary.jl")
+# netlist_utils.jl and circsummary.jl removed - DAECompiler-only
 
 import .ModelLoader: load_VA_model
 export load_VA_model
@@ -93,6 +109,7 @@ function __init__()
 end
 
 using PrecompileTools
+using SpectreNetlistParser
 @setup_workload let
     spice = """
     * my circuit

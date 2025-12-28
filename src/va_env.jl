@@ -45,6 +45,8 @@ export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10
 log(x) = cedarerror("log not supported, use $log10 or $ln instead")
 !(a) = Base.:!(a)
 !(a::Int64) = a == zero(a)
+!(a::Float64) = a == zero(a)
+!(a::ForwardDiff.Dual) = !(ForwardDiff.value(a))
 atan2(x,y) = Base.atan(x,y)
 var"**"(a, b) = pow(a, b)
 ^ = Base.:(⊻)

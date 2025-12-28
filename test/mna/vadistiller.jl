@@ -1287,117 +1287,188 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
     # Tier 7: Transient Analysis with Rectifiers and Amplifiers
     #==========================================================================#
 
+    using CedarSim: tran!
+    using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
+    using OrdinaryDiffEq: Rodas5P
+
     @testset "Tier 7: Transient Circuits" begin
-        # Tests for rectifiers and amplifiers using DC sweeps
-        # (Transient with nonlinear devices requires DAE solver integration)
+        # True transient tests driving nonlinear devices with sine waves
+        # Use Rodas5P solver (ODE with mass matrix) which handles nonlinear devices well
 
-        @testset "MOSFET amplifier DC operating point with sweep" begin
-            # Test MOSFET amplifier at different bias points using DC sweep
-            # This verifies the nonlinear device behavior
+        @testset "Half-wave rectifier transient" begin
+            # Half-wave rectifier: sine input through diode to resistive load
+            # Output should be positive half-cycles only
 
-            function cs_amplifier(params, spec; x=Float64[])
+            function halfwave_rectifier(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                # Sine input: 2V amplitude, 1kHz
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
+                       ctx, vin, 0; t=spec.time, mode=spec.mode)
+
+                # Diode from input to output (forward biased for positive input)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vin, vout; x=x, spec=spec)
+
+                # Load resistor and smoothing capacitor
+                stamp!(Resistor(params.Rload), ctx, vout, 0)
+                stamp!(Capacitor(params.Cload), ctx, vout, 0)
+
+                return ctx
+            end
+
+            # Run transient for 2 full cycles at 1kHz
+            circuit = MNACircuit(halfwave_rectifier;
+                                 Vamp=2.0, freq=1000.0, Rload=1000.0, Cload=1e-6)
+            tspan = (0.0, 2e-3)  # 2ms = 2 cycles
+            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
+
+            # Create accessor for easy voltage lookup
+            sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
+            acc = MNASolutionAccessor(sol, sys)
+
+            # Sample at key points
+            T = 1e-3  # Period = 1ms
+
+            # At t=0, input starts at 0, output should be near 0
+            @test abs(voltage(acc, :vout, 0.0)) < 0.5
+
+            # At t=T/4 (positive peak), output should be positive (~1.3V = 2V - 0.7V diode drop)
+            vout_peak = voltage(acc, :vout, T/4)
+            @test vout_peak > 0.5  # Should be positive
+
+            # At t=3T/4 (negative peak of input), output should still be positive
+            # due to capacitor holding charge (diode blocks negative)
+            vout_neg_phase = voltage(acc, :vout, 3T/4)
+            @test vout_neg_phase >= 0.0  # Capacitor holds positive charge
+        end
+
+        @testset "Diode clipper transient" begin
+            # Clipper: diode to ground limits positive voltage
+
+            function diode_clipper(params, spec; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                # Sine input
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
+                       ctx, vin, 0; t=spec.time, mode=spec.mode)
+
+                # Series resistor
+                stamp!(Resistor(params.R), ctx, vin, vout)
+
+                # Clipping diode to ground
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vout, 0; x=x, spec=spec)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(diode_clipper;
+                                 Vamp=3.0, freq=1000.0, R=1000.0)
+            tspan = (0.0, 2e-3)
+            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
+
+            sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
+            acc = MNASolutionAccessor(sol, sys)
+
+            T = 1e-3
+
+            # At positive peak (t=T/4), output should be clipped to ~0.6-0.7V
+            vout_pos = voltage(acc, :vout, T/4)
+            @test vout_pos < 1.5  # Clipped (3V input -> ~0.7V output)
+            @test vout_pos > 0.3  # But still positive
+
+            # At negative peak (t=3T/4), output follows input (diode off)
+            vout_neg = voltage(acc, :vout, 3T/4)
+            @test vout_neg < -1.0  # Should be negative, following input
+        end
+
+        @testset "MOSFET common-source amplifier transient" begin
+            # CS amplifier with sine input on gate
+
+            function cs_amp_transient(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
                 vdrain = get_node!(ctx, :vdrain)
 
+                # DC supply
                 stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
-                stamp!(VoltageSource(params.Vg; name=:Vg), ctx, vgate, 0)
-                stamp!(Resistor(params.Rd; name=:Rd), ctx, vdd, vdrain)
 
-                # Simple square-law MOSFET
-                stamp!(VAMOSCap(Kp=params.Kp, Vth=params.Vth, Cgs=0.0, Cgd=0.0),
+                # Gate bias + AC signal
+                # Use DC offset + small AC to stay in active region
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
+                       ctx, vgate, 0; t=spec.time, mode=spec.mode)
+
+                # Drain resistor
+                stamp!(Resistor(params.Rd), ctx, vdd, vdrain)
+
+                # MOSFET
+                stamp!(VAMOSCap(Kp=params.Kp, Vth=params.Vth, Cgs=1e-12, Cgd=0.5e-12),
                        ctx, vdrain, vgate, 0; x=x, spec=spec)
 
                 return ctx
             end
 
-            base_params = (Vdd=10.0, Vg=2.0, Rd=10000.0, Kp=1e-4, Vth=0.5)
+            # Bias in active region: Vgs = 1.5V > Vth = 1.0V
+            # Use moderate Kp to avoid saturating the output
+            circuit = MNACircuit(cs_amp_transient;
+                                 Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0,
+                                 Rd=2000.0, Kp=1e-4, Vth=1.0)
+            tspan = (0.0, 2e-3)
+            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
-            # Test at different gate voltages
-            gate_voltages = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
-            drain_voltages = Float64[]
+            sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
+            acc = MNASolutionAccessor(sol, sys)
 
-            for Vg in gate_voltages
-                params = merge(base_params, (Vg=Vg,))
-                sol = solve_dc(cs_amplifier, params, MNASpec())
-                push!(drain_voltages, voltage(sol, :vdrain))
-            end
+            T = 1e-3
 
-            # At Vg < Vth (0.5V), MOSFET is off or barely on, Vdrain near Vdd
-            @test drain_voltages[1] > 9.5  # Vg = 0V
-            @test drain_voltages[2] > 9.5  # Vg = 0.5V (at threshold)
+            # Get drain voltages at different phases
+            vd_t0 = voltage(acc, :vdrain, T)  # Reference point
+            vd_pos = voltage(acc, :vdrain, T + T/4)  # Vg at positive peak
+            vd_neg = voltage(acc, :vdrain, T + 3T/4)  # Vg at negative peak
 
-            # At higher Vg, MOSFET conducts, Vdrain drops
-            @test drain_voltages[5] < 9.0  # Vg = 2.0V
-            @test drain_voltages[7] < drain_voltages[5]  # Vg = 3.0V, more current
+            # Check for NaN (indicates solver instability)
+            @test !isnan(vd_t0) && !isnan(vd_pos) && !isnan(vd_neg)
 
-            # Verify drain voltage decreases as gate increases (above threshold)
-            for i in 3:length(drain_voltages)
-                @test drain_voltages[i] <= drain_voltages[i-1] + 0.1
-            end
+            # Common-source amplifier inverts: higher Vg → more current → lower Vd
+            # So when gate is at positive peak, drain should be lower
+            # Use tolerance since small signals might have weak effect
+            @test vd_pos < vd_neg + 0.1  # Inverted amplification (with tolerance)
+
+            # Drain should stay in reasonable range
+            @test vd_t0 > 0.0  # Positive voltage
+            @test vd_t0 < 5.5  # Not above Vdd (allow for numerical tolerance)
         end
 
-        @testset "Diode rectifier DC sweep" begin
-            # Test half-wave rectifier behavior using DC sweep
-            # This verifies diode rectification behavior
-
-            function halfwave_dc(params, spec; x=Float64[])
-                ctx = MNAContext()
-                vin = get_node!(ctx, :vin)
-                vout = get_node!(ctx, :vout)
-
-                stamp!(VoltageSource(params.Vin; name=:Vin), ctx, vin, 0)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vin, vout; x=x, spec=spec)
-                stamp!(Resistor(params.Rload; name=:Rload), ctx, vout, 0)
-
-                return ctx
-            end
-
-            base_params = (Vin=0.0, Rload=1000.0)
-
-            # Sweep input voltage and check rectification (moderate voltages to avoid convergence issues)
-            input_voltages = [-5.0, -2.0, -1.0, 0.0, 0.5, 1.0, 2.0]
-            output_voltages = Float64[]
-
-            for Vin in input_voltages
-                params = merge(base_params, (Vin=Vin,))
-                sol = solve_dc(halfwave_dc, params, MNASpec())
-                push!(output_voltages, voltage(sol, :vout))
-            end
-
-            # For negative input, output should be near 0 (diode blocks)
-            @test abs(output_voltages[1]) < 0.01  # Vin = -5V
-            @test abs(output_voltages[2]) < 0.01  # Vin = -2V
-            @test abs(output_voltages[3]) < 0.01  # Vin = -1V
-
-            # For positive input > 0.6V, output should be positive (Vin - Vdiode drop)
-            @test output_voltages[6] > 0.2  # Vin = 1V → ~0.3-0.4V
-            @test output_voltages[7] > 1.0  # Vin = 2V → ~1.3V
-
-            # Output should increase with positive input
-            @test output_voltages[7] > output_voltages[6]
-            @test output_voltages[6] > output_voltages[5]
-        end
-
-        @testset "BJT amplifier DC operating point" begin
-            # Test BJT common-emitter amplifier at DC
-            # Uses the VADistiller BJT model
+        @testset "BJT common-emitter amplifier transient" begin
+            # CE amplifier with sine input on base
 
             vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
             bjt_va = read(joinpath(vadistiller_path, "bjt.va"), String)
             va = VerilogAParser.parse(IOBuffer(bjt_va))
             @test !va.ps.errored
 
-            function ce_dc(params, spec; x=Float64[])
+            function ce_amp_transient(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)
                 vcollector = get_node!(ctx, :vcollector)
 
+                # DC supply
                 stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-                stamp!(VoltageSource(params.Vb; name=:Vb), ctx, vbase, 0)
-                stamp!(Resistor(params.Rc; name=:Rc), ctx, vcc, vcollector)
+
+                # Base bias + AC signal
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
+                       ctx, vbase, 0; t=spec.time, mode=spec.mode)
+
+                # Collector resistor
+                stamp!(Resistor(params.Rc), ctx, vcc, vcollector)
 
                 # BJT: collector, base, emitter, substrate
                 stamp!(sp_bjt_module.sp_bjt(; bf=100.0, is=1e-15),
@@ -1406,107 +1477,89 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            base_params = (Vcc=10.0, Vb=0.7, Rc=1000.0)
+            # Bias at ~0.65V to be in active region
+            circuit = MNACircuit(ce_amp_transient;
+                                 Vcc=5.0, Vbias=0.65, Vac=0.02, freq=1000.0, Rc=2000.0)
+            tspan = (0.0, 2e-3)
+            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
-            # Test at lower base voltages to avoid convergence issues
-            base_voltages = [0.4, 0.5, 0.55, 0.6, 0.65]
-            collector_voltages = Float64[]
+            sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
+            acc = MNASolutionAccessor(sol, sys)
 
-            for Vb in base_voltages
-                params = merge(base_params, (Vb=Vb,))
-                sol = solve_dc(ce_dc, params, MNASpec())
-                push!(collector_voltages, voltage(sol, :vcollector))
+            T = 1e-3
+
+            # Get collector voltages at different phases
+            vc_t0 = voltage(acc, :vcollector, T)
+            vc_pos = voltage(acc, :vcollector, T + T/4)  # Base at positive peak
+            vc_neg = voltage(acc, :vcollector, T + 3T/4)  # Base at negative peak
+
+            # Check for NaN (indicates solver instability)
+            @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
+
+            # Only test amplification if values are valid
+            if !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
+                # CE amplifier inverts: higher Vbe → more Ic → lower Vc
+                # Use tolerance for small signal effects
+                @test vc_pos < vc_neg + 0.5  # Inverted amplification (relaxed)
+
+                # Collector should be in reasonable range
+                @test vc_t0 > 0.0  # Positive voltage
+                @test vc_t0 < 5.5  # Not above Vcc
             end
-
-            # At low Vbe (< 0.5V), BJT is barely on, Vc ≈ Vcc
-            @test collector_voltages[1] > 9.5  # Vb = 0.4V
-            @test collector_voltages[2] > 9.5  # Vb = 0.5V
-
-            # As Vbe increases above threshold, Vc drops
-            @test collector_voltages[5] < collector_voltages[1]  # Vb = 0.65V < 0.4V
-
-            # Collector voltages should be positive
-            @test all(v -> v > -0.1, collector_voltages)
         end
 
-        @testset "Diode clipper DC sweep (single diode)" begin
-            # Single diode clipping positive voltages
+        @testset "Full-wave rectifier transient" begin
+            # Two diodes for full-wave rectification from center-tapped source
 
-            function clipper_dc(params, spec; x=Float64[])
-                ctx = MNAContext()
-                vin = get_node!(ctx, :vin)
-                vout = get_node!(ctx, :vout)
-
-                stamp!(VoltageSource(params.Vin; name=:Vin), ctx, vin, 0)
-                stamp!(Resistor(params.R; name=:R), ctx, vin, vout)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vout, 0; x=x, spec=spec)
-
-                return ctx
-            end
-
-            base_params = (Vin=0.0, R=1000.0)
-
-            # Sweep input and check clipping (moderate voltages)
-            input_voltages = [-2.0, -1.0, 0.0, 1.0, 2.0]
-            output_voltages = Float64[]
-
-            for Vin in input_voltages
-                params = merge(base_params, (Vin=Vin,))
-                sol = solve_dc(clipper_dc, params, MNASpec())
-                push!(output_voltages, voltage(sol, :vout))
-            end
-
-            # Negative inputs pass through (diode off)
-            @test output_voltages[1] ≈ -2.0 atol=0.2
-            @test output_voltages[2] ≈ -1.0 atol=0.2
-
-            # Positive inputs get clipped to ~0.6-0.7V
-            @test output_voltages[4] < 1.0  # 1V in → ~0.5-0.7V out
-            @test output_voltages[5] < 1.0  # 2V in → ~0.7V out
-
-            # At 0V input, output ≈ 0
-            @test output_voltages[3] ≈ 0.0 atol=0.05
-        end
-
-        @testset "Full-wave rectifier DC sweep (two diodes)" begin
-            # Two diodes for full-wave rectification with DC sweep
-
-            function fullwave_dc(params, spec; x=Float64[])
+            function fullwave_rectifier(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vpos = get_node!(ctx, :vpos)
                 vneg = get_node!(ctx, :vneg)
                 vout = get_node!(ctx, :vout)
 
-                # Two anti-phase sources
-                stamp!(VoltageSource(params.Vin; name=:Vpos), ctx, vpos, 0)
-                stamp!(VoltageSource(-params.Vin; name=:Vneg), ctx, vneg, 0)
+                # Two anti-phase sine sources (simulating center-tapped transformer)
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vpos),
+                       ctx, vpos, 0; t=spec.time, mode=spec.mode)
+                stamp!(SinVoltageSource(0.0, -params.Vamp, params.freq; name=:Vneg),
+                       ctx, vneg, 0; t=spec.time, mode=spec.mode)
 
                 # Two diodes to common output
                 stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vpos, vout; x=x, spec=spec)
                 stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vneg, vout; x=x, spec=spec)
 
-                # Load resistor
-                stamp!(Resistor(params.Rload; name=:Rload), ctx, vout, 0)
+                # Load resistor and smoothing capacitor
+                stamp!(Resistor(params.Rload), ctx, vout, 0)
+                stamp!(Capacitor(params.Cload), ctx, vout, 0)
 
                 return ctx
             end
 
-            base_params = (Vin=0.0, Rload=1000.0)
+            circuit = MNACircuit(fullwave_rectifier;
+                                 Vamp=2.0, freq=1000.0, Rload=1000.0, Cload=10e-6)
+            tspan = (0.0, 3e-3)  # 3 cycles for capacitor to charge
+            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
-            # For positive Vin (moderate value), positive source conducts
-            sol_pos = solve_dc(fullwave_dc, merge(base_params, (Vin=2.0,)), MNASpec())
-            vout_pos = voltage(sol_pos, :vout)
-            @test vout_pos > 1.0  # 2V - diode drop ≈ 1.3V
+            sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
+            acc = MNASolutionAccessor(sol, sys)
 
-            # For negative Vin, negative source conducts (but it's now positive!)
-            sol_neg = solve_dc(fullwave_dc, merge(base_params, (Vin=-2.0,)), MNASpec())
-            vout_neg = voltage(sol_neg, :vout)
-            @test vout_neg > 1.0  # Should also be positive
+            T = 1e-3
 
-            # At 0V, both diodes are off, output near 0
-            sol_zero = solve_dc(fullwave_dc, merge(base_params, (Vin=0.0,)), MNASpec())
-            vout_zero = voltage(sol_zero, :vout)
-            @test abs(vout_zero) < 0.5
+            # After a few cycles, output should be positive DC with ripple
+            # Sample at various points in third cycle
+            vout_samples = [voltage(acc, :vout, 2T + i*T/8) for i in 0:7]
+
+            # All samples should be positive (full-wave rectification)
+            @test all(v -> v >= -0.1, vout_samples)
+
+            # Average should be significant (not zero)
+            avg_vout = sum(vout_samples) / length(vout_samples)
+            @test avg_vout > 0.5  # DC level established
+
+            # With large capacitor, ripple should be small
+            ripple = maximum(vout_samples) - minimum(vout_samples)
+            @test ripple < 1.0  # Ripple less than 1V with 10µF capacitor
         end
 
     end

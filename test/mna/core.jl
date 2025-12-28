@@ -30,6 +30,10 @@ using CedarSim.MNA: voltage, current, magnitude_db, phase_deg
 using CedarSim.MNA: make_ode_problem, make_ode_function
 using CedarSim.MNA: make_dae_problem, make_dae_function
 
+# Import CedarSim for tran! and solver comparison tests
+using CedarSim
+using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+
 @testset "MNA Core Tests" begin
 
     #==========================================================================#
@@ -1980,6 +1984,72 @@ using CedarSim.MNA: make_dae_problem, make_dae_function
         # Output should be attenuated (less than input amplitude of 5V)
         @test amplitude < 2.0
         @test amplitude > 0.3
+    end
+
+    #==========================================================================#
+    # Multi-Solver Transient Test
+    #==========================================================================#
+
+    @testset "Multi-solver transient comparison" begin
+        # Test that all supported solvers produce consistent results
+        # This ensures both ODE and DAE paths work correctly
+        # Use SIN source to create a dynamic circuit with actual transient behavior
+
+        using CedarSim.MNA: SinVoltageSource
+
+        function build_rc_sin(params, spec; x=Float64[])
+            ctx = MNAContext()
+            vcc = get_node!(ctx, :vcc)
+            out = get_node!(ctx, :out)
+
+            # SIN source: DC offset + AC amplitude at given frequency
+            stamp!(SinVoltageSource(params.vo, params.va, params.freq; name=:Vin),
+                   ctx, vcc, 0; t=spec.time, mode=spec.mode)
+            stamp!(Resistor(params.R), ctx, vcc, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
+
+            return ctx
+        end
+
+        # RC low-pass filter with 1kHz sine input
+        # RC time constant = 1ms, cutoff freq = 159 Hz
+        # At 1kHz input, output is attenuated
+        circuit = MNACircuit(build_rc_sin;
+                             vo=2.5, va=2.5, freq=1000.0,  # 0-5V sine
+                             R=1000.0, C=1e-6)
+        tspan = (0.0, 3e-3)  # 3 periods of 1kHz
+
+        # Test with IDA (DAE solver - default)
+        # Note: IDA needs more relaxed tolerances for circuits with fast-changing sources
+        sol_ida = tran!(circuit, tspan; abstol=1e-6, reltol=1e-4)
+        @test sol_ida.retcode == ReturnCode.Success
+
+        # Test with Rodas5P (Rosenbrock ODE solver)
+        sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
+        @test sol_rodas.retcode == ReturnCode.Success
+
+        # Test with QNDF (BDF ODE solver - supports variable mass matrices)
+        sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-10, reltol=1e-8)
+        @test sol_qndf.retcode == ReturnCode.Success
+
+        # Test with FBDF (BDF ODE solver - supports variable mass matrices)
+        sol_fbdf = tran!(circuit, tspan; solver=FBDF(), abstol=1e-10, reltol=1e-8)
+        @test sol_fbdf.retcode == ReturnCode.Success
+
+        # All solvers should agree at multiple time points
+        # Use 1% tolerance to accommodate different solver accuracies
+        test_times = [0.5e-3, 1e-3, 1.5e-3, 2e-3, 2.5e-3]
+        for t in test_times
+            V_ida = sol_ida(t)[2]
+            V_rodas = sol_rodas(t)[2]
+            V_qndf = sol_qndf(t)[2]
+            V_fbdf = sol_fbdf(t)[2]
+
+            # Solvers should match each other within 1%
+            @test isapprox(V_ida, V_rodas; rtol=0.01) || (t, V_ida, V_rodas)
+            @test isapprox(V_ida, V_qndf; rtol=0.01) || (t, V_ida, V_qndf)
+            @test isapprox(V_ida, V_fbdf; rtol=0.01) || (t, V_ida, V_fbdf)
+        end
     end
 
 end  # @testset "MNA Core Tests"

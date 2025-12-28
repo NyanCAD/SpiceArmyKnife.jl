@@ -389,7 +389,9 @@ stamp_G!(ctx, n, n,  G)  # Current leaving n due to Vn
 @inline function stamp_G!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
     v = extract_value(val)
-    v == 0 && return nothing  # Skip zero entries
+    # Note: We do NOT skip zero entries here. For precompilation to work,
+    # the COO structure must be consistent regardless of operating point.
+    # Zero values are handled correctly by sparse matrix assembly.
     push!(ctx.G_I, i)
     push!(ctx.G_J, j)
     push!(ctx.G_V, v)
@@ -411,7 +413,9 @@ For the ODE formulation: C * dx/dt + G * x = b
 @inline function stamp_C!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
     v = extract_value(val)
-    v == 0 && return nothing  # Skip zero entries
+    # Note: We do NOT skip zero entries here. For precompilation to work,
+    # the COO structure must be consistent regardless of operating point.
+    # Zero values are handled correctly by sparse matrix assembly.
     push!(ctx.C_I, i)
     push!(ctx.C_J, j)
     push!(ctx.C_V, v)
@@ -431,7 +435,8 @@ The b vector contains source terms:
 @inline function stamp_b!(ctx::MNAContext, i::Int, val)
     i == 0 && return nothing
     v = extract_value(val)
-    v == 0 && return nothing
+    # Note: We do NOT skip zero entries here for consistency with stamp_G!/stamp_C!.
+    # This ensures the structure of deferred stamps is consistent.
 
     # Resolve negative index (current variable) to actual index
     # Note: For b vector, we need to resolve at assembly time since n_nodes may change.

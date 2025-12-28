@@ -19,54 +19,24 @@ r5 (1 0) resistor r=3+atan(p1/p2) //a trigonometric function call
 r6 (1 0) resistor r=((p1<1) ? p4+1 : p3)  // the ternary operator
 """
 
+# DAECompiler-only tests - make_spectre_netlist and SpcScope have been removed
+# The complex expression parsing in `code` variable was for DAECompiler codegen
 @testset "spectre parameters" begin
-    # Test parsing
+    # Test parsing only (MNA codegen doesn't support these Spectre expressions)
     ast = SpectreNetlistParser.parse(code)
     @test ast !== nothing
-
-    # Test code generation (produces valid Julia AST)
-    fn = CedarSim.make_spectre_netlist(ast)
-    @test fn isa Expr
-
-    # Test individual parameter value parsing
-    global_to_julia = CedarSim.SpcScope()
-
-    val = ast.stmts[1].params[1].val
-    @test global_to_julia(val) ≈ 23e-12
-
-    val = ast.stmts[1].params[2].val
-    @test global_to_julia(val) == 0.3
-
-    val = ast.stmts[1].params[3].val
-    @test eval(global_to_julia(val)) == ~((1&2) ⊻ 3)
-
-    val = ast.stmts[1].params[4].val
-    @test eval(global_to_julia(val)) == (true && false || true)
-
-    val = ast.stmts[1].params[5].val
-    @test eval(global_to_julia(val)) == M_1_PI * 3.0
-
-    # Phase 0: Skip eval(fn) and variable tests - requires simulation
-    if HAS_SIMULATION
-        eval(fn)
-        @test p1 ≈ 23e-12
-        @test p2 == 0.3
-        @test p3 == ~((1&2) ⊻ 3)
-        @test p4 == (true && false || true)
-        @test p5 == M_1_PI * 3.0
-    else
-        @info "Skipping eval tests (Phase 0: simulation not available)"
-    end
+    @test length(ast.stmts) > 0
 end
 
 @testset "3 port BJT" begin
+    # SpcScope was DAECompiler-only, test parsing instead
     str = """
     * 3 port BJT
     q0 c b e  vpnp_0p42x10  dtemp=dtemp
     """
     stmt = SPICENetlistCSTParser.parse(IOBuffer(str))
-    spc = CedarSim.SpcScope()
-    @test spc(stmt.stmts[2]) isa Expr
+    @test stmt !== nothing
+    @test length(stmt.stmts) >= 2
 end
 
 @testset "spectre parsing" begin

@@ -200,34 +200,9 @@ sol = dc!(sim)
 # V = I * R = 1A * 100Ω = 100V
 @test isapprox_deftol(voltage(sol, :out), -100)
 
-# Test that our 'default parameterization' helper sees `foo` and `inner`
-default_params = CedarSim.get_default_parameterization(ast)
-@test (:inner => 1.0) ∈ default_params
-@test (:foo => 1.0) ∈ default_params
-
-#==============================================================================#
-# Test 6: alter() on SPICE AST (still uses old API for AST manipulation)
-#
-# These tests modify the SPICE AST text directly, not the circuit.
-# The alter() function for ASTs is separate from MNA parameter handling.
-#==============================================================================#
-
-io = IOBuffer()
-CedarSim.alter(io, ast, foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))
-modified = String(take!(io))
-replaced = replace(spice_ckt,
-    "foo =  1" => "foo =  2.0",
-    "foo=foo+2000" => "foo=3.0",
-    "r= 'foo'" => "r= 4.0")
-@test modified == replaced
-new_ast = SpectreNetlistParser.SPICENetlistParser.parse(modified)
-default_params = CedarSim.get_default_parameterization(new_ast)
-@test (:foo => 2) ∈ default_params
-
-# Test that AST alter works with ParamLens
-CedarSim.alter(io, ast, CedarSim.ParamLens((foo=2.0, inner=(foo=3.0, r1=(r=4.0,)))))
-modified = String(take!(io))
-@test modified == replaced
+# NOTE: get_default_parameterization and alter(io, ast, ...) were in spectre.jl (DAECompiler)
+# These are AST manipulation utilities that have been removed with the DAECompiler backend.
+# The MNA backend uses ParamLens for runtime parameter overrides instead.
 
 #==============================================================================#
 # Test 7: ParamLens hierarchical access patterns

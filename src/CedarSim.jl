@@ -19,6 +19,7 @@ export solve
 
 # Phase 4: MNA SPICE codegen exports
 export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
+export ParamLens, AbstractParamLens, ParamObserver, @param
 
 
 include("util.jl")
@@ -37,39 +38,9 @@ abstract type CircuitElement end  # Base type for VA models
 
 include("spectre_env.jl")
 
-# Stubs for spectre.jl (DAECompiler codegen) - allows codegen without DAECompiler runtime
-struct ParallelInstances end
-struct SubCircuit{T}; ckt::T end
-(X::SubCircuit)(args...; kwargs...) = error("SubCircuit requires DAECompiler")
-macro subckt(args...) error("@subckt requires DAECompiler") end
-abstract type AbstractSim{T} end
-abstract type AbstractScope end
-struct DebugScope <: AbstractScope
-    parent::Union{DebugScope, Nothing}
-    name::Symbol
-    DebugScope() = new(nothing, :root)
-    DebugScope(parent::DebugScope, name::Symbol) = new(parent, name)
-end
-const DScope = DebugScope
-const debug_scope = ScopedValue{AbstractScope}(DScope())
-observed!(args...) = nothing
-struct ParamSim{T,S,P} <: AbstractSim{T}  # Stub type for alter()
-    circuit::T
-    mode::Symbol
-    spec::S
-    params::P
-end
-struct Named{T}  # Stub for DAECompiler codegen
-    element::T
-    name::Symbol
-    Named(element::T, name::Union{String, Symbol}) where {T} = new{Core.Typeof(element)}(element, Symbol(name))
-end
-(n::Named)(args...; kwargs...) = error("Named circuit elements require DAECompiler")
-
-include("spectre.jl")
-
 # Phase 4: New SPC SPICE codegen (used by MNA backend)
-include("spc/cache.jl")  # Must be before sema.jl (CedarParseCache)
+include("spc/helpers.jl")  # Parser utilities, ParamLens (extracted from spectre.jl)
+include("spc/cache.jl")    # Must be before sema.jl (CedarParseCache)
 include("spc/sema.jl")
 include("spc/codegen.jl")
 include("spc/interface.jl")

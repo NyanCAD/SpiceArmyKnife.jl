@@ -555,11 +555,13 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
+# Uses NoInit() since we already have a valid DC operating point as u0.
+# This avoids Julia 1.12 issues with DAE initialization for singular mass matrices.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, kwargs...)
+                        abstol=1e-10, reltol=1e-8, initializealg=OrdinaryDiffEq.NoInit(), kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan)
-    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
 """

@@ -1400,15 +1400,16 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # Compile circuit for fast evaluation
     pc = compile_circuit(circuit.builder, circuit.params, circuit.spec)
     residual! = make_compiled_dae_residual(pc)
+    jac! = make_compiled_dae_jacobian(pc)
 
     # Detect differential variables
     diff_vars = detect_differential_vars(circuit)
 
-    # Create DAEFunction without explicit Jacobian
-    # Note: Explicit Jacobian can cause IDA initialization failures with time-dependent sources.
-    # IDA uses internal finite difference Jacobian which works more reliably.
-    # ODE solvers (Rodas5P, QNDF, FBDF) can use explicit Jacobian via the ODEProblem path.
-    f = SciMLBase.DAEFunction(residual!)
+    # Create DAEFunction with explicit Jacobian for better performance
+    # The jac_prototype must include all non-zeros from both G and C,
+    # since the DAE Jacobian is G + gamma*C
+    jac_proto = pc.G + pc.C  # Combined sparsity pattern
+    f = SciMLBase.DAEFunction(residual!; jac=jac!, jac_prototype=jac_proto)
 
     return SciMLBase.DAEProblem(
         f,

@@ -2020,20 +2020,21 @@ using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
         tspan = (0.0, 3e-3)  # 3 periods of 1kHz
 
         # Test with IDA (DAE solver - default)
-        # Note: IDA needs more relaxed tolerances for circuits with fast-changing sources
-        sol_ida = tran!(circuit, tspan; abstol=1e-6, reltol=1e-4)
+        # IDA uses explicit Jacobian and relaxed tolerances (1e-6, 1e-4) by default
+        sol_ida = tran!(circuit, tspan)
         @test sol_ida.retcode == ReturnCode.Success
 
         # Test with Rodas5P (Rosenbrock ODE solver)
-        sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
+        # ODE solvers use tighter tolerances (1e-10, 1e-8) and explicit Jacobian
+        sol_rodas = tran!(circuit, tspan; solver=Rodas5P())
         @test sol_rodas.retcode == ReturnCode.Success
 
         # Test with QNDF (BDF ODE solver - supports variable mass matrices)
-        sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-10, reltol=1e-8)
+        sol_qndf = tran!(circuit, tspan; solver=QNDF())
         @test sol_qndf.retcode == ReturnCode.Success
 
         # Test with FBDF (BDF ODE solver - supports variable mass matrices)
-        sol_fbdf = tran!(circuit, tspan; solver=FBDF(), abstol=1e-10, reltol=1e-8)
+        sol_fbdf = tran!(circuit, tspan; solver=FBDF())
         @test sol_fbdf.retcode == ReturnCode.Success
 
         # All solvers should agree at multiple time points

@@ -536,20 +536,31 @@ sol(1e-7)  # Get state at t=0.1μs
 ```
 """
 function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
-               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
+               solver=nothing, abstol=nothing, reltol=nothing, kwargs...)
     # Default to IDA (DAE solver) for robustness with nonlinear circuits
     if solver === nothing
         solver = Sundials.IDA()
     end
 
+    # Build kwargs with tolerances only if specified (let dispatch use solver-appropriate defaults)
+    tol_kwargs = NamedTuple()
+    if abstol !== nothing
+        tol_kwargs = merge(tol_kwargs, (abstol=abstol,))
+    end
+    if reltol !== nothing
+        tol_kwargs = merge(tol_kwargs, (reltol=reltol,))
+    end
+
     # Dispatch based on solver type
-    return _tran_dispatch(circuit, tspan, solver; abstol=abstol, reltol=reltol, kwargs...)
+    return _tran_dispatch(circuit, tspan, solver; tol_kwargs..., kwargs...)
 end
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
+# Uses more relaxed tolerances than ODE solvers because DAE initialization
+# can fail with very tight tolerances on circuits with fast-changing sources.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, kwargs...)
+                        abstol=1e-6, reltol=1e-4, kwargs...)
     prob = SciMLBase.DAEProblem(circuit, tspan)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
 end

@@ -1404,8 +1404,14 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # Detect differential variables
     diff_vars = detect_differential_vars(circuit)
 
+    # Create DAEFunction without explicit Jacobian
+    # Note: Explicit Jacobian can cause IDA initialization failures with time-dependent sources.
+    # IDA uses internal finite difference Jacobian which works more reliably.
+    # ODE solvers (Rodas5P, QNDF, FBDF) can use explicit Jacobian via the ODEProblem path.
+    f = SciMLBase.DAEFunction(residual!)
+
     return SciMLBase.DAEProblem(
-        residual!,
+        f,
         du0,
         u0,
         Float64.(tspan);

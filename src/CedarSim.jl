@@ -101,18 +101,11 @@ using PrecompileTools
     l1 n1 n2 1m
     c1 n2 0 1u
     """
-    spectre = """
-    c1 (Y 0) capacitor c=100f
-    r2 (Y VDD) BasicVAResistor R=10k
-    v1 (VDD 0) vsource type=dc dc=0.7_V
-    """
     @compile_workload @time begin
         sa1 = VerilogAParser.parsefile(joinpath(@__DIR__, "../VerilogAParser.jl/test/inputs/resistor.va"))
-        code1 = CedarSim.make_module(sa1)
-        sa2 = SpectreNetlistParser.parse(IOBuffer(spectre))
-        code2 = CedarSim.make_spectre_circuit(sa2)
-        sa3 = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice)
-        code3 = CedarSim.make_spectre_circuit(sa3)
+        code1 = CedarSim.make_mna_device(sa1.stmts[end])
+        sa2 = SpectreNetlistParser.parse(IOBuffer(spice); start_lang=:spice, implicit_title=true)
+        code2 = CedarSim.make_mna_circuit(sa2)
     end
 end
 

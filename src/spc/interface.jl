@@ -156,10 +156,11 @@ function codegen_hdl_import!(mod::Module, cache::CedarParseCache, imp::String)
 
     vamod = va.stmts[end]
     s = gensym(String(vamod.id))
+    # Use MNA-based VA codegen instead of DAECompiler-based make_spice_device
     sm = Core.eval(mod, :(baremodule $s
         const VerilogAEnvironment = $(CedarSim.VerilogAEnvironment)
         using .VerilogAEnvironment
-        $(CedarSim.make_spice_device(vamod))
+        $(CedarSim.make_mna_device(vamod))
         const $(Symbol(lowercase(String(vamod.id)))) = $(Symbol(vamod.id))
     end))
 
@@ -243,7 +244,7 @@ Parse SPICE code and generate an MNA builder function.
 
 The result is a callable that takes (params, spec) and returns an MNAContext.
 
-Note: This is the MNA version of @sp_str (which uses DAECompiler).
+This is the primary SPICE string macro for MNA-based circuit simulation.
 Use this during the Phase 4 transition period.
 
 # Example

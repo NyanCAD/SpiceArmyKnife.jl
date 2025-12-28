@@ -1,4 +1,5 @@
 using StaticArrays
+using DecFP
 
 struct CodegenState
     sema::SemaResult
@@ -54,7 +55,6 @@ function cg_expr!(state::CodegenState, cs::SNode{SC.NumberLiteral})
     return Float64(ret)
 end
 
-using DecFP
 const spectre_magnitudes = Dict(
     'T' => d"1e12",
     'G' => d"1e9",

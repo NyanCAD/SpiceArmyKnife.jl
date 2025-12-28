@@ -1,3 +1,7 @@
+# Alias extraction for DAECompiler circuits
+# This is only used when DAECompiler is enabled
+@static if CedarSim.USE_DAECOMPILER
+
 using CassetteOverlay
 
 struct AliasNet <: AbstractNet
@@ -38,3 +42,5 @@ function aliasmap(circ)
     interp(circ)
     interp.aliases
 end
+
+end # @static if USE_DAECOMPILER

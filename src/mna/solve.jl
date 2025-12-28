@@ -314,6 +314,7 @@ end
 
 using NonlinearSolve
 using SciMLBase
+using SciMLBase: MatrixOperator
 using ADTypes
 
 """
@@ -1430,17 +1431,37 @@ The circuit is automatically compiled for ~10x faster evaluation.
 # Keyword Arguments
 - `u0`: Initial state (default: DC solution)
 
+# Solver Recommendations
+- Use `Rodas5P()` - fast Rosenbrock method, handles singular mass matrices
+- Use `RadauIIA5()` - fully implicit Runge-Kutta, very stable
+- Use `QNDF()` or `FBDF()` - BDF methods, good for stiff problems
+
+# Important: Constant Mass Matrix
+The mass matrix (C) is evaluated once at the initial DC operating point and
+remains constant during integration. This means:
+
+- **Fixed capacitors**: Work correctly - capacitance doesn't change
+- **Voltage-dependent capacitors** (junction capacitance, nonlinear caps):
+  Will be approximated using the initial capacitance value
+
+For circuits with voltage-dependent capacitance, use `DAEProblem` instead.
+The DAE formulation rebuilds both G and C matrices at each Newton iteration,
+correctly handling nonlinear capacitance.
+
 # Example
 ```julia
+# Simple RC circuit with fixed capacitor
 circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
 prob = ODEProblem(circuit, (0.0, 1e-3))
-sol = solve(prob, Rodas5P())  # Rosenbrock handles singular mass matrix
+sol = solve(prob, Rodas5P())
+
+# For circuits with voltage-dependent capacitance, use DAEProblem:
+prob_dae = DAEProblem(circuit, (0.0, 1e-3))
+sol = solve(prob_dae, IDA())  # Correctly handles nonlinear C(V)
 ```
 
-# Notes
-- For nonlinear circuits with voltage-dependent capacitance, use DAEProblem instead
-- ODEProblem with mass matrix works well for linear circuits with Rodas5P
-- DAEProblem with IDA is recommended for large circuits and better algebraic handling
+# See Also
+- `DAEProblem(circuit, tspan)` - Recommended for nonlinear circuits with IDA
 """
 function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, kwargs...)
     builder = circuit.builder
@@ -1472,6 +1493,11 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         copyto!(J, -pc.G)
         return nothing
     end
+
+    # Note: Mass matrix pc.C is evaluated at the initial DC operating point and
+    # remains constant during integration. For voltage-dependent capacitance
+    # (junction capacitance), use DAEProblem instead - it rebuilds the C matrix
+    # at each step via fast_rebuild!.
 
     f = SciMLBase.ODEFunction(
         rhs!;

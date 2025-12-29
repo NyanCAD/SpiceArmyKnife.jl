@@ -17,7 +17,7 @@ using VerilogAParser.VerilogACSTParser:
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
     IdentifierPart, Attributes
 using VerilogAParser.VerilogATokenize:
-    Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, is_scale_factor
+    Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, STRING, is_scale_factor
 using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
@@ -69,7 +69,7 @@ function assemble_id_string(id)
     end
 end
 
-kw_to_T(kw::Kind) = kw === REAL ? Float64 : Int
+kw_to_T(kw::Kind) = kw === REAL ? Float64 : kw === STRING ? String : Int
 
 function pins(vm::VANode{VerilogModule})
     plist = vm.port_list
@@ -145,6 +145,7 @@ function make_mna_device(vm::VANode{VerilogModule})
     struct_fields = Any[]
     parameter_names = Set{Symbol}()
     param_defaults = Dict{Symbol, Any}()  # Store parameter default expressions
+    param_types = Dict{Symbol, Type}()    # Store parameter types (Float64, Int, String)
 
     # Find ddx order for derivatives
     ddx_order = Vector{Symbol}()
@@ -153,12 +154,12 @@ function make_mna_device(vm::VANode{VerilogModule})
     # Create scope for translating parameter defaults (undefault_ids=true)
     to_julia_defaults = MNAScope(Set{Symbol}(), Vector{Symbol}(), 0,
         Vector{Pair{Symbol}}(), Set{Pair{Symbol}}(),
-        Dict{Symbol, Union{Type{Int}, Type{Float64}}}(),
+        Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}(),
         Dict{Symbol, VAFunction}(), true, ddx_order,
         Dict{Symbol, Pair{Symbol,Symbol}}())
 
     internal_nodes = Vector{Symbol}()
-    var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}}}()
+    var_types = Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}()
     var_inits = Dict{Symbol, Any}()  # Store variable initialization expressions
     aliases = Dict{Symbol, Symbol}()
 
@@ -185,16 +186,18 @@ function make_mna_device(vm::VANode{VerilogModule})
                     paramname = String(assemble_id_string(param.id))
                     paramsym = Symbol(paramname)
                     push!(parameter_names, paramsym)
+                    param_types[paramsym] = pT  # Store parameter type
                     # Extract default value from param.default_expr
                     if param.default_expr !== nothing
                         # Parse the default expression using the scope
                         param_defaults[paramsym] = to_julia_defaults(param.default_expr)
                     else
-                        param_defaults[paramsym] = 0.0  # Fallback
+                        # Type-appropriate fallback defaults
+                        param_defaults[paramsym] = pT === String ? "" : 0.0
                     end
                     # Use simplest possible field - just type annotation, no default
                     # @kwdef will use the type's default constructor
-                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64}))
+                    field_expr = Expr(:(::), paramsym, :(CedarSim.DefaultOr{$pT}))
                     push!(struct_fields, field_expr)
                     var_types[Symbol(paramname)] = pT
                 end
@@ -302,11 +305,13 @@ function make_mna_device(vm::VANode{VerilogModule})
     end
 
     # Generate variable declarations for non-parameter local vars
-    # Use initialization expression if provided, otherwise default to zero
+    # Use initialization expression if provided, otherwise default to type-appropriate zero value
     local_var_decls = Any[]
     for (name, T) in var_types
         if !(name in parameter_names)
-            init_expr = get(var_inits, name, :(zero($T)))
+            # Type-appropriate default: zero for numeric, "" for String
+            default_init = T === String ? "" : :(zero($T))
+            init_expr = get(var_inits, name, default_init)
             push!(local_var_decls, :(local $name::$T = $init_expr))
         end
     end
@@ -327,7 +332,8 @@ function make_mna_device(vm::VANode{VerilogModule})
     # 1. Build plain struct definition (only real parameters, not aliases)
     struct_body = Expr(:block)
     for paramsym in real_params
-        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{Float64})))
+        pT = get(param_types, paramsym, Float64)
+        push!(struct_body.args, Expr(:(::), paramsym, :(CedarSim.DefaultOr{$pT})))
     end
     struct_def = Expr(:struct, false,
         Expr(:<:, symname, :(VerilogAEnvironment.VAModel)),
@@ -345,7 +351,9 @@ function make_mna_device(vm::VANode{VerilogModule})
         for paramsym in real_params
             # Each parameter: paramsym = mkdefault(default_value)
             # Use the actual default value from the VA parameter declaration
-            default_val = get(param_defaults, paramsym, 0.0)
+            pT = get(param_types, paramsym, Float64)
+            fallback_default = pT === String ? "" : 0.0
+            default_val = get(param_defaults, paramsym, fallback_default)
             push!(kw_params.args, Expr(:kw, paramsym, :(CedarSim.mkdefault($default_val))))
         end
 
@@ -427,7 +435,7 @@ struct MNAScope
     ninternal_nodes::Int
     branch_order::Vector{Pair{Symbol}}
     used_branches::Set{Pair{Symbol}}
-    var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}}}
+    var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}}
     all_functions::Dict{Symbol, VAFunction}
     undefault_ids::Bool
     ddx_order::Vector{Symbol}
@@ -883,39 +891,83 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
         end
     end
 
-    # Current contribution: generate inline contribution stamping
+    # Current contribution: generate inline contribution stamping with full Jacobian
     # This is used when contributions are inside conditionals
     expr = to_julia(cs.assign_expr)
-    n_all_nodes = length(to_julia.node_order)
+    # node_order is [ports; internal_nodes; ground] - exclude ground from Jacobian
+    # Duals are only created for non-ground nodes (ports + internal)
+    all_node_syms = to_julia.node_order
+    n_nonground = length(all_node_syms) - 1  # Exclude ground at end
 
-    # p_node and n_node already set above (handles ground node correctly)
+    # Build the Jacobian extraction code - extract from the INNER JacobianTag Dual
+    # When I_branch is Dual{ContributionTag, Dual{JacobianTag}}, we need value(I_branch) first
+    jac_extract_code = Any[]
+    for k in 1:n_nonground
+        dI_dVk = Symbol("dI_dV", k)
+        push!(jac_extract_code, :($dI_dVk = I_resist isa ForwardDiff.Dual ? ForwardDiff.partials(I_resist, $k) : 0.0))
+    end
 
-    # For contributions inside conditionals, we evaluate and stamp inline
-    # Tag ordering (ContributionTag ≺ Nothing) ensures ContributionTag is always outer
+    # Build Jacobian stamping code
+    jac_stamp_code = Any[]
+    rhs_terms = Any[:I_val]
+    for k in 1:n_nonground
+        node_sym = all_node_syms[k]
+        k_node = Symbol("_node_", node_sym)
+        dI_dVk = Symbol("dI_dV", k)
+        V_k = Symbol("V_", k)
+
+        # Stamp Jacobian into G matrix
+        push!(jac_stamp_code, quote
+            if $p_node != 0 && $k_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $p_node, $k_node, $dI_dVk)
+            end
+            if $n_node != 0 && $k_node != 0
+                CedarSim.MNA.stamp_G!(ctx, $n_node, $k_node, -$dI_dVk)
+            end
+        end)
+
+        # Build RHS terms: I_val - sum(dI/dVk * Vk)
+        push!(rhs_terms, :(- $dI_dVk * $V_k))
+    end
+
+    rhs_expr = Expr(:call, :+, rhs_terms...)
+
+    # For contributions inside conditionals, we evaluate and stamp inline with full Jacobian
+    # Handle nested Duals: ContributionTag wraps JacobianTag when ddt() is used
     return quote
         # Contribution I($p_sym, $n_sym) <+ ...
         let I_branch = $expr
+            # Extract value and the resistive Dual (for Jacobian extraction)
+            # ContributionTag wraps the JacobianTag Dual - we need to unwrap it
+            local I_resist
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
-                # Has ddt: extract from ContributionTag wrapper
-                I_val = ForwardDiff.value(ForwardDiff.value(I_branch))
-                q_val = ForwardDiff.value(ForwardDiff.partials(I_branch, 1))
+                # Has ddt: ContributionTag outer, JacobianTag inner
+                I_resist = ForwardDiff.value(I_branch)  # Inner Dual{JacobianTag}
+                I_val = ForwardDiff.value(I_resist)
             elseif I_branch isa ForwardDiff.Dual
-                # Pure resistive: just voltage dual
+                # Pure resistive: just voltage dual (JacobianTag)
+                I_resist = I_branch
                 I_val = ForwardDiff.value(I_branch)
-                q_val = 0.0
             else
                 # Scalar result
+                I_resist = I_branch
                 I_val = Float64(I_branch)
-                q_val = 0.0
             end
 
-            # Stamp RHS (simplified - no Jacobian for conditional contributions)
-            # Full Jacobian stamping is in generate_mna_stamp_method_nterm
-            if $p_node != 0
-                CedarSim.MNA.stamp_b!(ctx, $p_node, -I_val)
-            end
-            if $n_node != 0
-                CedarSim.MNA.stamp_b!(ctx, $n_node, I_val)
+            # Extract Jacobian partials from the resistive Dual (JacobianTag)
+            $(jac_extract_code...)
+
+            # Stamp Jacobian into G matrix
+            $(jac_stamp_code...)
+
+            # Stamp RHS using Newton companion model
+            let Ieq = $rhs_expr
+                if $p_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $p_node, -Ieq)
+                end
+                if $n_node != 0
+                    CedarSim.MNA.stamp_b!(ctx, $n_node, Ieq)
+                end
             end
         end
     end
@@ -1232,6 +1284,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # 1. Don't use `local` - variables need to be visible in outer scope for stamp_code
     # 2. Initialize with Float64 first (for short-circuit condition evaluation)
     # 3. Integer variables stay as Int (for control flow - booleans, counters)
+    # 4. String variables stay as String (for parameter comparisons)
     first_port = port_args[1]
     for decl in local_var_decls
         # Convert `local name::T = init_expr` appropriately
@@ -1242,13 +1295,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 rhs = inner.args[2]
                 if lhs isa Expr && lhs.head == :(::)
                     name = lhs.args[1]
-                    var_type = lhs.args[2]  # Type annotation (Int or Float64)
+                    var_type = lhs.args[2]  # Type annotation (Int, Float64, or String)
 
-                    # Check if this is an integer type (control flow variable)
+                    # Check type and handle appropriately
                     is_integer_type = var_type == :Int || var_type == Int
+                    is_string_type = var_type == :String || var_type == String
 
                     if is_integer_type
                         # Integer variables: keep as scalar, don't promote
+                        push!(local_var_init.args, :($name = $rhs))
+                    elseif is_string_type
+                        # String variables: keep as String, use the init value directly
                         push!(local_var_init.args, :($name = $rhs))
                     elseif rhs isa Expr && rhs.head == :call && rhs.args[1] == :zero
                         # zero() call - use 0.0 for initial value
@@ -1266,8 +1323,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 name = inner.args[1]
                 var_type = inner.args[2]
                 is_integer_type = var_type == :Int || var_type == Int
+                is_string_type = var_type == :String || var_type == String
                 if is_integer_type
                     push!(local_var_init.args, :($name = 0))
+                elseif is_string_type
+                    push!(local_var_init.args, :($name = ""))
                 else
                     push!(local_var_init.args, :($name = 0.0))
                 end
@@ -1653,10 +1713,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
+    # NOTE: Using _sim_mode_ instead of mode to avoid conflicts with VA parameter names
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     t::Real=0.0, mode::Symbol=:dcop, x::AbstractVector=Float64[],
+                                     t::Real=0.0, _sim_mode_::Symbol=:dcop, x::AbstractVector=Float64[],
                                      spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
             $(params_to_locals...)
             $(function_defs...)
@@ -1712,7 +1773,7 @@ function make_mna_module(va::VANode)
     device_expr = CedarSim.make_mna_device(vamod)
 
     Expr(:toplevel, :(baremodule $s
-        using Base: AbstractVector, Real, Symbol, Float64, Int, isempty, max, zeros, zero, length
+        using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
         using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
         import Base  # For getproperty override in aliasparam
         import ..CedarSim

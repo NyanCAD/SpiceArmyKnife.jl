@@ -119,6 +119,11 @@ vaconvert(::Type{Int}, x::Integer) = x
 vaconvert(T::Type{Int}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
 vaconvert(T::Type{Int}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
 
+# String parameter support
+vaconvert(::Type{Base.String}, x::Base.String) = x
+vaconvert(T::Type{Base.String}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
+vaconvert(T::Type{Base.String}, x::CedarSim.DefaultOr) = CedarSim.DefaultOr(vaconvert(T, x.val), x.is_default)
+
 export var"$simparam"
 
 var"$simparam"(param) = CedarSim.undefault(Base.getproperty(CedarSim.spec[], Symbol(param)))

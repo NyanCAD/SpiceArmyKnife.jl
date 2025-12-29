@@ -144,9 +144,10 @@ Returns an MNASystem ready for analysis.
 
 # Note on Explicit Zeros
 The assembled sparse matrices have explicit zeros removed via `dropzeros!`.
-This is important for correct detection of differential vs algebraic variables
-in DAE solvers like IDA. VA devices may stamp 0.0 values into matrices, which
-would otherwise cause false positives in differential variable detection.
+This is a safety net for correct detection of differential vs algebraic variables
+in DAE solvers like IDA. The primary prevention is in `stamp_contribution!` which
+skips C matrix stamps for devices without reactive (ddt) components. The dropzeros!
+here catches any remaining edge cases.
 
 # Example
 ```julia

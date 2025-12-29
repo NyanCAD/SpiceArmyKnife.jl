@@ -161,11 +161,18 @@ function stamp_contribution!(
     stamp_G!(ctx, n, p, -I_jac_p)
     stamp_G!(ctx, n, n, -I_jac_n)
 
-    # Stamp capacitance (Jacobian of charge)
-    stamp_C!(ctx, p, p,  q_jac_p)
-    stamp_C!(ctx, p, n,  q_jac_n)
-    stamp_C!(ctx, n, p, -q_jac_p)
-    stamp_C!(ctx, n, n, -q_jac_n)
+    # Only stamp capacitance if there are non-zero charge derivatives.
+    # This avoids polluting the C matrix with explicit zeros from devices
+    # that have no reactive (ddt) components, which would confuse DAE solvers'
+    # differential variable detection. Devices WITH ddt() always have non-zero
+    # charge derivatives. Devices WITHOUT ddt() have zero derivatives and
+    # we skip stamping them entirely.
+    if q_jac_p != 0.0 || q_jac_n != 0.0
+        stamp_C!(ctx, p, p,  q_jac_p)
+        stamp_C!(ctx, p, n,  q_jac_n)
+        stamp_C!(ctx, n, p, -q_jac_p)
+        stamp_C!(ctx, n, n, -q_jac_n)
+    end
 
     # Stamp RHS using Newton companion model
     # For nonlinear I = f(V), the linearization at operating point V0 is:

@@ -526,14 +526,14 @@ iteration, ensuring correct handling of nonlinear devices.
 - `tspan`: Time span for simulation `(t0, tf)`
 - `solver`: Solver algorithm (default: IDA with tuned parameters for circuits)
 - `abstol`, `reltol`: Solver tolerances
-- `explicit_jacobian`: Use explicit Jacobian (default: false for DAE solvers)
+- `explicit_jacobian`: Use explicit Jacobian (default: true for performance)
 
 # Default IDA Configuration
 The default IDA solver is configured for circuit simulation with:
 - `max_error_test_failures=20`: More retries for difficult points (e.g., t=0 with
   time-dependent sources). The standard default of 7 is often too low.
 - `max_nonlinear_iters=10`: More Newton iterations for nonlinear devices.
-- `explicit_jacobian=false`: Safer for time-dependent sources.
+- For circuits with time-dependent sources (SIN, PWL), use `explicit_jacobian=false`.
 
 # Example
 ```julia
@@ -559,12 +559,11 @@ function tran!(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real};
 end
 
 # DAE solver dispatch (IDA, DFBDF, etc.)
-# Note: explicit_jacobian defaults to false for better robustness with time-dependent sources.
-# Time-dependent sources (SIN, PWL, etc.) cause the residual to change with t, which can
-# confuse IDA's initialization when using an explicit Jacobian computed at t=0.
+# Note: explicit_jacobian defaults to true for performance. Set to false for circuits
+# with time-dependent sources (SIN, PWL, etc.) if you encounter initialization issues.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, explicit_jacobian=false,
+                        abstol=1e-10, reltol=1e-8, explicit_jacobian=true,
                         initializealg=nothing, kwargs...)
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
     # Use initializealg if provided, otherwise let the solver use its default

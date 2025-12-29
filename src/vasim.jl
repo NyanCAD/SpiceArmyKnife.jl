@@ -2145,12 +2145,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Generate unrolled stamping code
         # Result structure depends on whether va_ddt() was called:
         #
-        # 1. Pure resistive (no ddt): Dual{Nothing}(I, dI/dV₁, ..., dI/dVₙ)
+        # 1. Pure resistive (no ddt): Dual{JacobianTag}(I, dI/dV₁, ..., dI/dVₙ)
         # 2. Has ddt (pure or mixed): Dual{ContributionTag}(resist_dual, react_dual)
-        #    where resist_dual = Dual{Nothing}(I, dI/dV...) and react_dual = Dual{Nothing}(q, dq/dV...)
+        #    where resist_dual = Dual{JacobianTag}(I, dI/dV...) and react_dual = Dual{JacobianTag}(q, dq/dV...)
         # 3. Scalar: constant value (e.g., Ids=0 in cutoff)
         #
-        # Tag ordering (ContributionTag ≺ Nothing) guarantees ContributionTag is always
+        # Tag ordering (JacobianTag ≺ ContributionTag) guarantees ContributionTag is always
         # the outer wrapper when present. No need to check for reversed nesting.
         branch_stamp = quote
             # Evaluate the branch current
@@ -2158,8 +2158,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
             if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
                 # Has ddt: ContributionTag wraps voltage duals
-                I_resist = ForwardDiff.value(I_branch)       # Dual{Nothing} for I and ∂I/∂V
-                I_react = ForwardDiff.partials(I_branch, 1)  # Dual{Nothing} for q and ∂q/∂V
+                I_resist = ForwardDiff.value(I_branch)       # Dual{JacobianTag} for I and ∂I/∂V
+                I_react = ForwardDiff.partials(I_branch, 1)  # Dual{JacobianTag} for q and ∂q/∂V
 
                 I_val = ForwardDiff.value(I_resist)
                 $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
@@ -2304,7 +2304,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Create dual with partials: (0,...,1,...,0) where 1 is at position i
         partials_tuple = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
         push!(dual_creation.args,
-            :($node_sym = Dual{Nothing}($(Symbol("V_", i)), $partials_tuple...)))
+            :($node_sym = Dual{CedarSim.MNA.JacobianTag}($(Symbol("V_", i)), $partials_tuple...)))
     end
 
     # Generate branch current extraction for named branches

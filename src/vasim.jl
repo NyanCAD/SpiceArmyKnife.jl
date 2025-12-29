@@ -1851,6 +1851,18 @@ When called without `into`, returns the expression for manual evaluation.
 - `into`: Target module to define the device module in (for precompilation)
 - `file`: Path to the Verilog-A file
 
+# Alternative: VAFile + Base.include
+
+The existing pattern also works and is equivalent:
+```julia
+using RelocatableFolders
+const device_va = @path joinpath(@__DIR__, "device.va")
+Base.include(@__MODULE__, VAFile(device_va))
+```
+
+This is what packages like BSIM4.jl use. The difference is that `load_mna_va_module`
+returns the created module for convenience.
+
 # Example (Device package usage - enables precompilation)
 ```julia
 module BSIM4

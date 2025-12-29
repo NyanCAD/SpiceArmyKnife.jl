@@ -165,6 +165,45 @@ typical.inv_x1_mna_builder(lens, spec, ctx, inp, out, vdd, vss, (;);
 | Return type | Nothing (macro side-effects) | NamedTuple of modules |
 | Subcircuit nesting | Handled by macro expansion | Builder calls builder |
 
+## VA Device Package Precompilation
+
+For pure Verilog-A device packages like BSIM4.jl, there are two equivalent approaches:
+
+### Existing Pattern (VAFile + Base.include)
+
+This is what BSIM4.jl currently uses:
+
+```julia
+module BSIM4
+    using RelocatableFolders
+    using CedarSim
+
+    const bsim4_va = @path joinpath(@__DIR__, "bsim4.va")
+    Base.include(@__MODULE__, VAFile(bsim4_va))
+
+    export bsim4
+end
+```
+
+### New Pattern (load_mna_va_module)
+
+The new convenience function returns the created module:
+
+```julia
+module BSIM4
+    using CedarSim
+
+    const bsim4_mod = CedarSim.load_mna_va_module(@__MODULE__,
+        joinpath(@__DIR__, "bsim4.va"))
+    using .bsim4_mod: bsim4
+
+    export bsim4
+end
+```
+
+Both patterns enable precompilation. The existing `VAFile` pattern is already used by
+device packages and works correctly.
+
 ## Conclusion
 
 The MNA backend now supports full PDK precompilation through `load_mna_modules()`. PDK packages can:
@@ -173,5 +212,9 @@ The MNA backend now supports full PDK precompilation through `load_mna_modules()
 2. Get precompiled builder functions for each subcircuit
 3. Export builders for downstream use
 4. Use `PrecompileTools` workloads to compile specific instantiations
+
+For VA device packages, the existing `Base.include(@__MODULE__, VAFile(path))` pattern
+already works. The new `load_mna_va_module()` function provides a convenience wrapper
+that returns the created module.
 
 The key difference from DAECompiler is that MNA uses explicit builder functions instead of macros, providing clearer semantics and easier debugging.

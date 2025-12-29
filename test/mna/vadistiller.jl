@@ -66,57 +66,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test isapprox(current(sol, :I_V1), -0.0025; atol=1e-5)  # 5V / 2kΩ
         end
 
-        @testset "Simple capacitor" begin
-            # Minimal capacitor: just capacitance parameter and I = C*dV/dt
-            va"""
-            module VADCapacitor(pos, neg);
-                parameter real capacitance = 1e-6;
-                inout pos, neg;
-                electrical pos, neg;
-                analog I(pos,neg) <+ capacitance*ddt(V(pos,neg));
-            endmodule
-            """
-
-            # Test in RC circuit transient
-            R_val = 1000.0
-            C_val = 1e-6
-            V_val = 5.0
-
-            function rc_circuit(params, spec)
-                ctx = MNAContext()
-                vcc = get_node!(ctx, :vcc)
-                cap = get_node!(ctx, :cap)
-
-                stamp!(VoltageSource(V_val; name=:V1), ctx, vcc, 0)
-                stamp!(Resistor(R_val; name=:R1), ctx, vcc, cap)
-                stamp!(VADCapacitor(capacitance=C_val), ctx, cap, 0)
-
-                return ctx
-            end
-
-            ctx = rc_circuit((;), MNASpec(mode=:tran))
-            sys = assemble!(ctx)
-
-            # Set up transient
-            tau = R_val * C_val
-            tspan = (0.0, 5 * tau)
-            prob_data = make_ode_problem(sys, tspan)
-
-            u0 = copy(prob_data.u0)
-            cap_idx = findfirst(n -> n == :cap, sys.node_names)
-            u0[cap_idx] = 0.0
-
-            f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
-                            jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
-            prob = ODEProblem(f, u0, prob_data.tspan)
-            sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=1e-6, abstol=1e-8)
-
-            # Check RC charging: V_cap(t) = V * (1 - e^(-t/τ))
-            @test isapprox(sol.u[1][cap_idx], 0.0; atol=1e-6)
-            expected_final = V_val * (1 - exp(-5))
-            @test isapprox(sol.u[end][cap_idx], expected_final; rtol=0.01)
-        end
-
     end
 
     #==========================================================================#

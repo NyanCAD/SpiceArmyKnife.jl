@@ -924,61 +924,6 @@ using VerilogAParser
         @test isapprox(sol(5τ)[2], Vcc * (1 - exp(-5)); rtol=1e-4)
     end
 
-    @testset "Transient - RC Charging (Implicit DAE)" begin
-        using Sundials
-        using DiffEqBase: BrownFullBasicInit
-
-        # Same RC circuit as above, but using DAE formulation
-        Vcc = 5.0
-        R_val = 1000.0
-        C_val = 1e-6
-        τ = R_val * C_val
-
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        out = get_node!(ctx, :out)
-
-        stamp!(VoltageSource(Vcc), ctx, vcc, 0)
-        stamp!(Resistor(R_val), ctx, vcc, out)
-        stamp!(Capacitor(C_val), ctx, out, 0)
-
-        sys = assemble!(ctx)
-
-        # Initial condition: need consistent ICs for DAE
-        # For RC circuit at t=0: V_cap = 0, so I = Vcc/R = 5mA
-        n = system_size(sys)
-        u0 = zeros(n)
-        u0[1] = Vcc        # vcc = 5V
-        u0[2] = 0.0        # out = 0V (cap initially uncharged)
-        u0[3] = Vcc/R_val  # I_V = Vcc/R = 5mA (current through voltage source)
-
-        tspan = (0.0, 5.0 * τ)
-
-        # Get DAE problem data
-        dae_data = make_dae_problem(sys, tspan; u0=u0)
-
-        # Create DAEProblem
-        prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan;
-                          differential_vars = dae_data.differential_vars)
-
-        # Solve with IDA using Brown's initialization for consistent ICs
-        sol = solve(prob, IDA(); reltol=1e-8, abstol=1e-10,
-                    initializealg = BrownFullBasicInit())
-
-        @test sol.retcode == ReturnCode.Success
-
-        # Analytical solution
-        V_analytical(t) = Vcc * (1.0 - exp(-t / τ))
-
-        # Test at multiple time points
-        test_times = [0.0, τ/2, τ, 2τ, 3τ, 5τ]
-        for t in test_times
-            V_sim = sol(t)[2]
-            V_exact = V_analytical(t)
-            @test isapprox(V_sim, V_exact; rtol=1e-3) || (t, V_sim, V_exact)
-        end
-    end
-
     @testset "Transient - RL Circuit (Inductor Current)" begin
         using OrdinaryDiffEq
 

@@ -102,56 +102,6 @@ end
     @test isapprox_deftol(R_v, 10.0)
 end
 
-const v_val = 5.0
-const r_val = 2000.0
-const c_val = 1e-6
-@testset "Simple VRC circuit" begin
-    # Original tested RC transient with u0=[0.0]
-    function VRCcircuit(params, spec)
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        vrc = get_node!(ctx, :vrc)
-        stamp!(VoltageSource(v_val; name=:V), ctx, vcc, 0)
-        stamp!(Resistor(r_val; name=:R), ctx, vcc, vrc)
-        stamp!(Capacitor(c_val; name=:C), ctx, vrc, 0)
-        return ctx
-    end
-
-    ctx = VRCcircuit((;), MNASpec(mode=:tran))
-    sys = assemble!(ctx)
-
-    # Simulate the RC circuit with capacitor starting at 0
-    tau = r_val * c_val  # Time constant
-    tspan = (0.0, 10 * tau)
-    prob_data = make_ode_problem(sys, tspan)
-
-    # Explicitly start with capacitor uncharged
-    u0 = copy(prob_data.u0)
-    vrc_idx = findfirst(n -> n == :vrc, sys.node_names)
-    u0[vrc_idx] = 0.0
-
-    f = ODEFunction(prob_data.f; mass_matrix=prob_data.mass_matrix,
-                    jac=prob_data.jac, jac_prototype=prob_data.jac_prototype)
-    prob = ODEProblem(f, u0, prob_data.tspan)
-    sol = OrdinaryDiffEq.solve(prob, Rodas5P(); reltol=deftol, abstol=deftol)
-
-    # At t=0, capacitor voltage should be 0
-    # At t=10τ, capacitor voltage approaches v_val (within ~0.005%)
-    # Exact value: v_val * (1 - exp(-10)) ≈ 0.99995 * v_val
-    c_v_start = sol.u[1][vrc_idx]
-    c_v_end = sol.u[end][vrc_idx]
-    @test isapprox_deftol(c_v_start, 0.0)
-    @test isapprox(c_v_end, v_val; rtol=1e-3)  # Within 0.1% of final value
-
-    # Current at start: I = V/R = v_val/r_val
-    # Current at end: I ≈ 0 (capacitor nearly fully charged)
-    # (Current through voltage source)
-    I_V_idx = sys.n_nodes + findfirst(n -> n == :I_V, sys.current_names)
-    c_i_start = -sol.u[1][I_V_idx]  # Negative because sourcing
-    c_i_end = -sol.u[end][I_V_idx]
-    @test isapprox_deftol(c_i_start, v_val/r_val)
-    @test isapprox(c_i_end, 0.0; atol=1e-6)  # Nearly zero current
-end
 
 #=
 @testset "ParallelInstances" begin

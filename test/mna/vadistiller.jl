@@ -1498,8 +1498,23 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 true
             end
 
-            # Simulation requires string parameter support (version = "4.8.3")
-            # For now, just verify code generation works
+            # Test string parameter support: version field should be DefaultOr{String}
+            @test fieldtype(sp_bsim4v8, :version) == CedarSim.DefaultOr{String}
+
+            # Test default value is correct
+            @test begin
+                dev = sp_bsim4v8()
+                dev.version.val == "4.8.3" && dev.version.is_default
+            end
+
+            # Test custom string parameter value
+            @test begin
+                dev = sp_bsim4v8(version="4.8.0")
+                dev.version.val == "4.8.0" && !dev.version.is_default
+            end
+
+            # Full simulation still has issues with nested Duals in complex models
+            # (many internal nodes cause Jacobian extraction bounds errors)
             @test_broken begin
                 function sp_bsim4v8_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
@@ -1517,6 +1532,92 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 sol = solve_dc(sp_bsim4v8_circuit, (;), MNASpec())
                 true
+            end
+        end
+
+        @testset "String parameter simulation" begin
+            # Test a simple VA module with string parameters to verify full simulation works
+            va"""
+            module StringResistor(p, n);
+                parameter string mode = "normal";
+                parameter real R = 1000.0;
+                inout p, n;
+                electrical p, n;
+                analog begin
+                    if (mode == "normal")
+                        I(p,n) <+ V(p,n)/R;
+                    else if (mode == "double")
+                        I(p,n) <+ V(p,n)/(2.0*R);
+                    else
+                        I(p,n) <+ V(p,n)/(0.5*R);
+                    end
+                endmodule
+            """
+
+            # Test struct field types
+            @test fieldtype(StringResistor, :mode) == CedarSim.DefaultOr{String}
+            @test fieldtype(StringResistor, :R) == CedarSim.DefaultOr{Float64}
+
+            # Test default values
+            @test begin
+                dev = StringResistor()
+                dev.mode.val == "normal" && dev.mode.is_default
+            end
+
+            # Test "normal" mode (R = 1000) - voltage divider
+            @test begin
+                function circuit_normal(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    mid = get_node!(ctx, :mid)
+
+                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(circuit_normal, (;), MNASpec())
+                isapprox(voltage(sol, :mid), 2.5; atol=0.01)
+            end
+
+            # Test "double" mode (effective R = 2000)
+            @test begin
+                function circuit_double(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    mid = get_node!(ctx, :mid)
+
+                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                    stamp!(StringResistor(mode="double", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(circuit_double, (;), MNASpec())
+                # R_top_eff = 2k, R_bot = 1k: V_mid = 5 * 1/(1+2) = 5/3 ≈ 1.667V
+                isapprox(voltage(sol, :mid), 5.0/3; atol=0.01)
+            end
+
+            # Test "half" mode (effective R = 500)
+            @test begin
+                function circuit_half(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vcc = get_node!(ctx, :vcc)
+                    mid = get_node!(ctx, :mid)
+
+                    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
+                    stamp!(StringResistor(mode="half", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(circuit_half, (;), MNASpec())
+                # R_top_eff = 0.5k, R_bot = 1k: V_mid = 5 * 1/(1+0.5) = 5/1.5 ≈ 3.333V
+                isapprox(voltage(sol, :mid), 5.0/1.5; atol=0.01)
             end
         end
 

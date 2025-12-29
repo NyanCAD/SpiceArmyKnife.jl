@@ -9,7 +9,7 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, ContributionTag
+using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, ContributionTag, JacobianTag
 using CedarSim.MNA: VoltageSource, Resistor  # Use MNA versions explicitly
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq
@@ -28,7 +28,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test partials(result, 1) == 5.0  # coefficient of s
 
         # Test with Dual input (for nested differentiation)
-        x_dual = Dual{Nothing}(3.0, 1.0)
+        x_dual = Dual{JacobianTag}(3.0, 1.0)
         result2 = va_ddt(x_dual)
         @test result2 isa Dual{ContributionTag}
         @test value(result2) == 0.0  # s*x at s=0

@@ -16,7 +16,7 @@
 import ForwardDiff
 using ForwardDiff: Dual, value, partials, Tag
 
-export va_ddt, stamp_contribution!, ContributionTag
+export va_ddt, stamp_contribution!, ContributionTag, JacobianTag
 
 #==============================================================================#
 # S-Dual for ddt() (time derivative in Laplace domain)
@@ -28,17 +28,49 @@ export va_ddt, stamp_contribution!, ContributionTag
 Tag type for ForwardDiff duals used in VA contribution evaluation.
 Distinguishes contribution duals from other ForwardDiff usage.
 
-ContributionTag is defined to have lower precedence than all other tags,
+ContributionTag is defined to have the highest precedence among our tags,
 so it becomes the outermost dual when nested with voltage duals.
 """
 struct ContributionTag end
 
-# Define tag ordering: ContributionTag has HIGHER precedence than all other tags
-# In ForwardDiff, A ≺ B means A is "inner" (lower precedence), B is "outer" (higher)
-# We want ContributionTag to be outer, so other tags must be ≺ ContributionTag
-ForwardDiff.:≺(::Type{ContributionTag}, ::Type) = false  # ContributionTag is NOT less than any tag
-ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = true   # All other tags ARE less than ContributionTag
+"""
+    JacobianTag
+
+Tag type for ForwardDiff duals used in voltage Jacobian extraction.
+This is the "inner" dual that carries ∂/∂V partial derivatives.
+
+Precedence ordering: JacobianTag ≺ ContributionTag
+- JacobianTag is inner (lower precedence) - carries voltage partials
+- ContributionTag is outer (higher precedence) - separates resistive/reactive
+
+Both tags are distinct from any external ForwardDiff tags (e.g., sensitivity analysis),
+preventing confusion when duals are passed through from outer contexts.
+"""
+struct JacobianTag end
+
+# Define tag ordering for our two tags:
+# In ForwardDiff, A ≺ B means A is "inner" (lower precedence), B is "outer" (higher precedence)
+#
+# Ordering: External tags ≺ JacobianTag ≺ ContributionTag
+# - ContributionTag is outermost (separates resistive/reactive via va_ddt)
+# - JacobianTag is middle (carries ∂/∂V partials for Jacobian extraction)
+# - External tags (e.g., sensitivity) are innermost
+
+# Self-comparisons: no tag is less than itself
 ForwardDiff.:≺(::Type{ContributionTag}, ::Type{ContributionTag}) = false
+ForwardDiff.:≺(::Type{JacobianTag}, ::Type{JacobianTag}) = false
+
+# Explicit ordering between our two tags
+ForwardDiff.:≺(::Type{JacobianTag}, ::Type{ContributionTag}) = true   # JacobianTag IS inner to ContributionTag
+ForwardDiff.:≺(::Type{ContributionTag}, ::Type{JacobianTag}) = false  # ContributionTag is NOT inner to JacobianTag
+
+# ContributionTag vs external tags: ContributionTag is outermost
+ForwardDiff.:≺(::Type{ContributionTag}, ::Type) = false  # ContributionTag is NOT less than any external tag
+ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = true   # All external tags ARE less than ContributionTag
+
+# JacobianTag vs external tags: JacobianTag is outer to external tags
+ForwardDiff.:≺(::Type{JacobianTag}, ::Type) = false      # JacobianTag is NOT less than external tags
+ForwardDiff.:≺(::Type, ::Type{JacobianTag}) = true       # External tags ARE less than JacobianTag
 
 """
     va_ddt(x)
@@ -182,9 +214,9 @@ result = evaluate_contribution(contrib, 1.0, 0.0)
 """
 function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
     # Create voltage duals for Jacobian computation
-    # Tag Nothing is used; ContributionTag ≺ Nothing ensures ContributionTag is always outer
-    Vp_dual = Dual{Nothing}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
-    Vn_dual = Dual{Nothing}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
+    # JacobianTag ≺ ContributionTag ensures ContributionTag is always outer
+    Vp_dual = Dual{JacobianTag}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
+    Vn_dual = Dual{JacobianTag}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
 
     # Compute contribution with branch voltage
     Vpn_dual = Vp_dual - Vn_dual  # ∂Vpn/∂Vp = 1, ∂Vpn/∂Vn = -1
@@ -193,18 +225,18 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
 
     # Result structure depends on whether va_ddt() was called:
     #
-    # 1. Pure resistive (no ddt): Dual{Nothing}(I, dI/dVp, dI/dVn)
+    # 1. Pure resistive (no ddt): Dual{JacobianTag}(I, dI/dVp, dI/dVn)
     # 2. Has ddt (pure or mixed): Dual{ContributionTag}(resist_dual, react_dual)
-    #    where resist_dual = Dual{Nothing}(I, dI/dVp, dI/dVn)
-    #    and   react_dual  = Dual{Nothing}(q, dq/dVp, dq/dVn)
+    #    where resist_dual = Dual{JacobianTag}(I, dI/dVp, dI/dVn)
+    #    and   react_dual  = Dual{JacobianTag}(q, dq/dVp, dq/dVn)
     #
-    # Tag ordering (ContributionTag ≺ Nothing) guarantees ContributionTag is always
+    # Tag ordering (JacobianTag ≺ ContributionTag) guarantees ContributionTag is always
     # the outer wrapper when present. No need to check for reversed nesting.
 
     if result isa ForwardDiff.Dual{ContributionTag}
         # Has ddt: ContributionTag wraps voltage duals
-        resist_dual = value(result)       # Dual{Nothing} for I and ∂I/∂V
-        react_dual = partials(result, 1)  # Dual{Nothing} for q and ∂q/∂V
+        resist_dual = value(result)       # Dual{JacobianTag} for I and ∂I/∂V
+        react_dual = partials(result, 1)  # Dual{JacobianTag} for q and ∂q/∂V
 
         I = Float64(value(resist_dual))
         dI_dVp = Float64(partials(resist_dual, 1))
@@ -378,15 +410,15 @@ result = evaluate_charge_contribution(q_fn, 0.3, 0.0)
 """
 function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
     # Create voltage duals for Jacobian computation
-    Vp_dual = Dual{Nothing}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
-    Vn_dual = Dual{Nothing}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
+    Vp_dual = Dual{JacobianTag}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
+    Vn_dual = Dual{JacobianTag}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
 
     # Compute q with branch voltage
     Vpn_dual = Vp_dual - Vn_dual  # ∂Vpn/∂Vp = 1, ∂Vpn/∂Vn = -1
 
     result = q_fn(Vpn_dual)
 
-    # Result should be Dual{Nothing}(q, dq/dVp, dq/dVn) - no ContributionTag
+    # Result should be Dual{JacobianTag}(q, dq/dVp, dq/dVn) - no ContributionTag
     q = Float64(value(result))
     dq_dVp = Float64(partials(result, 1))
     dq_dVn = Float64(partials(result, 2))
@@ -530,14 +562,14 @@ function stamp_multiport_charge!(
     # Each dual has partials for all N nodes
     V_duals = ntuple(Val(N)) do i
         partials = ntuple(j -> i == j ? 1.0 : 0.0, Val(N))
-        Dual{Nothing}(V[i], partials...)
+        Dual{JacobianTag}(V[i], partials...)
     end
 
     # Evaluate all charges
     q_duals = q_fn(V_duals...)
 
     # Extract values and stamp
-    # Result qi should be Dual{Nothing}(qi, ∂qi/∂V1, ..., ∂qi/∂VN) - no ContributionTag
+    # Result qi should be Dual{JacobianTag}(qi, ∂qi/∂V1, ..., ∂qi/∂VN) - no ContributionTag
     for i in 1:N
         qi = q_duals[i]
         node_i = nodes[i]

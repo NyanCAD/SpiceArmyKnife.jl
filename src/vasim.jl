@@ -1364,6 +1364,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         #
         # Tag ordering (JacobianTag ≺ ContributionTag) guarantees ContributionTag is always
         # the outer wrapper when present. No need to check for reversed nesting.
+        #
+        # IMPORTANT: has_reactive is set based on TYPE, not value. This ensures
+        # consistent COO structure for precompilation regardless of operating point.
         branch_stamp = quote
             # Evaluate the branch current
             I_branch = $sum_expr
@@ -1378,6 +1381,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
                 q_val = ForwardDiff.value(I_react)
                 $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
+                has_reactive = true
 
             elseif I_branch isa ForwardDiff.Dual
                 # Pure resistive: just voltage dual, no ContributionTag
@@ -1385,6 +1389,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                has_reactive = false
 
             else
                 # Scalar result (constant contribution)
@@ -1392,6 +1397,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
                 q_val = 0.0
                 $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                has_reactive = false
             end
         end
 
@@ -1413,12 +1419,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
         # Stamp reactive Jacobians (capacitances) into C matrix
         # Same sign convention as G matrix
-        # Only stamp non-zero values to avoid polluting C with explicit zeros
+        # Only stamp if device has reactive components (determined by TYPE, not value)
+        # This ensures consistent COO structure for precompilation
         for k in 1:n_all_nodes
             k_node = all_node_params[k]
             dq_sym = Symbol("dq_dV", k)
             push!(branch_stamp.args, quote
-                if $dq_sym != 0.0
+                if has_reactive
                     if $p_node != 0 && $k_node != 0
                         CedarSim.MNA.stamp_C!(ctx, $p_node, $k_node, $dq_sym)
                     end
@@ -1591,10 +1598,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Stamp C matrix for reactive part: V = L*dI/dt
                 # Voltage equation: V_p - V_n - L*dI/dt = 0
                 # This stamps -L into C[I_var, I_var]
-                # Only stamp if non-zero to avoid polluting C with explicit zeros
-                if V_react_val != 0.0
-                    CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
-                end
+                # Always stamp - we're inside ContributionTag branch so device has ddt()
+                CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
             else
                 # Pure resistive voltage
                 V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)

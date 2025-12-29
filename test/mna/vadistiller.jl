@@ -1688,6 +1688,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @testset "BJT common-emitter amplifier transient" begin
             # CE amplifier with sine input on base
             # Note: sp_bjt is already loaded and exported in Tier 6
+            # Uses IDA (default) since this is a purely algebraic circuit (no capacitors)
 
             function ce_amp_transient(params, spec; x=Float64[])
                 ctx = MNAContext()
@@ -1719,8 +1720,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(ce_amp_transient;
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
-            # Use explicit_jacobian=false for circuits with time-dependent sources (SIN)
-            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            # Use IDA with explicit_jacobian=false for circuits with time-dependent sources
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6, explicit_jacobian=false)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))

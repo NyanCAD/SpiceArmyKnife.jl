@@ -660,14 +660,20 @@ end
     detect_differential_vars_from_C(C::SparseMatrixCSC, n::Int) -> BitVector
 
 Determine which variables are differential from the C matrix structure.
+
+Correctly handles explicit zeros in the sparse matrix by checking actual values.
 """
 function detect_differential_vars_from_C(C::SparseMatrixCSC, n::Int)
     diff_vars = falses(n)
+    nzvals = nonzeros(C)
 
     for j in 1:n
         for k in nzrange(C, j)
-            i = rowvals(C)[k]
-            diff_vars[i] = true
+            # Only mark as differential if the value is actually nonzero
+            if abs(nzvals[k]) > 1e-30
+                i = rowvals(C)[k]
+                diff_vars[i] = true
+            end
         end
     end
 

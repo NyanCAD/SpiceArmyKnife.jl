@@ -142,6 +142,13 @@ end
 Assemble the complete MNA system from the context.
 Returns an MNASystem ready for analysis.
 
+# Note on C Matrix Stamping
+C matrix stamping is determined by TYPE, not VALUE. Devices with ddt() terms
+(detected via `Dual{ContributionTag}` type) always stamp into C to maintain
+consistent sparse matrix structure. Devices without ddt() never stamp into C.
+This ensures the COO structure is consistent between precompilation and runtime,
+even when capacitance values happen to be zero at certain operating points.
+
 # Example
 ```julia
 ctx = MNAContext()

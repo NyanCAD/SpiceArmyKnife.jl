@@ -413,9 +413,11 @@ For the ODE formulation: C * dx/dt + G * x = b
 @inline function stamp_C!(ctx::MNAContext, i::Int, j::Int, val)
     (i == 0 || j == 0) && return nothing
     v = extract_value(val)
-    # Note: We do NOT skip zero entries here. For precompilation to work,
+    # Note: For voltage-dependent capacitors, we don't skip zeros because
     # the COO structure must be consistent regardless of operating point.
-    # Zero values are handled correctly by sparse matrix assembly.
+    # Zero values at some operating points are fine - they'll be in the matrix.
+    # However, devices WITHOUT ddt() should not call stamp_C! at all; this is
+    # handled by stamp_contribution! which skips C stamps for pure resistive devices.
     push!(ctx.C_I, i)
     push!(ctx.C_J, j)
     push!(ctx.C_V, v)

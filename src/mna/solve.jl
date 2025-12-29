@@ -1328,16 +1328,28 @@ end
     detect_differential_vars(sys::MNASystem) -> BitVector
 
 Determine which variables are differential from the C matrix structure.
+
+A variable is differential if its corresponding row in C has any nonzero entries.
+This function correctly handles explicit zeros in the sparse matrix by checking
+the actual values, not just structural nonzeros.
+
+Note: Sparse matrices can contain explicit zeros when constructed from COO format.
+For example, a VA device without ddt() terms may stamp 0.0 into C. We must ignore
+these to correctly distinguish algebraic vs differential variables for IDA.
 """
 function detect_differential_vars(sys::MNASystem)
     n = system_size(sys)
     C = sys.C
     diff_vars = falses(n)
+    nzvals = nonzeros(C)
 
     for j in 1:n
         for k in nzrange(C, j)
-            i = rowvals(C)[k]
-            diff_vars[i] = true
+            # Only mark as differential if the value is actually nonzero
+            if abs(nzvals[k]) > 1e-30
+                i = rowvals(C)[k]
+                diff_vars[i] = true
+            end
         end
     end
 

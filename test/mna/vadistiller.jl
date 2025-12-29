@@ -1786,13 +1786,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test vd_t0 < 5.5  # Not above Vdd (allow for numerical tolerance)
         end
 
-        # BJT transient tests are currently broken - DC initialization doesn't converge
-        # TODO: Investigate VADistiller BJT model DC convergence issues
         @testset "BJT common-emitter amplifier transient" begin
-            @test_skip "BJT DC initialization doesn't converge - needs investigation"
-            #=
             # CE amplifier with sine input on base
             # Note: sp_bjt is already loaded and exported in Tier 6
+            # Uses IDA (default) since this is a purely algebraic circuit (no capacitors)
 
             function ce_amp_transient(params, spec; x=Float64[])
                 ctx = MNAContext()
@@ -1824,7 +1821,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(ce_amp_transient;
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
-            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
+            # Use IDA with explicit_jacobian=false for circuits with time-dependent sources
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6, explicit_jacobian=false)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             sys = CedarSim.MNA.assemble!(circuit.builder(circuit.params, circuit.spec; x=Float64[]))
@@ -1850,7 +1848,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 @test vc_t0 > 0.0  # Positive voltage
                 @test vc_t0 < 12.5  # Not above Vcc (12V + margin)
             end
-            =#
         end
 
         @testset "Full-wave rectifier transient" begin
@@ -2030,12 +2027,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test isapprox(vd_rodas, vd_qndf; rtol=0.05)
         end
 
-        # BJT tests are broken - DC initialization doesn't converge with VADistiller model
-        @testset "BJT CE amplifier with Rosenbrock solver" begin
-            @test_skip "BJT DC initialization doesn't converge - needs investigation"
-            #=
-            # BJT + SIN source: only Rosenbrock is reliable
-            # BDF solvers (QNDF, FBDF) can be unstable for BJT with time-varying sources
+        @testset "BJT CE amplifier with SIN source" begin
+            # BJT + SIN source using IDA (pure algebraic - no capacitors)
             function build_ce_amp(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
@@ -2058,14 +2051,15 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
 
-            # Rodas5P handles stiff BJT equations well
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+            # Use default IDA solver (handles algebraic systems well)
+            # Note: explicit_jacobian=false for time-dependent sources
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6, explicit_jacobian=false)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
-            vc_t0 = sol_rodas(T)[3]
-            vc_pos = sol_rodas(T + T/4)[3]
-            vc_neg = sol_rodas(T + 3T/4)[3]
+            vc_t0 = sol(T)[3]
+            vc_pos = sol(T + T/4)[3]
+            vc_neg = sol(T + 3T/4)[3]
 
             # Check for NaN
             @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
@@ -2075,14 +2069,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # CE amplifier inverts signal
             @test vc_pos < vc_neg + 0.5
-            =#
         end
 
         @testset "BJT CE amplifier with DC source" begin
-            @test_skip "BJT DC initialization doesn't converge - needs investigation"
-            #=
-            # BJT circuits are stiff - Rosenbrock methods handle them best
-            # BDF solvers (QNDF, FBDF) and DAE solvers (IDA) can be unstable
+            # BJT circuit with DC source using IDA (pure algebraic - no capacitors)
             function build_ce_dc(params, spec; x=Float64[])
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
@@ -2103,15 +2093,14 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             circuit = MNACircuit(build_ce_dc; Vcc=12.0, Vbase=0.6, Rc=1000.0)
             tspan = (0.0, 1e-3)
 
-            # Rodas5P handles stiff BJT equations reliably
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
+            # Use default IDA solver (handles algebraic systems well)
+            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 0.5e-3
-            vc = sol_rodas(T)[3]
+            vc = sol(T)[3]
             @test !isnan(vc)
             @test vc > 0.0 && vc < 12.5  # Valid range (Vcc=12V)
-            =#
         end
 
     end

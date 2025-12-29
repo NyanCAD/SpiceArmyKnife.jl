@@ -153,7 +153,7 @@ function stamp_contribution!(
     p::Int, n::Int,
     I_val::Real, I_jac_p::Real, I_jac_n::Real,
     q_val::Real, q_jac_p::Real, q_jac_n::Real;
-    Vp::Real=0.0, Vn::Real=0.0
+    Vp::Real=0.0, Vn::Real=0.0, has_reactive::Bool=true
 )
     # Stamp conductance (Jacobian of resistive current)
     stamp_G!(ctx, p, p,  I_jac_p)
@@ -161,11 +161,16 @@ function stamp_contribution!(
     stamp_G!(ctx, n, p, -I_jac_p)
     stamp_G!(ctx, n, n, -I_jac_n)
 
-    # Stamp capacitance (Jacobian of charge)
-    stamp_C!(ctx, p, p,  q_jac_p)
-    stamp_C!(ctx, p, n,  q_jac_n)
-    stamp_C!(ctx, n, p, -q_jac_p)
-    stamp_C!(ctx, n, n, -q_jac_n)
+    # Only stamp capacitance if the device has reactive (ddt) components.
+    # Devices WITHOUT ddt() should not stamp into C at all.
+    # Devices WITH ddt() must always stamp (even if values are zero at this
+    # operating point) to maintain consistent COO structure for precompilation.
+    if has_reactive
+        stamp_C!(ctx, p, p,  q_jac_p)
+        stamp_C!(ctx, p, n,  q_jac_n)
+        stamp_C!(ctx, n, p, -q_jac_p)
+        stamp_C!(ctx, n, n, -q_jac_n)
+    end
 
     # Stamp RHS using Newton companion model
     # For nonlinear I = f(V), the linearization at operating point V0 is:
@@ -245,6 +250,7 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
         q = Float64(value(react_dual))
         dq_dVp = Float64(partials(react_dual, 1))
         dq_dVn = Float64(partials(react_dual, 2))
+        has_reactive = true
 
     elseif result isa ForwardDiff.Dual
         # Pure resistive: just voltage dual, no ContributionTag
@@ -254,6 +260,7 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
         q = 0.0
         dq_dVp = 0.0
         dq_dVn = 0.0
+        has_reactive = false
 
     else
         # Scalar result (constant contribution)
@@ -263,6 +270,7 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
         q = 0.0
         dq_dVp = 0.0
         dq_dVn = 0.0
+        has_reactive = false
     end
 
     return (
@@ -272,6 +280,7 @@ function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
         q = q,
         dq_dVp = dq_dVp,
         dq_dVn = dq_dVn,
+        has_reactive = has_reactive,
     )
 end
 
@@ -321,7 +330,7 @@ function stamp_current_contribution!(
     stamp_contribution!(ctx, p, n,
         result.I, result.dI_dVp, result.dI_dVn,
         result.q, result.dq_dVp, result.dq_dVn;
-        Vp=Vp, Vn=Vn)
+        Vp=Vp, Vn=Vn, has_reactive=result.has_reactive)
 
     return nothing
 end
@@ -491,6 +500,8 @@ function stamp_charge_contribution!(
     result = evaluate_charge_contribution(q_fn, Vp, Vn)
 
     # Stamp capacitance (Jacobian of charge w.r.t. voltages)
+    # Always stamp - this function is explicitly for charge contributions
+    # so it always has reactive components
     stamp_C!(ctx, p, p,  result.dq_dVp)
     stamp_C!(ctx, p, n,  result.dq_dVn)
     stamp_C!(ctx, n, p, -result.dq_dVp)
@@ -578,7 +589,7 @@ function stamp_multiport_charge!(
             for j in 1:N
                 node_j = nodes[j]
                 if node_j != 0
-                    # ∂qi/∂Vj
+                    # ∂qi/∂Vj - always stamp for charge contributions
                     dqi_dVj = Float64(partials(qi, j))
                     stamp_C!(ctx, node_i, node_j, dqi_dVj)
                 end

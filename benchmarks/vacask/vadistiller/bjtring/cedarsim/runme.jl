@@ -14,8 +14,8 @@ using Printf
 using Statistics
 using VerilogAParser
 
-# Load the sp_bjt model from vadistiller
-const vadistiller_path = joinpath(@__DIR__, "..", "..", "..", "models")
+# Load the sp_bjt model from vadistiller (use test models to avoid duplication)
+const vadistiller_path = joinpath(@__DIR__, "..", "..", "..", "..", "..", "test", "vadistiller", "models")
 const bjt_va_path = joinpath(vadistiller_path, "bjt.va")
 
 # Parse and eval the BJT model

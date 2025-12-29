@@ -59,7 +59,7 @@ In `src/spc/codegen.jl`, the `cg_mna_instance!` function needs to:
 
 ### 5. Ring Oscillator (`ring/cedarsim/`)
 - **Blocker**: Requires PSP103 MOSFET VA model
-- **Notes**: Original uses complex MOSFET model from external file
+- **Notes**: PSP103 model now available at `test/vadistiller/models/psp103v4/psp103.va` (needs VerilogA include support)
 
 ### 6. C6288 Multiplier (`c6288/cedarsim/`)
 - **Blocker**: Requires native SPICE MOSFET support
@@ -67,14 +67,15 @@ In `src/spc/codegen.jl`, the `cg_mna_instance!` function needs to:
 
 ### 7. VADistiller C6288 (`vadistiller/c6288/cedarsim/`)
 - **Blocker**: Requires vadistiller-generated MOSFET model
-- **Notes**: Uses MOSFET model from VADistiller
+- **Notes**: Uses MOSFET model - `test/vadistiller/models/mos1.va` or `bsim3v3.va` available
 
 ### 8. JFET Ring (`vadistiller/jfetring/cedarsim/`)
 - **Blocker**: Requires vadistiller-generated JFET model
+- **Notes**: `test/vadistiller/models/jfet1.va` available
 
 ### 9. VADistiller Multiplier (`vadistiller/mul/cedarsim/`)
 - **Blocker**: Requires vadistiller-generated diode model
-- **Notes**: Could potentially use the inline diode from `mul/cedarsim/`
+- **Notes**: `test/vadistiller/models/diode.va` available, or use inline diode from `mul/cedarsim/`
 
 ## Code Changes Made
 
@@ -97,9 +98,15 @@ Changed `mode = spec.mode` to `_sim_mode_ = spec.mode` in all stamp! calls for V
 
 ## VADistiller Models
 
-The VADistiller-generated models are in `benchmarks/vacask/models/`:
-- `diode.va` - SPICE diode model in Verilog-A
-- `bjt.va` - SPICE BJT model in Verilog-A
+The VADistiller-generated models are in `test/vadistiller/models/` (shared with the test suite):
+- `bjt.va` - SPICE BJT model
+- `diode.va` - SPICE diode model
+- `jfet1.va`, `jfet2.va` - JFET models
+- `mos1.va`, `mos2.va`, `mos3.va`, `mos6.va`, `mos9.va` - MOSFET level 1-9 models
+- `bsim3v3.va`, `bsim4v8.va` - BSIM MOSFET models
+- `capacitor.va`, `inductor.va`, `resistor.va` - Basic passive components
+- `mes1.va`, `vdmos.va` - Additional device models
+- `psp103v4/psp103.va` - PSP103 MOSFET model (NXP) with include files
 
 These models use advanced Verilog-A features like `$limit`, `$simparam`, etc. that may require parser/codegen support.
 

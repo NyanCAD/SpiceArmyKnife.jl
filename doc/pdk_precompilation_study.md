@@ -2,202 +2,176 @@
 
 ## Overview
 
-This document analyzes how PDK packages (like GF180MCUPDK.jl) use precompilation and whether the MNA backend can support precompiled PDK modules.
+This document analyzes how PDK packages (like GF180MCUPDK.jl) use precompilation and how the MNA backend supports precompiled PDK modules.
 
-## GF180MCUPDK.jl Precompilation Technique
+## MNA PDK Precompilation API
 
-### Module Structure
+### Primary API: `load_mna_modules(into, file; ...)`
 
-The PDK has a layered structure:
+The MNA backend provides full PDK precompilation support through `load_mna_modules()`:
 
 ```julia
-module GF180MCUPDK
-
-module design
+module MyPDK
     using CedarSim
-    sp"""
-    .include "../model/design.ngspice"
-    """i
-    export cap_mc_skew, fnoicor, mc_skew, ...
-end
 
-module sm141064
-    using CedarSim, BSIM4, ..design
-    path = joinpath(@__DIR__, "../model/sm141064.ngspice")
-    eval(CedarSim.load_spice_modules(path;
-        pdk_include_paths=[dirname(path)],
-        names=["typical", "statistical"],
-        preload=[CedarSim, BSIM4, design],
-        exports=[...]
-    ))
-end
+    # Load PDK at module definition time - enables precompilation
+    const corners = CedarSim.load_mna_modules(@__MODULE__,
+        joinpath(@__DIR__, "pdk.spice"))
 
-# PrecompileTools workload
-@setup_workload begin
-    (;d, g, s, b) = nets()
-    @compile_workload begin
-        @ckt_nfet_03v3(nodes=(g, d, s, b), w=1e-6, l=1e-6)
-        @ckt_pfet_03v3(nodes=(g, d, s, b), w=1e-6, l=1e-6)
-        ...
-    end
-end
+    # corners is a NamedTuple: (typical=Module, fast=Module, slow=Module, ...)
+    # Submodules are now defined: MyPDK.typical, MyPDK.fast, MyPDK.slow
 
+    using .typical: nfet_mna_builder, pfet_mna_builder
+    export nfet_mna_builder, pfet_mna_builder
 end
 ```
 
-### Key Functions
-
-1. **`load_spice_modules(file; ...)`** (`src/spectre.jl:1694`):
-   - Parses PDK SPICE files
-   - Calls `make_spectre_modules()` to generate Julia modules
-
-2. **`make_spectre_modules()`** (`src/spectre.jl:1664`):
-   - Iterates through `.lib` sections
-   - Generates a Julia module for each section
-   - Uses `make_spectre_netlist()` to generate the content
-
-3. **`CedarParseCache`** (`src/spc/cache.jl`):
-   - Caches parsed SPICE/VA files per module
-   - Uses `include_dependency()` for recompilation invalidation
-   - Accessed via `module.var"#cedar_parse_cache#"`
-
-### jlpkg:// Path Convention
-
-SPICE files can reference Julia packages using `jlpkg://`:
-
-```spice
-.LIB "jlpkg://GF180MCUPDK/sm141064.ngspice" typical
-```
-
-Resolution in `src/spc/sema.jl:458-523`:
-1. Extract package name from path
-2. Load the package's parse cache
-3. Use cached sema results or parse fresh
-
-## MNA Codegen Architecture
-
-### Builder Function Pattern
-
-The MNA backend generates builder functions:
+### Function Signatures
 
 ```julia
-function circuit(params, spec::MNASpec)
+# Preferred: eval into target module (for precompilation)
+load_mna_modules(into::Module, file::String;
+    names=nothing,                    # Filter to specific sections
+    pdk_include_paths=String[],       # Include search paths
+    preload=Module[]                  # Extra using statements
+) -> NamedTuple{Symbol, Module}
+
+# Alternative: return expression for manual eval
+load_mna_modules(file::String; ...) -> Expr
+
+# Single section variants
+load_mna_pdk(into::Module, file; section::String, ...) -> Module
+load_mna_pdk(file; section::String, ...) -> Expr
+```
+
+### Generated Builder Functions
+
+For each subcircuit in the PDK, a builder function is generated:
+
+```julia
+# Generated for .SUBCKT nfet_03v3 d g s b W=1e-6 L=180e-9
+function nfet_03v3_mna_builder(lens, spec::MNASpec, ctx::MNAContext,
+                                port_1, port_2, port_3, port_4, parent_params;
+                                w=nothing, l=nothing)
+    # Parameter resolution with lens override support
+    # Device stamping
+    # Return nothing
+end
+```
+
+### Usage in Circuit Construction
+
+```julia
+using MyPDK
+
+function build_circuit(params, spec::MNASpec)
     ctx = MNAContext()
     lens = ParamLens(params)
 
     # Node allocation
-    node_vcc = get_node!(ctx, :vcc)
-    node_out = get_node!(ctx, :out)
+    vdd = get_node!(ctx, :vdd)
+    out = get_node!(ctx, :out)
+    gnd = get_node!(ctx, :gnd)
 
-    # Device stamping
-    stamp!(resistor(1000.0), ctx, spec, node_vcc, node_out)
+    # Use PDK builder
+    MyPDK.typical.nfet_03v3_mna_builder(lens, spec, ctx,
+        out, inp, gnd, gnd, (;);  # ports + parent_params
+        w=1e-6, l=180e-9)          # instance params as kwargs
 
     return ctx
 end
 ```
 
-### Key Codegen Functions
+## Implementation Details
 
-| Function | Location | Purpose |
-|----------|----------|---------|
-| `make_mna_circuit()` | `src/spc/codegen.jl:2343` | Top-level circuit codegen |
-| `codegen_mna!()` | `src/spc/codegen.jl:1989` | Generate builder body |
-| `codegen_mna_subcircuit()` | `src/spc/codegen.jl:2256` | Generate subcircuit builder |
-| `make_mna_device()` | `src/vasim.jl:139` | Generate VA device `stamp!` method |
+### Key Functions in `src/spc/codegen.jl`
 
-### Include/Import Handling
+| Function | Purpose |
+|----------|---------|
+| `load_mna_modules(into, file)` | Parse PDK, eval modules into target, return NamedTuple |
+| `load_mna_modules(file)` | Parse PDK, return expression for manual eval |
+| `load_mna_pdk(...)` | Single-section convenience wrapper |
+| `make_mna_pdk_module(ast; name)` | Generate module expression from AST |
+| `collect_lib_statements(node)` | Find `.LIB` sections in parsed AST |
+| `codegen_mna_subcircuit(sema, name)` | Generate builder function for subcircuit |
 
-The sema phase handles `jlpkg://` imports:
+### Library Section Handling
+
+PDK files typically have multiple library sections for different corners:
+
+```spice
+.LIB typical
+.SUBCKT nfet_03v3 d g s b ...
+...
+.ENDS
+.ENDL typical
+
+.LIB fast
+.SUBCKT nfet_03v3 d g s b ...
+...
+.ENDS
+.ENDL fast
+```
+
+Each section becomes a separate Julia module with its own builder functions.
+
+## GF180MCUPDK.jl Migration Path
+
+### Current Structure (DAECompiler)
 
 ```julia
-# In sema.jl during .LIB/.INCLUDE processing:
-if startswith(str, JLPATH_PREFIX)
-    path = str[sizeof(JLPATH_PREFIX)+1:end]
-    components = splitpath(path)
-    imp = Symbol(components[1])
-    imp_mod = sema_resolve_import(scope, imp)  # Load PDK module
-    parse_cache = imp_mod.var"#cedar_parse_cache#"  # Get its cache
-    # ... merge sema results
+module sm141064
+    using CedarSim, BSIM4
+    eval(CedarSim.load_spice_modules(path; names=["typical"]))
+    # Exports @ckt_nfet_03v3, @ckt_pfet_03v3 macros
 end
 ```
 
-## Comparison: DAECompiler vs MNA
+### Future Structure (MNA)
+
+```julia
+module sm141064
+    using CedarSim, BSIM4
+    const corners = CedarSim.load_mna_modules(@__MODULE__, path;
+        names=["typical", "statistical"])
+    using .typical: nfet_03v3_mna_builder, pfet_03v3_mna_builder
+    export nfet_03v3_mna_builder, pfet_03v3_mna_builder
+end
+```
+
+## Test PDK
+
+A test PDK is provided in `test/testpdk/`:
+
+- `testpdk.spice`: Simple PDK with typical/fast/slow corners using resistor-based models
+- `pdk_test.jl`: Tests for module generation, builder usage, and corner comparison
+
+Example from test:
+```julia
+const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
+
+# Use in circuit
+typical.inv_x1_mna_builder(lens, spec, ctx, inp, out, vdd, vss, (;);
+                           wn=360e-9, wp=720e-9, l=180e-9)
+```
+
+## Comparison: DAECompiler vs MNA PDK APIs
 
 | Aspect | DAECompiler | MNA |
 |--------|-------------|-----|
-| Device API | `@ckt_*` macros | `stamp!()` methods |
-| Subcircuits | Macro expansion | Builder functions |
-| Precompilation | Macros + workload | Builder compilation |
-| PDK structure | Exports macros | Could export builders |
-| Time integration | DAECompiler handles | DifferentialEquations.jl |
-
-## MNA Precompilation Support Assessment
-
-### What Already Works
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| SPICE parsing cache | ✅ | `CedarParseCache` works with MNA |
-| Sema result cache | ✅ | Stored in `spc_cache` dict |
-| VA device generation | ✅ | `make_mna_device()` creates precompilable `stamp!` methods |
-| `jlpkg://` resolution | ✅ | Sema phase resolves and caches |
-
-### What Needs Work
-
-| Component | Status | Issue |
-|-----------|--------|-------|
-| Subcircuit builders | ⚠️ | Generated inline, not exported |
-| PDK module structure | ⚠️ | Creates `@ckt_*` macros, not MNA builders |
-| PrecompileTools workload | ⚠️ | Compiles macro-based API, not MNA API |
-
-## Recommendation
-
-### Option A: Minimal Changes (Recommended)
-
-Use the existing `jlpkg://` infrastructure without modifying PDK packages.
-
-**How it works**:
-- MNA sema already handles `jlpkg://` imports
-- Parse caching provides speedup on repeated use
-- Tests just need to use MNA API instead of DAECompiler API
-
-**Test conversion example**:
-```julia
-# Old (DAECompiler)
-sa = SPICENetlistParser.parsefile(path)
-code = CedarSim.make_spectre_circuit(sa, [dffdir])
-circuit = eval(code)
-sys = CircuitIRODESystem(circuit)
-prob = DAEProblem(sys, nothing, nothing, (0.0, 7e-7))
-sol = solve(prob, IDA())
-
-# New (MNA)
-sa = SpectreNetlistParser.parsefile(path)
-builder_code = CedarSim.make_mna_circuit(sa)
-builder = eval(builder_code)
-sim = MNASim(builder; <params>)
-dae_data = MNA.make_dae_problem(sim; tspan=(0.0, 7e-7))
-prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, dae_data.tspan)
-sol = solve(prob, IDA())
-```
-
-### Option B: Full MNA Precompilation
-
-Add MNA-specific PDK module generation:
-
-1. New `make_mna_modules()` function that exports builder functions
-2. Update PDK packages to use MNA API
-3. PrecompileTools workload for MNA builders
-
-This provides maximum precompilation but requires more changes.
+| Device API | `@ckt_*` macros | `*_mna_builder` functions |
+| Precompilation | `load_spice_modules()` + eval | `load_mna_modules(@__MODULE__, ...)` |
+| Parameter passing | Macro kwargs | Function kwargs + lens |
+| Return type | Nothing (macro side-effects) | NamedTuple of modules |
+| Subcircuit nesting | Handled by macro expansion | Builder calls builder |
 
 ## Conclusion
 
-The MNA backend **can** support PDK precompilation through the existing `jlpkg://` infrastructure. The key insight is that **parsing and sema caching already work** - the PDK files are parsed once and cached.
+The MNA backend now supports full PDK precompilation through `load_mna_modules()`. PDK packages can:
 
-For enabling PDK tests now, Option A (minimal changes) is recommended:
-1. Convert tests to use MNA API (`MNASim`, `make_mna_circuit`)
-2. Keep using `jlpkg://` paths in SPICE files
-3. No PDK package modifications needed
+1. Call `load_mna_modules(@__MODULE__, path)` at top-level
+2. Get precompiled builder functions for each subcircuit
+3. Export builders for downstream use
+4. Use `PrecompileTools` workloads to compile specific instantiations
 
-Full MNA precompilation (Option B) can be pursued later if performance analysis shows it's needed.
+The key difference from DAECompiler is that MNA uses explicit builder functions instead of macros, providing clearer semantics and easier debugging.

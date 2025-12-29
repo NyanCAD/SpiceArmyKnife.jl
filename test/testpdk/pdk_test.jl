@@ -12,34 +12,38 @@ using CedarSim: ParamLens
 
 const testpdk_path = joinpath(@__DIR__, "testpdk.spice")
 
-# Generate the PDK modules at top level (outside testsets)
-# This is required because module expressions must be at top level
-const typical_expr = CedarSim.load_mna_pdk(testpdk_path; section="typical")
-const fast_expr = CedarSim.load_mna_pdk(testpdk_path; section="fast")
-const slow_expr = CedarSim.load_mna_pdk(testpdk_path; section="slow")
-
-# Evaluate at top level
-eval(typical_expr)
-eval(fast_expr)
-eval(slow_expr)
+# Load PDK modules directly into this module (like a real PDK package would do)
+# This is the preferred API for precompilation - evals internally and returns modules
+const corners = CedarSim.load_mna_modules(@__MODULE__, testpdk_path)
 
 @testset "PDK MNA Module Generation" begin
 
-    @testset "load_mna_modules basic" begin
-        # Load all library sections
+    @testset "load_mna_modules into module" begin
+        # Check that modules were created
+        @test haskey(corners, :typical)
+        @test haskey(corners, :fast)
+        @test haskey(corners, :slow)
+
+        # Check that submodules are defined in this module
+        @test isdefined(@__MODULE__, :typical)
+        @test isdefined(@__MODULE__, :fast)
+        @test isdefined(@__MODULE__, :slow)
+    end
+
+    @testset "load_mna_modules expression form" begin
+        # Test backward compatible expression-returning form
         expr = CedarSim.load_mna_modules(testpdk_path)
         @test expr.head == :toplevel
-        # Should have typical, fast, slow sections
         @test length(expr.args) == 3
     end
 
     @testset "load_mna_modules with names filter" begin
-        # Load only typical section
+        # Load only typical section (expression form)
         expr = CedarSim.load_mna_modules(testpdk_path; names=["typical"])
         @test length(expr.args) == 1
     end
 
-    @testset "load_mna_pdk single section" begin
+    @testset "load_mna_pdk single section expression" begin
         expr = CedarSim.load_mna_pdk(testpdk_path; section="typical")
         @test expr.head == :module  # Direct module expression
     end

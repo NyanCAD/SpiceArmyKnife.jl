@@ -2455,20 +2455,34 @@ function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[]
 end
 
 """
-    load_mna_modules(file::String; names=nothing, pdk_include_paths=[], preload=[])
+    load_mna_modules(into::Module, file::String; names=nothing, pdk_include_paths=[], preload=[])
+    load_mna_modules(file::String; names=nothing, ...)  # Returns expression for manual eval
 
 Parse a PDK SPICE file and generate MNA builder modules.
 
-Returns a `:toplevel` expression containing module definitions for each
-library section. Each module exports `*_mna_builder` functions for its subcircuits.
+When `into` module is provided, evaluates modules directly into that module and returns
+a NamedTuple mapping section names to the created modules. This is the preferred usage
+for PDK packages as it enables precompilation.
+
+When called without `into`, returns a `:toplevel` expression for manual evaluation.
 
 # Arguments
+- `into`: Target module to define submodules in (for precompilation)
 - `file`: Path to the PDK SPICE file
 - `names`: Optional list of library section names to include (default: all)
 - `pdk_include_paths`: Paths to search for `.include` files
 - `preload`: Modules to add as `using` statements in generated code
 
-# Example
+# Example (PDK package usage - enables precompilation)
+```julia
+module MyPDK
+    using CedarSim
+    const corners = CedarSim.load_mna_modules(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
+    # corners.typical, corners.fast, corners.slow are now available
+end
+```
+
+# Example (manual eval)
 ```julia
 path = joinpath(@__DIR__, "pdk.spice")
 eval(load_mna_modules(path; names=["typical", "fast"]))
@@ -2506,15 +2520,9 @@ function collect_lib_statements(node)
     return libs
 end
 
-function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
-                          preload::Vector{Module}=Module[])
-    # Parse the file
-    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
-    if sa.ps.errored
-        throw(LoadError(file, 0, SpectreParseError(sa)))
-    end
-
-    res = Expr(:toplevel)
+# Internal helper to generate module expressions from parsed PDK
+function _generate_mna_module_exprs(sa, names, preload)
+    modules = Pair{Symbol, Expr}[]
 
     # Collect all LibStatements from the parsed tree
     lib_stmts = collect_lib_statements(sa)
@@ -2546,6 +2554,50 @@ function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector
             mod_expr.args[3] = new_body
         end
 
+        push!(modules, mod_name => mod_expr)
+    end
+
+    return modules
+end
+
+# Version that evals into a target module (preferred for precompilation)
+function load_mna_modules(into::Module, file::String; names=nothing,
+                          pdk_include_paths::Vector{String}=String[],
+                          preload::Vector{Module}=Module[])
+    # Parse the file
+    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    if sa.ps.errored
+        throw(LoadError(file, 0, SpectreParseError(sa)))
+    end
+
+    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+
+    # Eval each module into the target module and collect results
+    result_modules = Dict{Symbol, Module}()
+    for (mod_name, mod_expr) in module_exprs
+        # Eval the module definition in the target module
+        Core.eval(into, mod_expr)
+        # Get the created module
+        result_modules[mod_name] = getfield(into, mod_name)
+    end
+
+    # Return as NamedTuple for convenient access
+    return NamedTuple(result_modules)
+end
+
+# Version that returns expression for manual eval (backward compatible)
+function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
+                          preload::Vector{Module}=Module[])
+    # Parse the file
+    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    if sa.ps.errored
+        throw(LoadError(file, 0, SpectreParseError(sa)))
+    end
+
+    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+
+    res = Expr(:toplevel)
+    for (_, mod_expr) in module_exprs
         push!(res.args, mod_expr)
     end
 
@@ -2553,19 +2605,41 @@ function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector
 end
 
 """
-    load_mna_pdk(file::String; section::String, pdk_include_paths=[], preload=[])
+    load_mna_pdk(into::Module, file::String; section::String, ...)
+    load_mna_pdk(file::String; section::String, ...)
 
 Load a single library section from a PDK file as an MNA module.
 
-Convenience function for loading just one section. Returns the module expression.
+When `into` module is provided, evaluates the module directly into that module
+and returns the created module. This is the preferred usage for precompilation.
 
-# Example
+When called without `into`, returns the module expression for manual evaluation.
+
+# Example (PDK package usage - enables precompilation)
+```julia
+module MyPDK
+    using CedarSim
+    const typical = CedarSim.load_mna_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"); section="typical")
+end
+```
+
+# Example (manual eval)
 ```julia
 mod_expr = load_mna_pdk("pdk.spice"; section="typical")
 eval(mod_expr)
 using .typical: nfet_mna_builder
 ```
 """
+function load_mna_pdk(into::Module, file::String; section::String,
+                      pdk_include_paths::Vector{String}=String[],
+                      preload::Vector{Module}=Module[])
+    result = load_mna_modules(into, file; names=[section], pdk_include_paths, preload)
+    if isempty(result)
+        error("Section '$section' not found in $file")
+    end
+    return only(values(result))
+end
+
 function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{String}=String[],
                       preload::Vector{Module}=Module[])
     expr = load_mna_modules(file; names=[section], pdk_include_paths, preload)

@@ -142,12 +142,12 @@ end
 Assemble the complete MNA system from the context.
 Returns an MNASystem ready for analysis.
 
-# Note on Zeros in Sparse Matrices
-Devices without reactive (ddt) components should NOT stamp into the C matrix.
-This is enforced by `stamp_contribution!` which skips C stamps when charge
-derivatives are zero. Voltage-dependent capacitors may have zero capacitance
-at certain operating points (e.g., q = C0*V² has dq/dV = 0 at V=0) - this is
-legitimate and handled by `detect_differential_vars` checking actual values.
+# Note on C Matrix Stamping
+C matrix stamping is determined by TYPE, not VALUE. Devices with ddt() terms
+(detected via `Dual{ContributionTag}` type) always stamp into C to maintain
+consistent sparse matrix structure. Devices without ddt() never stamp into C.
+This ensures the COO structure is consistent between precompilation and runtime,
+even when capacitance values happen to be zero at certain operating points.
 
 # Example
 ```julia
@@ -161,17 +161,6 @@ function assemble!(ctx::MNAContext)
     G = assemble_G(ctx)
     C = assemble_C(ctx)
     b = get_rhs(ctx)
-
-    # Warn if C matrix has explicit zeros - this indicates a device is stamping
-    # into C when it shouldn't (devices without ddt() should skip C stamps)
-    if nnz(C) > 0
-        nzvals = nonzeros(C)
-        n_explicit_zeros = count(v -> v == 0.0, nzvals)
-        if n_explicit_zeros > 0
-            @warn "C matrix has $n_explicit_zeros explicit zero(s). " *
-                  "This may indicate a device is stamping into C without ddt() terms."
-        end
-    end
 
     ctx.finalized = true
 

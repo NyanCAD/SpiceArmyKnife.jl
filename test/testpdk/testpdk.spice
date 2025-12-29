@@ -1,0 +1,79 @@
+* Test PDK for MNA precompilation testing
+* This simulates a simple PDK structure with library sections
+
+.LIB typical
+* Typical corner models
+
+* Simple NMOS model using resistors
+* Ports: d g s b (drain, gate, source, bulk)
+.SUBCKT nmos_1v8 d g s b W=1e-6 L=180e-9
+* Simple model: when Vgs > Vth, conduct between d and s
+* For testing, we just use a resistor between d and s
+* Real PDK would have BSIM4 model card here
+.PARAM Rds_on = '1000 * L / W'
+R1 d s {Rds_on}
+.ENDS nmos_1v8
+
+* Simple PMOS model using resistors
+.SUBCKT pmos_1v8 d g s b W=1e-6 L=180e-9
+.PARAM Rds_on = '2000 * L / W'
+R1 d s {Rds_on}
+.ENDS pmos_1v8
+
+* Simple inverter using the transistor models
+.SUBCKT inv_x1 in out vdd vss WN=360e-9 WP=720e-9 L=180e-9
+Xn out in vss vss nmos_1v8 W={WN} L={L}
+Xp out in vdd vdd pmos_1v8 W={WP} L={L}
+.ENDS inv_x1
+
+* Two-input NAND gate
+.SUBCKT nand2_x1 a b out vdd vss
+* Pull-up network: PMOS in parallel
+Xp1 out a vdd vdd pmos_1v8 W=720e-9 L=180e-9
+Xp2 out b vdd vdd pmos_1v8 W=720e-9 L=180e-9
+* Pull-down network: NMOS in series
+Xn1 out a mid vss nmos_1v8 W=720e-9 L=180e-9
+Xn2 mid b vss vss nmos_1v8 W=720e-9 L=180e-9
+.ENDS nand2_x1
+
+.ENDL typical
+
+.LIB fast
+* Fast corner models - lower resistance
+
+.SUBCKT nmos_1v8 d g s b W=1e-6 L=180e-9
+.PARAM Rds_on = '800 * L / W'
+R1 d s {Rds_on}
+.ENDS nmos_1v8
+
+.SUBCKT pmos_1v8 d g s b W=1e-6 L=180e-9
+.PARAM Rds_on = '1600 * L / W'
+R1 d s {Rds_on}
+.ENDS pmos_1v8
+
+.SUBCKT inv_x1 in out vdd vss WN=360e-9 WP=720e-9 L=180e-9
+Xn out in vss vss nmos_1v8 W={WN} L={L}
+Xp out in vdd vdd pmos_1v8 W={WP} L={L}
+.ENDS inv_x1
+
+.ENDL fast
+
+.LIB slow
+* Slow corner models - higher resistance
+
+.SUBCKT nmos_1v8 d g s b W=1e-6 L=180e-9
+.PARAM Rds_on = '1200 * L / W'
+R1 d s {Rds_on}
+.ENDS nmos_1v8
+
+.SUBCKT pmos_1v8 d g s b W=1e-6 L=180e-9
+.PARAM Rds_on = '2400 * L / W'
+R1 d s {Rds_on}
+.ENDS pmos_1v8
+
+.SUBCKT inv_x1 in out vdd vss WN=360e-9 WP=720e-9 L=180e-9
+Xn out in vss vss nmos_1v8 W={WN} L={L}
+Xp out in vdd vdd pmos_1v8 W={WP} L={L}
+.ENDS inv_x1
+
+.ENDL slow

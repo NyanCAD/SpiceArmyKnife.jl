@@ -1,0 +1,9 @@
+* Test circuit using VA resistor device
+* This demonstrates SPICE netlist referencing a Verilog-A model
+
+* Voltage divider using VA resistor and regular resistor
+V1 vin 0 DC 1.0
+X1 vin out test_resistor R=500
+R1 out 0 500
+
+.END

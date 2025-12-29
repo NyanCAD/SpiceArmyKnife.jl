@@ -1,0 +1,7 @@
+// Simple resistor model for testing VA device precompilation
+module test_resistor(p, n);
+    parameter real R = 1000.0;
+    inout p, n;
+    electrical p, n;
+    analog I(p,n) <+ V(p,n)/R;
+endmodule

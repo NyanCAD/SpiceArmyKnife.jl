@@ -36,6 +36,9 @@ export solve
 # Phase 4: MNA SPICE codegen exports
 export make_mna_circuit, parse_spice_to_mna, solve_spice_mna
 
+# PDK/VA precompilation exports
+export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
+
 
 include("util.jl")
 include("vasim.jl")

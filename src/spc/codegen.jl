@@ -704,7 +704,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Resistor})
     return quote
         let r_val = $r_expr, m_val = $m_expr
             # Parallel resistors: R_eff = R / m
-            stamp!(Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
+            stamp!($(MNA).Resistor(r_val / m_val; name=$(QuoteNode(Symbol(name)))), ctx, $p, $n)
         end
     end
 end
@@ -1335,9 +1335,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Check if this is a VA module from imported_hdl_modules
     # VA modules can be instantiated like subcircuits: X1 a b vamodule params...
     va_module_ref = nothing
+    va_hdl_mod = nothing
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
+            va_hdl_mod = hdl_mod
             break
         end
     end
@@ -1345,12 +1347,18 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     if va_module_ref !== nothing
         # This is a VA module instance, not a subcircuit
         # Build kwargs from explicit parameters
+        # Need to adjust case since SPICE is case-insensitive but Julia is not
+        va_type = getfield(va_hdl_mod, subckt_name)
+        case_insensitive = Dict(Symbol(lowercase(String(kw))) => kw for kw in fieldnames(va_type))
+
         explicit_kwargs = Expr[]
         for child in SpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
                 name = LSymbol(child.name)
+                # Adjust case to match VA device fieldnames
+                adjusted_name = get(case_insensitive, name, name)
                 def = cg_expr!(state, child.val)
-                push!(explicit_kwargs, Expr(:kw, name, def))
+                push!(explicit_kwargs, Expr(:kw, adjusted_name, def))
             end
         end
 
@@ -1359,10 +1367,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         name = LString(instance.name)
 
         # Generate stamp! call for VA module
+        # VA devices use _sim_mode_ instead of mode (see generate_mna_stamp_method_nterm)
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    t = spec.time, mode = spec.mode, x = x)
+                    t = spec.time, _sim_mode_ = spec.mode, x = x)
             end
         end
     end
@@ -2382,4 +2391,269 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
             return ctx
         end
     end
+end
+
+#==============================================================================#
+# PDK Module Generation for MNA
+#==============================================================================#
+
+"""
+    make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[])
+
+Generate an MNA PDK module from a parsed SPICE netlist.
+
+Returns a module expression that contains:
+- MNA builder functions for each subcircuit (named `<subckt>_mna_builder`)
+- Exported symbols for direct use in circuits
+
+# Example
+```julia
+ast = SpectreNetlistParser.parsefile("pdk.spice")
+mod_expr = make_mna_pdk_module(ast; name=:typical)
+eval(mod_expr)  # Defines the module
+using .typical: nfet_mna_builder, pfet_mna_builder
+```
+"""
+function make_mna_pdk_module(ast; name::Symbol, exports::Vector{Symbol}=Symbol[],
+                             imported_hdl_modules::Vector{Module}=Module[])
+    # Run semantic analysis
+    sema_result = sema(ast; imported_hdl_modules)
+
+    # Build subckt_semas dictionary for cross-references
+    subckt_semas = Dict{Symbol, SemaResult}()
+    for (subckt_name, subckt_list) in sema_result.subckts
+        if !isempty(subckt_list)
+            _, subckt_sema = first(subckt_list)
+            subckt_semas[subckt_name] = subckt_sema.val
+        end
+    end
+
+    # Generate MNA builders for each subcircuit
+    builders = Expr[]
+    builder_exports = Symbol[]
+
+    for (subckt_name, subckt_list) in sema_result.subckts
+        if !isempty(subckt_list)
+            _, subckt_sema = first(subckt_list)
+            builder_name = Symbol(subckt_name, "_mna_builder")
+            push!(builder_exports, builder_name)
+
+            # Generate the builder function
+            builder_def = codegen_mna_subcircuit(subckt_sema.val, subckt_name, subckt_semas)
+            push!(builders, builder_def)
+        end
+    end
+
+    # Also export any explicitly requested symbols
+    all_exports = vcat(builder_exports, exports)
+
+    # Return the module expression directly (not wrapped in quote block)
+    # This allows eval(expr) to work at any level
+    return Expr(:module, true, name,
+        Expr(:block,
+            # Import MNA context and stamping functions
+            :(using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, alloc_internal_node!, alloc_current!),
+            # Import device types needed for stamping
+            :(using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource),
+            :(using CedarSim: ParamLens, IdentityLens),
+            :(using CedarSim.SpectreEnvironment),
+            builders...,
+            Expr(:export, all_exports...)
+        )
+    )
+end
+
+"""
+    load_mna_modules(into::Module, file::String; names=nothing, pdk_include_paths=[], preload=[])
+    load_mna_modules(file::String; names=nothing, ...)  # Returns expression for manual eval
+
+Parse a PDK SPICE file and generate MNA builder modules.
+
+When `into` module is provided, evaluates modules directly into that module and returns
+a NamedTuple mapping section names to the created modules. This is the preferred usage
+for PDK packages as it enables precompilation.
+
+When called without `into`, returns a `:toplevel` expression for manual evaluation.
+
+# Arguments
+- `into`: Target module to define submodules in (for precompilation)
+- `file`: Path to the PDK SPICE file
+- `names`: Optional list of library section names to include (default: all)
+- `pdk_include_paths`: Paths to search for `.include` files
+- `preload`: Modules to add as `using` statements in generated code
+
+# Example (PDK package usage - enables precompilation)
+```julia
+module MyPDK
+    using CedarSim
+    const corners = CedarSim.load_mna_modules(@__MODULE__, joinpath(@__DIR__, "pdk.spice"))
+    # corners.typical, corners.fast, corners.slow are now available
+end
+```
+
+# Example (manual eval)
+```julia
+path = joinpath(@__DIR__, "pdk.spice")
+eval(load_mna_modules(path; names=["typical", "fast"]))
+# Now you can use: typical.nfet_03v3_mna_builder, fast.nfet_03v3_mna_builder, etc.
+```
+"""
+function load_mna_modules end  # Forward declaration for docstring
+
+"""
+    collect_lib_statements(node) -> Vector
+
+Recursively collect all LibStatement nodes from a parsed AST.
+Handles nested structures like SpectreNetlistSource containing SPICENetlistSource.
+"""
+function collect_lib_statements(node)
+    libs = SNode{SP.LibStatement}[]
+
+    function visit(n)
+        if isa(n, SNode{SP.LibStatement})
+            push!(libs, n)
+        else
+            # Try to access stmts - RedTree nodes have custom getproperty
+            # so hasproperty may return false but getproperty still works
+            try
+                for stmt in n.stmts
+                    visit(stmt)
+                end
+            catch
+                # No stmts property - leaf node
+            end
+        end
+    end
+
+    visit(node)
+    return libs
+end
+
+# Internal helper to generate module expressions from parsed PDK
+function _generate_mna_module_exprs(sa, names, preload)
+    modules = Pair{Symbol, Expr}[]
+
+    # Collect all LibStatements from the parsed tree
+    lib_stmts = collect_lib_statements(sa)
+
+    for node in lib_stmts
+        lib_name = String(node.name)
+        if names !== nothing && lib_name ∉ names
+            @info "Skipping library section: $lib_name"
+            continue
+        end
+
+        # Generate MNA module for this library section
+        mod_name = Symbol(lib_name)
+        mod_expr = make_mna_pdk_module(node; name=mod_name)
+
+        # Add preload usings if needed
+        if !isempty(preload)
+            usings = Expr[]
+            for pre in preload
+                push!(usings, Expr(:using, Expr(:., Base.fullname(pre)...)))
+            end
+
+            # mod_expr is now directly an :module expression
+            @assert mod_expr.head == :module
+            mod_body = mod_expr.args[3]  # The block inside the module
+
+            # Prepend usings to the module body
+            new_body = Expr(:block, usings..., mod_body.args...)
+            mod_expr.args[3] = new_body
+        end
+
+        push!(modules, mod_name => mod_expr)
+    end
+
+    return modules
+end
+
+# Version that evals into a target module (preferred for precompilation)
+function load_mna_modules(into::Module, file::String; names=nothing,
+                          pdk_include_paths::Vector{String}=String[],
+                          preload::Vector{Module}=Module[])
+    # Parse the file
+    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    if sa.ps.errored
+        throw(LoadError(file, 0, SpectreParseError(sa)))
+    end
+
+    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+
+    # Eval each module into the target module and collect results
+    result_modules = Dict{Symbol, Module}()
+    for (mod_name, mod_expr) in module_exprs
+        # Eval the module definition in the target module
+        Core.eval(into, mod_expr)
+        # Get the created module
+        result_modules[mod_name] = getfield(into, mod_name)
+    end
+
+    # Return as NamedTuple for convenient access
+    return NamedTuple(result_modules)
+end
+
+# Version that returns expression for manual eval (backward compatible)
+function load_mna_modules(file::String; names=nothing, pdk_include_paths::Vector{String}=String[],
+                          preload::Vector{Module}=Module[])
+    # Parse the file
+    sa = SpectreNetlistParser.parsefile(file; implicit_title=false)
+    if sa.ps.errored
+        throw(LoadError(file, 0, SpectreParseError(sa)))
+    end
+
+    module_exprs = _generate_mna_module_exprs(sa, names, preload)
+
+    res = Expr(:toplevel)
+    for (_, mod_expr) in module_exprs
+        push!(res.args, mod_expr)
+    end
+
+    return res
+end
+
+"""
+    load_mna_pdk(into::Module, file::String; section::String, ...)
+    load_mna_pdk(file::String; section::String, ...)
+
+Load a single library section from a PDK file as an MNA module.
+
+When `into` module is provided, evaluates the module directly into that module
+and returns the created module. This is the preferred usage for precompilation.
+
+When called without `into`, returns the module expression for manual evaluation.
+
+# Example (PDK package usage - enables precompilation)
+```julia
+module MyPDK
+    using CedarSim
+    const typical = CedarSim.load_mna_pdk(@__MODULE__, joinpath(@__DIR__, "pdk.spice"); section="typical")
+end
+```
+
+# Example (manual eval)
+```julia
+mod_expr = load_mna_pdk("pdk.spice"; section="typical")
+eval(mod_expr)
+using .typical: nfet_mna_builder
+```
+"""
+function load_mna_pdk(into::Module, file::String; section::String,
+                      pdk_include_paths::Vector{String}=String[],
+                      preload::Vector{Module}=Module[])
+    result = load_mna_modules(into, file; names=[section], pdk_include_paths, preload)
+    if isempty(result)
+        error("Section '$section' not found in $file")
+    end
+    return only(values(result))
+end
+
+function load_mna_pdk(file::String; section::String, pdk_include_paths::Vector{String}=String[],
+                      preload::Vector{Module}=Module[])
+    expr = load_mna_modules(file; names=[section], pdk_include_paths, preload)
+    if isempty(expr.args)
+        error("Section '$section' not found in $file")
+    end
+    return only(expr.args)
 end

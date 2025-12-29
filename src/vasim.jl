@@ -1842,3 +1842,167 @@ struct VAParseError
 end
 
 Base.show(io::IO, vap::VAParseError) = VerilogAParser.VerilogACSTParser.visit_errors(vap.va; io)
+
+#==============================================================================#
+# VA Device Package Loading for Precompilation
+#==============================================================================#
+
+"""
+    load_mna_va_module(into::Module, file::String)
+    load_mna_va_module(file::String)
+
+Load a Verilog-A file and generate MNA device module(s).
+
+When `into` module is provided, evaluates the module directly into that module
+and returns the created module. This is the preferred usage for device packages
+as it enables precompilation.
+
+When called without `into`, returns the expression for manual evaluation.
+
+# Arguments
+- `into`: Target module to define the device module in (for precompilation)
+- `file`: Path to the Verilog-A file
+
+# Alternative: VAFile + Base.include
+
+The existing pattern also works and is equivalent:
+```julia
+using RelocatableFolders
+const device_va = @path joinpath(@__DIR__, "device.va")
+Base.include(@__MODULE__, VAFile(device_va))
+```
+
+This is what packages like BSIM4.jl use. The difference is that `load_mna_va_module`
+returns the created module for convenience.
+
+# Example (Device package usage - enables precompilation)
+```julia
+module BSIM4
+    using CedarSim
+    const bsim4_module = CedarSim.load_mna_va_module(@__MODULE__,
+        joinpath(@__DIR__, "bsim4.va"))
+    using .bsim4_module: bsim4
+    export bsim4
+end
+```
+
+# Example (manual eval)
+```julia
+expr = CedarSim.load_mna_va_module("bsim4.va")
+eval(expr)
+using .bsim4_module: bsim4
+```
+
+# Generated Module Structure
+
+For a VA file containing `module bsim4(d, g, s, b); ... endmodule`, generates:
+- A submodule named `bsim4_module`
+- Exports the device type `bsim4`
+- Device has `stamp!(dev::bsim4, ctx, d, g, s, b; ...)` method
+"""
+function load_mna_va_module end
+
+# Version that evals into target module (preferred for precompilation)
+function load_mna_va_module(into::Module, file::String)
+    # Parse the VA file
+    va = VerilogAParser.parsefile(file)
+    if va.ps.errored
+        throw(LoadError(file, 0, VAParseError(va)))
+    end
+
+    # Generate the module expression
+    expr = make_mna_module(va)
+
+    # expr is (:toplevel, module_def, using_stmt)
+    # We need to eval both parts
+    @assert expr.head == :toplevel
+    module_def = expr.args[1]
+    using_stmt = expr.args[2]
+
+    # Eval the module definition
+    Core.eval(into, module_def)
+
+    # Also eval the using statement to bring the module into scope
+    Core.eval(into, using_stmt)
+
+    # Get the created module name from the module definition
+    # module_def is :(baremodule modname ... end)
+    mod_name = module_def.args[2]  # The module name symbol
+
+    # Return the created module
+    return getfield(into, mod_name)
+end
+
+# Version that returns expression for manual eval
+function load_mna_va_module(file::String)
+    # Parse the VA file
+    va = VerilogAParser.parsefile(file)
+    if va.ps.errored
+        throw(LoadError(file, 0, VAParseError(va)))
+    end
+
+    # Return the expression for manual evaluation
+    return make_mna_module(va)
+end
+
+"""
+    load_mna_va_modules(into::Module, file::String)
+
+Load all Verilog-A modules from a file.
+
+Similar to `load_mna_va_module` but handles files with multiple modules,
+returning a NamedTuple mapping module names to the created Julia modules.
+
+# Example
+```julia
+module MyDevices
+    using CedarSim
+    const devices = CedarSim.load_mna_va_modules(@__MODULE__,
+        joinpath(@__DIR__, "devices.va"))
+    # devices.resistor_module, devices.capacitor_module, etc.
+end
+```
+"""
+function load_mna_va_modules(into::Module, file::String)
+    # Parse the VA file
+    va = VerilogAParser.parsefile(file)
+    if va.ps.errored
+        throw(LoadError(file, 0, VAParseError(va)))
+    end
+
+    # Collect all VerilogModule nodes
+    result_modules = Dict{Symbol, Module}()
+
+    for stmt in va.stmts
+        if stmt isa VANode{VerilogModule}
+            vamod = stmt
+            typename = Symbol(vamod.id)
+            mod_name = Symbol(String(vamod.id), "_module")
+
+            # Generate device expression
+            device_expr = make_mna_device(vamod)
+
+            # Create module expression
+            module_expr = :(baremodule $mod_name
+                using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
+                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
+                import Base
+                import ..CedarSim
+                using ..CedarSim.VerilogAEnvironment
+                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
+                using ForwardDiff: Dual, value, partials
+                import ForwardDiff
+                export $typename
+                $(device_expr.args...)
+            end)
+
+            # Eval into target module
+            Core.eval(into, module_expr)
+            Core.eval(into, :(using .$mod_name))
+
+            result_modules[mod_name] = getfield(into, mod_name)
+        end
+    end
+
+    return NamedTuple(result_modules)
+end

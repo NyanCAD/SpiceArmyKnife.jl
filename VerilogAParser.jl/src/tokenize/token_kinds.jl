@@ -138,8 +138,6 @@ end
         WHILE, # while
         REPEAT, # repeat
         DEFAULT, # default
-        INITIAL_STEP, # initial_step (event)
-        FINAL_STEP, # final_step (event)
 
         begin_net_types,
             SUPPLY0, # supply0

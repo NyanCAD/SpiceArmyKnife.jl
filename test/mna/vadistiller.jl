@@ -1810,9 +1810,8 @@ end
 # ✅ Branch-based stamping for inductors (branch (p,n) br; V(br) <+ L*ddt(I(br)))
 # ✅ Single-node branch declarations (branch (node) name;) for grounded branches
 #
-# WORKING MNA FEATURES (added):
-# ✅ @(initial_step) - initialization event handling (parsed and translated to t=0 check)
-# ✅ @(final_step) - finalization event handling (skipped, not needed for circuit behavior)
+# MISSING PARSER FEATURES (VerilogAParser needs extension):
+# ❌ @(initial_step) - initialization event handling
 #
 # FULLY WORKING VADISTILLER MODELS:
 # ✅ resistor.va: Parses and simulates correctly (2-terminal passive)
@@ -1840,5 +1839,5 @@ end
 # ✅ bsim3v3.va: Parses OK, code generation OK, simulation works (local var init fixed)
 #
 # COMPLEX MODELS (need additional features):
-# ⚠️ bsim4v8.va: Very complex - needs output variable handling and other features
+# ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
 #==============================================================================#

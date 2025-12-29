@@ -483,18 +483,6 @@ struct TernaryExpr
 end
 allchildren(te::TernaryExpr) = (te.condition, te.questionmark, te.ifcase, te.colon, te.elsecase)
 
-# Event statement for @(initial_step) and @(final_step)
-# Syntax: @(initial_step) stmt or @(initial_step("dc", "tran")) stmt
-struct EventStatement
-    at_sign::EXPR{Notation}
-    lparen::EXPR{Notation}
-    event_kind::EXPR{Keyword}  # INITIAL_STEP or FINAL_STEP
-    sim_phases::Maybe{EXPR}    # Optional ("dc", "tran") list
-    rparen::EXPR{Notation}
-    stmt::EXPR
-end
-allchildren(es::EventStatement) = (es.at_sign, es.lparen, es.event_kind, es.sim_phases, es.rparen, es.stmt)
-
 function EXPR!(val::Terminal, ps)
     vp = ps.nvirtpos[1]
     next(ps)

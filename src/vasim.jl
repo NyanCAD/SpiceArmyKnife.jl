@@ -15,9 +15,9 @@ using VerilogAParser.VerilogACSTParser:
     FloatLiteral, ChunkTree, virtrange,
     filerange, LineNumbers, compute_line,
     SystemIdentifier, Node, Identifier, IdentifierConcatItem,
-    IdentifierPart, Attributes, EventStatement
+    IdentifierPart, Attributes
 using VerilogAParser.VerilogATokenize:
-    Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, is_scale_factor, INITIAL_STEP, FINAL_STEP
+    Kind, INPUT, OUTPUT, INOUT, REAL, INTEGER, is_scale_factor
 using Combinatorics
 using ForwardDiff
 using ForwardDiff: Dual
@@ -1616,37 +1616,6 @@ function (to_julia::MNAScope)(stmt::VANode{AnalogRepeat})
     Expr(:for, :(_ = 1:$(stmt.num_repeat)), body)
 end
 
-# Handle event statements (@(initial_step), @(final_step))
-# initial_step: runs at first evaluation (t=0 for transient, DC operating point for DC)
-# final_step: runs at last evaluation (not typically used in MNA simulations)
-function (to_julia::MNAScope)(stmt::VANode{EventStatement})
-    body = to_julia(stmt.stmt)
-    event_kind_kw = stmt.event_kind.kw
-
-    if event_kind_kw == INITIAL_STEP
-        # initial_step runs once at the start of simulation
-        # In MNA: check if this is the first evaluation by looking at spec.mode or spec.time
-        # For transient: t == 0
-        # For DC: mode == :dcop or mode == :dc
-        # The simplest approach is to check an initialization flag
-        # We use a condition that checks if we're at the initial step:
-        # - spec.time == 0 for transient simulations
-        # - spec.mode in (:dcop, :dc) for DC simulations
-        return quote
-            if (hasproperty(spec, :time) && spec.time == 0) ||
-               (hasproperty(spec, :mode) && spec.mode in (:dcop, :dc, :initial))
-                $body
-            end
-        end
-    elseif event_kind_kw == FINAL_STEP
-        # final_step runs at the end of simulation - typically not used in MNA
-        # For now, we skip final_step statements entirely (they don't affect circuit behavior)
-        return nothing
-    else
-        error("Unknown event kind: $event_kind_kw")
-    end
-end
-
 # Handle contribution statements inside conditionals
 # When a contribution is inside an if-block, we generate inline stamping code
 function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
@@ -1856,13 +1825,6 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
     elseif stmt isa VANode{AnalogProceduralAssignment}
         # Procedural assignments in analog block (e.g., cdrain = R*V(g,s)**2;)
         push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
-    elseif stmt isa VANode{EventStatement}
-        # Event statements (@(initial_step), @(final_step))
-        # These run conditionally - collect the translated event statement
-        expr = to_julia(stmt)
-        if expr !== nothing
-            push!(contributions, (kind=:event, expr=expr))
-        end
     end
 end
 

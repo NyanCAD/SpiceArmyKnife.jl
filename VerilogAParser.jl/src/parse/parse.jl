@@ -759,35 +759,6 @@ function parse_analog_case_statement(parse_statement, ps)
     return EXPR(CaseStatement(kw, lparen, expr, rparen, items, endkw))
 end
 
-function parse_event_statement(parse_statement, ps)
-    # Parse @(initial_step) or @(initial_step("dc", "tran")) statements
-    at_sign = take(ps, AT_SIGN)
-    lparen = accept(ps, LPAREN)
-    # Expect initial_step or final_step keyword
-    event_kind = accept_kw(ps, (INITIAL_STEP, FINAL_STEP))
-    # Check for optional simulation phases: @(initial_step("dc", "tran"))
-    sim_phases = nothing
-    if kind(nt(ps)) == LPAREN
-        phases_lparen = take(ps, LPAREN)
-        # Parse comma-separated string list
-        phase_list = EXPRList{ListItem{EXPR}}()
-        if kind(nt(ps)) == STRING
-            first_str = take_string(ps)
-            push!(phase_list, EXPR(ListItem{EXPR}(nothing, first_str)))
-            while kind(nt(ps)) == COMMA
-                comma = take(ps, COMMA)
-                str = take_string(ps)
-                push!(phase_list, EXPR(ListItem{EXPR}(comma, str)))
-            end
-        end
-        phases_rparen = accept(ps, RPAREN)
-        sim_phases = EXPR(Parens(phases_lparen, EXPR(VerilogSource(phase_list)), phases_rparen))
-    end
-    rparen = accept(ps, RPAREN)
-    stmt = parse_statement(ps)
-    EXPR(EventStatement(at_sign, lparen, event_kind, sim_phases, rparen, stmt))
-end
-
 function parse_statement(parse_assignment, parse_statement, ps)
     attrs = maybe_parse_attributes(ps)
     item = @case kind(nt(ps)) begin
@@ -796,7 +767,6 @@ function parse_statement(parse_assignment, parse_statement, ps)
         (REPEAT | WHILE | FOR) => parse_analog_loop_statement(parse_statement, ps)
         BEGIN => parse_seq_block(parse_statement, ps)
         INITIAL => parse_intial_block(parse_statement, ps)
-        AT_SIGN => parse_event_statement(parse_statement, ps)
         SYSTEM_IDENTIFIER => begin
             task = take_system_identifier(ps)
             if kind(nt(ps)) == LPAREN

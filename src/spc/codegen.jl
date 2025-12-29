@@ -1423,7 +1423,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
     # Note: lens_var is captured from the enclosing scope (var"*lens#" or lens)
     return quote
         let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
         end
     end
 end
@@ -1437,20 +1437,29 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
     instance_name = LSymbol(instance.name)
 
     # Check if this is a VA module from imported_hdl_modules
+    # Try both lowercase and original case since VA modules may use different casing
     va_module_ref = nothing
     for hdl_mod in state.sema.imported_hdl_modules
         if isdefined(hdl_mod, subckt_name)
             va_module_ref = GlobalRef(hdl_mod, subckt_name)
             break
         end
+        # Try original case (SPICE is case-insensitive but VA modules may be case-sensitive)
+        orig_name = Symbol(String(instance.model))
+        if isdefined(hdl_mod, orig_name)
+            va_module_ref = GlobalRef(hdl_mod, orig_name)
+            break
+        end
     end
 
     if va_module_ref !== nothing
         # This is a VA module instance
+        # Preserve original parameter name case since VA modules may be case-sensitive
         explicit_kwargs = Expr[]
         for child in SpectreNetlistParser.RedTree.children(instance)
             if child !== nothing && isa(child, SNode{SP.Parameter})
-                name = LSymbol(child.name)
+                # Use original case for VA modules (they may be case-sensitive)
+                name = Symbol(String(child.name))
                 def = cg_expr!(state, child.val)
                 push!(explicit_kwargs, Expr(:kw, name, def))
             end
@@ -1514,7 +1523,7 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
     return quote
         let subckt_lens = getproperty(lens, $(QuoteNode(instance_name)))
-            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
+            $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
         end
     end
 end
@@ -1758,7 +1767,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
             # Generate subcircuit call similar to SPICE SubcktCall
             return quote
                 let subckt_lens = getproperty(var"*lens#", $(QuoteNode(instance_name)))
-                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr; $(explicit_kwargs...))
+                    $builder_name(subckt_lens, spec, ctx, $(port_exprs...), $parent_params_expr, x; $(explicit_kwargs...))
                 end
             end
         else
@@ -2323,7 +2332,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params; $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), ctx::$(MNAContext), $(port_args...), parent_params, x; $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # Make parent_params available for default expression evaluation

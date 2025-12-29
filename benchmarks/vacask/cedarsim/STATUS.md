@@ -58,8 +58,10 @@ In `src/spc/codegen.jl`, the `cg_mna_instance!` function needs to:
 ## Not Adapted (No Julia Runner) 📋
 
 ### 5. Ring Oscillator (`ring/cedarsim/`)
-- **Blocker**: Requires PSP103 MOSFET VA model
-- **Notes**: PSP103 model now available at `test/vadistiller/models/psp103v4/psp103.va` (needs VerilogA include support)
+- **Status**: runme.jl created, but PSP103 needs proper solution vector initialization
+- **Blocker**: Complex VA models that access `V(node)` need the solution vector `x` to be initialized
+- **Notes**: PSP103 model parses and compiles successfully. The stamp! function tries to access x[node_idx] but x is empty during initial assembly.
+- **Files**: `runme.jl`, `runme.sp`
 
 ### 6. C6288 Multiplier (`c6288/cedarsim/`)
 - **Blocker**: Requires native SPICE MOSFET support
@@ -106,7 +108,7 @@ The VADistiller-generated models are in `test/vadistiller/models/` (shared with 
 - `bsim3v3.va`, `bsim4v8.va` - BSIM MOSFET models
 - `capacitor.va`, `inductor.va`, `resistor.va` - Basic passive components
 - `mes1.va`, `vdmos.va` - Additional device models
-- `psp103v4/psp103.va` - PSP103 MOSFET model (NXP) with include files
+- `psp103v4/psp103.va` - PSP103 MOSFET model (NXP) - parses and compiles successfully
 
 These models use advanced Verilog-A features like `$limit`, `$simparam`, etc. that may require parser/codegen support.
 

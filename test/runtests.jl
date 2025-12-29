@@ -47,6 +47,11 @@ if PHASE0_MINIMAL
         @testset "transients.jl" include("transients.jl")
         @testset "params.jl" include("params.jl")
     end
+
+    # PDK Precompilation tests (load_mna_modules, load_mna_va_module)
+    @testset "PDK Precompilation" begin
+        @testset "testpdk/pdk_test.jl" include("testpdk/pdk_test.jl")
+    end
 else
     @info "Running full test suite"
 

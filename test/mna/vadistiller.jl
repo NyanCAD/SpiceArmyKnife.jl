@@ -1361,9 +1361,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 true
             end
 
-            # Simulation is broken due to output variable code generation issue
-            # (MOS6drainSquares not defined - needs output variable handling fix)
-            @test_broken begin
+            # Simulation now works - local variable initialization fixed
+            @test begin
                 function sp_mos6_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vdd = get_node!(ctx, :vdd)
@@ -1429,9 +1428,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 true  # Code generation succeeds
             end
 
-            # Simulation is broken due to output variable code generation issue
-            # (drainResistance not defined - needs output variable handling fix)
-            @test_broken begin
+            # Simulation now works - local variable initialization fixed
+            @test begin
                 function sp_bsim3v3_circuit(params, spec; x=Float64[])
                     ctx = MNAContext()
                     vdd = get_node!(ctx, :vdd)
@@ -1484,6 +1482,41 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 sol = solve_dc(sp_vdmos_circuit, (;), MNASpec())
                 # Basic sanity check: drain voltage should be between 0 and Vdd
                 0.0 < voltage(sol, :drain) < 10.0
+            end
+        end
+
+        @testset "VADistiller sp_bsim4v8" begin
+            # BSIM4V8 model: 4-terminal (d, g, s, b)
+            # Most complex model - tests local variable initialization fix
+            bsim4_va = read(joinpath(vadistiller_path, "bsim4v8.va"), String)
+            va = VerilogAParser.parse(IOBuffer(bsim4_va))
+            @test !va.ps.errored  # Parsing should succeed
+
+            # Code generation works
+            @test begin
+                Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+                true
+            end
+
+            # Simulation requires string parameter support (version = "4.8.3")
+            # For now, just verify code generation works
+            @test_broken begin
+                function sp_bsim4v8_circuit(params, spec; x=Float64[])
+                    ctx = MNAContext()
+                    vdd = get_node!(ctx, :vdd)
+                    drain = get_node!(ctx, :drain)
+                    gate = get_node!(ctx, :gate)
+
+                    stamp!(VoltageSource(1.0; name=:Vdd), ctx, vdd, 0)
+                    stamp!(VoltageSource(0.5; name=:Vg), ctx, gate, 0)
+                    stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
+                    stamp!(sp_bsim4v8(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; spec=spec, x=x)
+
+                    return ctx
+                end
+
+                sol = solve_dc(sp_bsim4v8_circuit, (;), MNASpec())
+                true
             end
         end
 
@@ -1837,10 +1870,9 @@ end
 # ✅ FunctionCallStatement: calling functions for side effects (DEVqmeyer, qgg, etc.)
 # ✅ C-style boolean negation (! operator on Float64, Int64, ForwardDiff.Dual)
 #
-# PARSING OK, SIMULATION NEEDS OUTPUT VARIABLE FIX:
-# ⚠️ mos6.va: Parses OK, code generation OK, simulation needs output variable fix (MOS6drainSquares)
-# ⚠️ bsim3v3.va: Parses OK, code generation OK, simulation needs output variable fix (drainResistance)
+# ✅ mos6.va: Parses OK, code generation OK, simulation works (local var init fixed)
+# ✅ bsim3v3.va: Parses OK, code generation OK, simulation works (local var init fixed)
 #
 # COMPLEX MODELS (need additional features):
-# ❌ bsim4v8.va: Very complex - needs @(initial_step) and other features
+# ⚠️ bsim4v8.va: Parses OK, code gen OK, simulation needs string parameter support (version = "4.8.3")
 #==============================================================================#

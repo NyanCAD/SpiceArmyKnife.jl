@@ -1220,18 +1220,21 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     all_node_syms = [port_args; internal_nodes]
     all_node_params = [node_params; internal_node_params]
 
-    # Build the contribution evaluation body - includes local vars and expressions
-    # that compute the current contributions
+    # Split into two blocks:
+    # 1. local_var_init: Variable initialization (before internal_node_alloc)
+    #    - Uses Float64 for scalar initialization to avoid Dual issues with short-circuit conditions
+    # 2. contrib_eval: Contribution computation expressions (after dual_creation)
+    #    - May update variables with Dual-compatible values
+    local_var_init = Expr(:block)
     contrib_eval = Expr(:block)
+
     # For n-terminal devices:
     # 1. Don't use `local` - variables need to be visible in outer scope for stamp_code
-    # 2. Use parametric type based on first port dual so Float64 variables can hold Duals
+    # 2. Initialize with Float64 first (for short-circuit condition evaluation)
     # 3. Integer variables stay as Int (for control flow - booleans, counters)
     first_port = port_args[1]
     for decl in local_var_decls
         # Convert `local name::T = init_expr` appropriately
-        # Float64 vars: promote to Dual-compatible type
-        # Int vars: keep as scalar (used for booleans/control flow)
         if decl.head == :local
             inner = decl.args[1]
             if inner isa Expr && inner.head == :(=)
@@ -1246,17 +1249,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
                     if is_integer_type
                         # Integer variables: keep as scalar, don't promote
-                        push!(contrib_eval.args, :($name = $rhs))
+                        push!(local_var_init.args, :($name = $rhs))
                     elseif rhs isa Expr && rhs.head == :call && rhs.args[1] == :zero
-                        # zero() call - use zero(typeof(...)) for type compatibility
-                        push!(contrib_eval.args, :($name = zero(typeof($first_port))))
+                        # zero() call - use 0.0 for initial value
+                        push!(local_var_init.args, :($name = 0.0))
                     else
-                        # Float64: preserve init value, add zero for type promotion
-                        push!(contrib_eval.args, :($name = $rhs + zero(typeof($first_port))))
+                        # Float64: use the init value directly
+                        push!(local_var_init.args, :($name = Float64($rhs)))
                     end
                 else
                     # If no type annotation, still strip `local`
-                    push!(contrib_eval.args, inner)
+                    push!(local_var_init.args, inner)
                 end
             elseif inner isa Expr && inner.head == :(::)
                 # Just type annotation, no initialization
@@ -1264,16 +1267,16 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 var_type = inner.args[2]
                 is_integer_type = var_type == :Int || var_type == Int
                 if is_integer_type
-                    push!(contrib_eval.args, :($name = 0))
+                    push!(local_var_init.args, :($name = 0))
                 else
-                    push!(contrib_eval.args, :($name = zero(typeof($first_port))))
+                    push!(local_var_init.args, :($name = 0.0))
                 end
             else
                 # Plain assignment inside local - just use the assignment
-                push!(contrib_eval.args, inner)
+                push!(local_var_init.args, inner)
             end
         else
-            push!(contrib_eval.args, decl)
+            push!(local_var_init.args, decl)
         end
     end
 
@@ -1657,6 +1660,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                                      spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
             $(params_to_locals...)
             $(function_defs...)
+
+            # Initialize local variables FIRST (before internal node allocation)
+            # This is needed because short-circuit conditions may reference these variables
+            $local_var_init
 
             # Allocate internal nodes (idempotent - returns existing index if already allocated)
             $internal_node_alloc

@@ -830,12 +830,12 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a time-dependent voltage source.
 """
 function stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int;
-                t::Real=0.0, mode::Symbol=:dcop)
+                t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
     stamp_G!(ctx, p, I_idx,  1.0)
@@ -843,19 +843,19 @@ function stamp!(V::TimeDependentVoltageSource, ctx::MNAContext, p::Int, n::Int;
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
 
-    v = get_source_value(V, t, mode)
+    v = get_source_value(V, t, _sim_mode_)
     stamp_b!(ctx, I_idx, v)
 
     return I_idx
 end
 
 """
-    stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a PWL voltage source evaluated at time t.
 """
 function stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int;
-                t::Real=0.0, mode::Symbol=:dcop)
+                t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
     stamp_G!(ctx, p, I_idx,  1.0)
@@ -863,19 +863,19 @@ function stamp!(V::PWLVoltageSource, ctx::MNAContext, p::Int, n::Int;
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
 
-    v = get_source_value(V, t, mode)
+    v = get_source_value(V, t, _sim_mode_)
     stamp_b!(ctx, I_idx, v)
 
     return I_idx
 end
 
 """
-    stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a sinusoidal voltage source evaluated at time t.
 """
 function stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int;
-                t::Real=0.0, mode::Symbol=:dcop)
+                t::Real=0.0, _sim_mode_::Symbol=:dcop)
     I_idx = alloc_current!(ctx, Symbol(:I_, V.name))
 
     stamp_G!(ctx, p, I_idx,  1.0)
@@ -883,7 +883,7 @@ function stamp!(V::SinVoltageSource, ctx::MNAContext, p::Int, n::Int;
     stamp_G!(ctx, I_idx, p,  1.0)
     stamp_G!(ctx, I_idx, n, -1.0)
 
-    v = get_source_value(V, t, mode)
+    v = get_source_value(V, t, _sim_mode_)
     stamp_b!(ctx, I_idx, v)
 
     return I_idx
@@ -894,26 +894,26 @@ end
 #------------------------------------------------------------------------------#
 
 """
-    stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a PWL current source evaluated at time t.
 """
 function stamp!(I::PWLCurrentSource, ctx::MNAContext, p::Int, n::Int;
-                t::Real=0.0, mode::Symbol=:dcop)
-    i = get_source_value(I, t, mode)
+                t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    i = get_source_value(I, t, _sim_mode_)
     stamp_b!(ctx, p,  i)
     stamp_b!(ctx, n, -i)
     return nothing
 end
 
 """
-    stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, mode::Symbol=:dcop)
+    stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)
 
 Stamp a sinusoidal current source evaluated at time t.
 """
 function stamp!(I::SinCurrentSource, ctx::MNAContext, p::Int, n::Int;
-                t::Real=0.0, mode::Symbol=:dcop)
-    i = get_source_value(I, t, mode)
+                t::Real=0.0, _sim_mode_::Symbol=:dcop)
+    i = get_source_value(I, t, _sim_mode_)
     stamp_b!(ctx, p,  i)
     stamp_b!(ctx, n, -i)
     return nothing
@@ -941,7 +941,7 @@ end
 # Convenience for time-dependent sources with symbols
 function stamp!(device::Union{TimeDependentVoltageSource, PWLVoltageSource, SinVoltageSource,
                               PWLCurrentSource, SinCurrentSource},
-                ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, mode::Symbol=:dcop)
+                ctx::MNAContext, p::Symbol, n::Symbol; t::Real=0.0, _sim_mode_::Symbol=:dcop)
     stamp!(device, ctx, get_node!(ctx, p), get_node!(ctx, n); t=t, mode=mode)
 end
 

@@ -1458,10 +1458,11 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
+        # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    t = spec.time, mode = spec.mode, x = x)
+                    t = spec.time, _sim_mode_ = spec.mode, x = x)
             end
         end
     end
@@ -1718,10 +1719,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                 push!(explicit_kwargs, Expr(:kw, param_name, param_val))
             end
 
+            # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        t = spec.time, mode = spec.mode, x = x)
+                        t = spec.time, _sim_mode_ = spec.mode, x = x)
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
@@ -1801,10 +1803,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
         device_expr = Expr(:call, model_name, param_kwargs...)
     end
 
+    # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
     return quote
         let dev = $device_expr
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
-                t = spec.time, mode = spec.mode, x = x)
+                t = spec.time, _sim_mode_ = spec.mode, x = x)
         end
     end
 end
@@ -1861,7 +1864,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = vals[1:2:end]
                         values = vals[2:2:end]
                         stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1871,7 +1874,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = vals[1:2:end]
                         values = vals[2:2:end]
                         stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             end
@@ -1895,7 +1898,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1904,7 +1907,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             end
@@ -1932,7 +1935,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                         values = [v1, v1, v2, v2, v1, v1]
                         stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -1942,7 +1945,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                         values = [i1, i1, i2, i2, i1, i1]
                         stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=spec.time, mode=spec.mode)
+                               ctx, $p, $n; t=spec.time, _sim_mode_=spec.mode)
                     end
                 end
             end

@@ -415,3 +415,233 @@ end
    - Replace `Vector` with `CuVector`
    - Replace `SparseMatrixCSC` with `CuSparseMatrixCSC`
    - Stamps become GPU kernel operations
+
+## Dual-Mode GPU Architecture
+
+For GPU acceleration, we need to support **two distinct modes** with fundamentally different requirements:
+
+### Mode 1: Within-Method GPU (Large Single Problems)
+
+**Use case**: Single large circuit simulation on GPU (e.g., post-layout extraction with millions of nodes).
+
+**Characteristics**:
+- State vector lives on GPU as `CuArray`
+- Matrices are `CuSparseMatrixCSC`
+- Uses in-place formulation: `f!(du, u, p, t)`
+- GPU parallelism comes from matrix operations (SpMV, etc.)
+
+```julia
+# Within-method GPU residual
+function residual!(du::CuArray{T}, u::CuArray{T}, p::GPUCircuitParams{T}, t) where T
+    # In-place sparse matrix-vector multiply on GPU
+    mul!(du, p.G, u)                    # du = G*u
+    mul!(du, p.C, p.du_prev, 1.0, 1.0)  # du += C*du_prev
+    du .-= p.b                           # du -= b
+    return nothing
+end
+```
+
+### Mode 2: Ensemble GPU (Parameter Sweeps / Monte Carlo)
+
+**Use case**: Many small circuit simulations in parallel (e.g., Monte Carlo with 10,000 parameter variations of a 10-node circuit).
+
+**Characteristics**:
+- State vector is `SVector{N,T}` (stack-allocated, immutable)
+- Matrices are `SMatrix{N,N,T}` (compile-time size)
+- Uses out-of-place formulation: `f(u, p, t) -> SVector{N,T}`
+- GPU parallelism comes from running many problems simultaneously
+
+```julia
+# Ensemble GPU residual (out-of-place, zero allocation)
+function residual(u::SVector{N,T}, p::StaticCircuitParams{N,T}, t) where {N,T}
+    # Out-of-place but zero allocation (all stack-allocated)
+    du = p.G * u + p.C * p.du_prev - p.b
+    return du  # Returns SVector{N,T}
+end
+```
+
+### Unified Architecture Design
+
+To support both modes with a single codebase, we parameterize by array type:
+
+```julia
+# Generic circuit type parameterized by array/matrix types
+struct CompiledCircuit{
+    VecType,      # Vector type: Vector, CuArray, or SVector{N}
+    MatType,      # Matrix type: SparseMatrixCSC, CuSparseMatrixCSC, or SMatrix{N,N}
+    T             # Element type: Float64 or Float32
+}
+    n::Int                    # System size (runtime for Vector/CuArray, compile-time for SVector)
+    G::MatType                # Conductance matrix
+    C::MatType                # Capacitance matrix
+    b::VecType                # RHS vector
+
+    # Stamp indices (compile-time known for zero allocation)
+    stamp_indices::NTuple{K, StampIndex} where K
+end
+
+# StampIndex encodes position without runtime dispatch
+struct StampIndex
+    target::UInt8    # 0=G, 1=C, 2=b
+    idx::Int         # Linear index into nonzeros or vector
+end
+```
+
+### Compile-Time Specialization
+
+The key insight is that **circuit structure is known at compile time**. We can specialize everything:
+
+```julia
+# Type alias for different backends
+const CPUCircuit{T} = CompiledCircuit{Vector{T}, SparseMatrixCSC{T,Int}, T}
+const GPUCircuit{T} = CompiledCircuit{CuArray{T}, CuSparseMatrixCSC{T,Int}, T}
+const StaticCircuit{N,T} = CompiledCircuit{SVector{N,T}, SMatrix{N,N,T}, T}
+
+# Generic rebuild function - specialized at compile time
+@inline function rebuild_values!(cc::CompiledCircuit, u, t, params)
+    # Reset (works for all array types via broadcast)
+    cc.G.nzval .= zero(eltype(cc.G))
+    cc.C.nzval .= zero(eltype(cc.C))
+    cc.b .= zero(eltype(cc.b))
+
+    # Evaluate stamps - unrolled for StaticCircuit, looped otherwise
+    _apply_stamps!(cc, u, t, params)
+    return nothing
+end
+
+# For StaticCircuit: compile-time unrolled via @generated
+@generated function _apply_stamps!(cc::StaticCircuit{N,T}, u, t, params) where {N,T}
+    # Generate unrolled stamp applications at compile time
+    # Each stamp becomes a direct indexed assignment
+    exprs = Expr[]
+    for i in 1:num_stamps(cc)
+        push!(exprs, quote
+            val = evaluate_stamp($i, u, t, params)
+            _write_stamp!(cc, $(stamp_index(cc, i)), val)
+        end)
+    end
+    quote
+        $(exprs...)
+        return nothing
+    end
+end
+```
+
+### Out-of-Place Wrapper for Ensemble GPU
+
+For ensemble GPU, DiffEqGPU.jl requires out-of-place functions. We provide a wrapper:
+
+```julia
+# In-place version (CPU, within-method GPU)
+function residual!(du, u, p::CompiledCircuit, t)
+    rebuild_values!(p, u, t, p.params)
+    mul!(du, p.G, u)
+    mul!(du, p.C, p.du_prev, one(eltype(du)), one(eltype(du)))
+    du .-= p.b
+    return nothing
+end
+
+# Out-of-place version (ensemble GPU with StaticArrays)
+function residual(u::SVector{N,T}, p::StaticCircuit{N,T}, t) where {N,T}
+    # Rebuild values (all operations are on static arrays, stack-allocated)
+    G, C, b = rebuild_static_values(p, u, t)
+
+    # Compute residual (all stack-allocated)
+    du = G * u + C * p.du_prev - b
+    return du
+end
+
+# Returns static matrices with updated values (no allocation)
+@inline function rebuild_static_values(cc::StaticCircuit{N,T}, u, t) where {N,T}
+    # For small circuits, we can store G, C as dense SMatrix
+    # Values are computed and returned as new static matrices
+    G = _build_G_static(cc, u, t)  # Returns SMatrix{N,N,T}
+    C = _build_C_static(cc, u, t)  # Returns SMatrix{N,N,T}
+    b = _build_b_static(cc, u, t)  # Returns SVector{N,T}
+    return G, C, b
+end
+```
+
+### Parameter Sweep Integration
+
+For Monte Carlo and parameter sweeps:
+
+```julia
+# Parameter sweep on GPU ensemble
+function ensemble_sweep(
+    circuit_fn,          # (params) -> StaticCircuit{N,T}
+    param_samples,       # Vector of parameter NamedTuples
+    u0::SVector{N,T},
+    tspan
+) where {N,T}
+
+    # Build problems for each parameter sample
+    problems = map(param_samples) do params
+        cc = circuit_fn(params)
+        ODEProblem(residual, u0, tspan, cc)
+    end
+
+    # Create ensemble problem
+    ensemble_prob = EnsembleProblem(first(problems),
+        prob_func = (prob, i, repeat) -> problems[i])
+
+    # Solve on GPU
+    sol = solve(ensemble_prob, GPUTsit5(), EnsembleGPUArray(),
+                trajectories=length(param_samples))
+
+    return sol
+end
+```
+
+### Type Hierarchy Summary
+
+```
+CompiledCircuit{VecType, MatType, T}
+├── CPUCircuit{T}          # VecType=Vector{T}, MatType=SparseMatrixCSC{T,Int}
+│   └── In-place: residual!(du, u, p, t)
+│   └── Use: Standard CPU simulation
+│
+├── GPUCircuit{T}          # VecType=CuArray{T}, MatType=CuSparseMatrixCSC{T,Int}
+│   └── In-place: residual!(du, u, p, t)
+│   └── Use: Large single-circuit GPU simulation
+│
+└── StaticCircuit{N,T}     # VecType=SVector{N,T}, MatType=SMatrix{N,N,T}
+    └── Out-of-place: residual(u, p, t) -> SVector{N,T}
+    └── Use: Ensemble GPU for parameter sweeps, Monte Carlo
+```
+
+### Zero-Allocation Verification
+
+To verify zero allocation for both modes:
+
+```julia
+# Test in-place mode (CPU/GPU)
+cc_cpu = compile_circuit(builder, params, CPUCircuit{Float64})
+u = rand(cc_cpu.n)
+du = similar(u)
+@assert @allocated(residual!(du, u, cc_cpu, 0.0)) == 0
+
+# Test out-of-place mode (ensemble)
+cc_static = compile_circuit(builder, params, StaticCircuit{10, Float64})
+u_static = @SVector rand(10)
+@assert @allocated(residual(u_static, cc_static, 0.0)) == 0
+```
+
+### Implementation Phases
+
+**Phase 3a: CPU Zero-Allocation**
+- Implement `CompiledStamp` pattern with index-based access
+- Achieve zero allocation for `CPUCircuit`
+- Target: < 100 bytes per residual call
+
+**Phase 3b: StaticArrays Support**
+- Add `StaticCircuit{N,T}` specialization
+- Implement `@generated` unrolled stamp application
+- Create out-of-place `residual()` wrapper
+- Target: 0 bytes per residual call (all stack-allocated)
+
+**Phase 3c: GPU Integration**
+- Add CUDA.jl dependency (optional)
+- Implement `GPUCircuit{T}` with CuArrays
+- Test with DiffEqGPU.jl ensemble problems
+- Verify correct GPU kernel generation

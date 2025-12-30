@@ -15,8 +15,8 @@ All benchmarks use vadistiller-ported SPICE models equivalent to ngspice's built
 | `rc` | None (R, C) | ✅ Working | ~1M timepoints in ~12s |
 | `graetz` | `sp_diode` | ✅ Working | ~1M timepoints in ~24s |
 | `mul` | `sp_diode` | ✅ Working | ~500k timepoints in ~11s |
-| `ring` | `PSP103VA` | ⚠️ Fails | PSP103 needs solution vector init |
-| `c6288` | `PSP103VA` | ⚠️ Fails | PSP103 needs solution vector init |
+| `ring` | `PSP103VA` | ⚠️ Fails | PSP103 branch current issue (`_I_branch_NOII`) |
+| `c6288` | `PSP103VA` | ⚠️ Fails | PSP103 branch current issue (`_I_branch_NOII`) |
 
 ## Models Used
 
@@ -25,9 +25,29 @@ All benchmarks use vadistiller-ported SPICE models equivalent to ngspice's built
 
 ## PSP103 Issue
 
-The ring and c6288 benchmarks fail because PSP103 is a complex compact model that accesses `V(node)` during stamping. The stamp! function tries to access `x[node_idx]` but the solution vector `x` is empty during initial assembly.
+### Fixed: Parameter Name Collision (BoundsError)
 
-This is a fundamental limitation that needs to be addressed in the MNA solver's handling of nonlinear device initialization.
+The original error (`BoundsError(0.0, 2)`) was caused by PSP103 having a local variable `x = 0.0` (line 833) that shadowed the MNA framework's `x` parameter (solution vector). When voltage extraction tried `x[node_idx]`, it was doing `0.0[2]`.
+
+**Fix:** Renamed MNA framework parameters to use `_mna_` prefix:
+- `x` → `_mna_x_` (solution vector)
+- `t` → `_mna_t_` (simulation time)
+- `_sim_mode_` → `_mna_mode_` (simulation mode)
+- `spec` → `_mna_spec_` (MNA spec)
+
+### Current Issue: Branch Current Handling (`_I_branch_NOII`)
+
+After fixing the parameter collision, PSP103 now fails with:
+```
+UndefVarError: `_I_branch_NOII` not defined in `Main.PSP103VA_module`
+```
+
+This is a different issue related to how PSP103 uses named branches for internal currents. The model uses `I(<branch_name>)` syntax for branches like `NOII` (no-impact ionization?), but the vasim code generator isn't properly defining these branch current variables.
+
+**Investigation needed:**
+1. PSP103 uses named branches: `branch (DI, DG) NOII;` (or similar)
+2. The VA-to-Julia translation needs to define `_I_branch_NOII` for `I(NOII)` access
+3. Check vasim.jl branch handling code to ensure named branches are properly translated
 
 ## Running Benchmarks
 
@@ -51,3 +71,4 @@ This is a fundamental limitation that needs to be addressed in the MNA solver's 
 5. **Case-insensitive VA module lookup** (`src/spc/codegen.jl`) - Check both lowercase and original case
 6. **Preserve parameter case for VA modules** (`src/spc/codegen.jl`) - VA modules may use uppercase params
 7. **Pass `x` to subcircuit builders** (`src/spc/codegen.jl`) - For nonlinear devices that need solution vector
+8. **Rename MNA parameters to avoid VA variable collision** (`src/vasim.jl`, `src/spc/codegen.jl`) - Use `_mna_x_`, `_mna_t_`, `_mna_mode_`, `_mna_spec_` to avoid collision with VA model local variables like `x = 0.0` in PSP103

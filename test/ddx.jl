@@ -46,7 +46,7 @@ endmodule
         stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
         stamp!(VoltageSource(3.0; name=:V2), ctx, vg, 0)
         # Pass x to the nonlinear device stamp
-        stamp!(NLVCR(R=2.0), ctx, vcc, vg, 0; x=x)
+        stamp!(NLVCR(R=2.0), ctx, vcc, vg, 0; _mna_x_=x)
 
         return ctx
     end

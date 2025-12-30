@@ -52,7 +52,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(1.0; name=:Vg), ctx, g, 0)
             stamp!(VoltageSource(5.0; name=:Vdd), ctx, d, 0)
-            stamp!(VA_VCCS(gm=0.002), ctx, d, g, 0; x=x)
+            stamp!(VA_VCCS(gm=0.002), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -115,7 +115,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(1.5; name=:Vg), ctx, g, 0)
             stamp!(VoltageSource(2.0; name=:Vd), ctx, d, 0)
-            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; x=x)
+            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -141,7 +141,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(1.5; name=:Vg), ctx, g, 0)
             stamp!(VoltageSource(0.3; name=:Vd), ctx, d, 0)
-            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; x=x)
+            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -164,7 +164,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(0.3; name=:Vg), ctx, g, 0)
             stamp!(VoltageSource(2.0; name=:Vd), ctx, d, 0)
-            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; x=x)
+            stamp!(SimpleMOS(K=1e-3, Vth=0.5), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -222,7 +222,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             stamp!(VoltageSource(1.5; name=:Vg), ctx, g, 0)
             stamp!(VoltageSource(2.0; name=:Vd), ctx, d, 0)
-            stamp!(CapMOS(K=1e-3, Vth=0.5, Cgs=10e-15, Cgd=5e-15), ctx, d, g, 0; x=x)
+            stamp!(CapMOS(K=1e-3, Vth=0.5, Cgs=10e-15, Cgd=5e-15), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -260,7 +260,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             stamp!(VoltageSource(3.0; name=:Vd), ctx, d, 0)
 
             # MOSFET with capacitances
-            stamp!(CapMOS(K=1e-3, Vth=0.5, Cgs=Cgs, Cgd=Cgd), ctx, d, g, 0; x=x)
+            stamp!(CapMOS(K=1e-3, Vth=0.5, Cgs=Cgs, Cgd=Cgd), ctx, d, g, 0; _mna_x_=x)
 
             return ctx
         end
@@ -366,10 +366,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             stamp!(VoltageSource(0.0; name=:Vin), ctx, inp, 0)
 
             # PMOS: source=vdd, gate=inp, drain=out
-            stamp!(PMOS(K=1e-3, Vth=0.5), ctx, out, inp, vdd; x=x)
+            stamp!(PMOS(K=1e-3, Vth=0.5), ctx, out, inp, vdd; _mna_x_=x)
 
             # NMOS: drain=out, gate=inp, source=gnd
-            stamp!(NMOS(K=1e-3, Vth=0.5), ctx, out, inp, 0; x=x)
+            stamp!(NMOS(K=1e-3, Vth=0.5), ctx, out, inp, 0; _mna_x_=x)
 
             # Small load to observe output
             stamp!(Resistor(1e6; name=:Rload), ctx, out, 0)
@@ -400,10 +400,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             stamp!(VoltageSource(Vdd; name=:Vin), ctx, inp, 0)
 
             # PMOS: source=vdd, gate=inp, drain=out
-            stamp!(PMOS(K=1e-3, Vth=0.5), ctx, out, inp, vdd; x=x)
+            stamp!(PMOS(K=1e-3, Vth=0.5), ctx, out, inp, vdd; _mna_x_=x)
 
             # NMOS: drain=out, gate=inp, source=gnd
-            stamp!(NMOS(K=1e-3, Vth=0.5), ctx, out, inp, 0; x=x)
+            stamp!(NMOS(K=1e-3, Vth=0.5), ctx, out, inp, 0; _mna_x_=x)
 
             # Small load
             stamp!(Resistor(1e6; name=:Rload), ctx, out, 0)
@@ -453,7 +453,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             p = get_node!(ctx, :p)
 
             stamp!(VoltageSource(0.4; name=:V1), ctx, p, 0)
-            stamp!(JunctionCap(Cj0=1e-12, phi=0.8, m=0.5), ctx, p, 0; x=x)
+            stamp!(JunctionCap(Cj0=1e-12, phi=0.8, m=0.5), ctx, p, 0; _mna_x_=x)
 
             return ctx
         end

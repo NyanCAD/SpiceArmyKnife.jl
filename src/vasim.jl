@@ -577,9 +577,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             end)
         end
     elseif fname == Symbol("\$temperature")
-        return :(spec.temp + 273.15)  # Convert to Kelvin
+        return :(_mna_spec_.temp + 273.15)  # Convert to Kelvin
     elseif fname == Symbol("\$vt")
-        return :((spec.temp + 273.15) * 8.617333262e-5)  # kT/q
+        return :((_mna_spec_.temp + 273.15) * 8.617333262e-5)  # kT/q
     elseif fname == Symbol("\$param_given")
         # Check if a parameter was explicitly specified (not using default)
         id = Symbol(stmt.args[1].item)
@@ -595,22 +595,22 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         param_sym = Symbol(param_str)
         if length(stmt.args) == 1
             # No default - error if not found
-            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
-                     getproperty(spec, $(QuoteNode(param_sym))) :
+            return :(hasproperty(_mna_spec_, $(QuoteNode(param_sym))) ?
+                     getproperty(_mna_spec_, $(QuoteNode(param_sym))) :
                      error("Unknown simparam: " * $param_str))
         else
             # With default value
             default_expr = to_julia(stmt.args[2].item)
-            return :(hasproperty(spec, $(QuoteNode(param_sym))) ?
-                     getproperty(spec, $(QuoteNode(param_sym))) :
+            return :(hasproperty(_mna_spec_, $(QuoteNode(param_sym))) ?
+                     getproperty(_mna_spec_, $(QuoteNode(param_sym))) :
                      $default_expr)
         end
     elseif fname == :analysis
         # Analysis type check - returns true if current analysis matches the string
         # Mapping:
-        #   "dc" or "static" -> spec.mode == :dcop
-        #   "tran" or "transient" -> spec.mode == :tran
-        #   "ac" -> spec.mode == :ac
+        #   "dc" or "static" -> _mna_spec_.mode == :dcop
+        #   "tran" or "transient" -> _mna_spec_.mode == :tran
+        #   "ac" -> _mna_spec_.mode == :ac
         #   "nodeset" -> false (not supported)
         @assert length(stmt.args) == 1 "analysis() takes exactly one argument"
         analysis_str = to_julia(stmt.args[1].item)
@@ -621,11 +621,11 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             return :(
                 let atype = $analysis_str
                     if atype == "dc" || atype == "static"
-                        spec.mode == :dcop
+                        _mna_spec_.mode == :dcop
                     elseif atype == "tran" || atype == "transient"
-                        spec.mode == :tran
+                        _mna_spec_.mode == :tran
                     elseif atype == "ac"
-                        spec.mode == :ac
+                        _mna_spec_.mode == :ac
                     else
                         false
                     end
@@ -634,11 +634,11 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
         end
         # For constant strings, generate simpler code
         if analysis_sym == "dc" || analysis_sym == "static"
-            return :(spec.mode == :dcop)
+            return :(_mna_spec_.mode == :dcop)
         elseif analysis_sym == "tran" || analysis_sym == "transient"
-            return :(spec.mode == :tran)
+            return :(_mna_spec_.mode == :tran)
         elseif analysis_sym == "ac"
-            return :(spec.mode == :ac)
+            return :(_mna_spec_.mode == :ac)
         else
             return false
         end
@@ -766,9 +766,9 @@ function (to_julia::MNAScope)(ip::VANode{SystemIdentifier})
     id = Symbol(ip)
     if id == Symbol("\$mfactor")
         # Device multiplicity - default to 1.0
-        return :(hasproperty(spec, :mfactor) ? spec.mfactor : 1.0)
+        return :(hasproperty(_mna_spec_, :mfactor) ? _mna_spec_.mfactor : 1.0)
     elseif id == Symbol("\$temperature")
-        return :(spec.temp + 273.15)
+        return :(_mna_spec_.temp + 273.15)
     else
         # For other system identifiers, return as function call
         return Expr(:call, id)
@@ -1568,7 +1568,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     for i in 1:n_ports
         np = node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(x) ? 0.0 : x[$np])))
+            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(_mna_x_) ? 0.0 : _mna_x_[$np])))
     end
     # Internal nodes (from alloc_internal_node!)
     # Note: Internal nodes can be aliased to terminals (including ground) via short-circuit detection
@@ -1576,7 +1576,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         idx = n_ports + i
         inp = internal_node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(x) || $inp > length(x) ? 0.0 : x[$inp])))
+            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(_mna_x_) || $inp > length(_mna_x_) ? 0.0 : _mna_x_[$inp])))
     end
 
     # Generate dual creation for all nodes (terminals + internal)
@@ -1596,7 +1596,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         I_sym = Symbol("_I_branch_", branch_name)
         # Check for valid positive index within bounds
         push!(branch_current_extraction.args,
-            :($I_sym = isempty(x) || $I_var < 1 || $I_var > length(x) ? 0.0 : x[$I_var]))
+            :($I_sym = isempty(_mna_x_) || $I_var < 1 || $I_var > length(_mna_x_) ? 0.0 : _mna_x_[$I_var]))
     end
 
     # Generate voltage contribution stamping for named branches
@@ -1725,12 +1725,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
 
     # Build the stamp method
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
-    # NOTE: Using _sim_mode_ instead of mode to avoid conflicts with VA parameter names
+    # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
+    # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     t::Real=0.0, _sim_mode_::Symbol=:dcop, x::AbstractVector=Float64[],
-                                     spec::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
+                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Float64[],
+                                     _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())
             $(params_to_locals...)
             $(function_defs...)
 

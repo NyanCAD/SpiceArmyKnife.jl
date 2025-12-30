@@ -175,7 +175,7 @@ end
 
             # Use the VA resistor device
             dev = test_resistor_module.test_resistor(R=500.0)
-            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+            stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
             # Voltage source
             stamp!(VoltageSource(1.0), ctx, vin, 0)
@@ -206,7 +206,7 @@ end
 
             # VA resistor with custom R
             dev = test_resistor_module.test_resistor(R=R_value)
-            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+            stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
             # Voltage source
             stamp!(VoltageSource(1.0), ctx, vin, 0)
@@ -277,7 +277,7 @@ end
 
             # VA resistor
             dev = test_resistor_module.test_resistor(R=500.0)
-            stamp!(dev, ctx, vin, out; t=0.0, _sim_mode_=:dcop, x=Float64[])
+            stamp!(dev, ctx, vin, out; _mna_t_=0.0, _mna_mode_=:dcop, _mna_x_=Float64[])
 
             # Regular resistor
             stamp!(CedarSim.MNA.Resistor(500.0), ctx, out, 0)

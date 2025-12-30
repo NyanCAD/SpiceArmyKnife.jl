@@ -146,7 +146,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.6; name=:V1), ctx, anode, 0)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, anode, 0; x=x)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, anode, 0; _mna_x_=x)
 
                 return ctx
             end
@@ -184,7 +184,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.7; name=:V1), ctx, anode, 0)
-                stamp!(VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0), ctx, anode, 0; x=x)
+                stamp!(VADDiodeRs(Is=1e-14, N=1.0, Rs=10.0), ctx, anode, 0; _mna_x_=x)
 
                 return ctx
             end
@@ -274,7 +274,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(1.5; name=:Vg), ctx, gate, 0)  # Vgs = 1.5V
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)  # 10kΩ load
-                stamp!(VADMOS(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0; x=x)
+                stamp!(VADMOS(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0; _mna_x_=x)
 
                 return ctx
             end
@@ -319,7 +319,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(1.5; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
                 # 4-terminal stamp: d=drain, g=gate, s=0, b=0 (bulk tied to source)
-                stamp!(VADNMOS4(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0, 0; x=x)
+                stamp!(VADNMOS4(Kp=1e-4, Vth=0.5), ctx, drain, gate, 0, 0; _mna_x_=x)
 
                 return ctx
             end
@@ -369,7 +369,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; x=x, spec=spec)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -395,7 +395,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, drain)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; x=x, spec=spec)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -460,7 +460,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
-                stamp!(VAMOSRsd(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0), ctx, drain, gate, 0; x=x, spec=spec)
+                stamp!(VAMOSRsd(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0), ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -511,7 +511,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
                 stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
-                       ctx, drain, gate, 0; x=x, spec=spec)
+                       ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -530,7 +530,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                 stamp!(Resistor(10000.0; name=:Rd_load), ctx, vdd, drain)
                 stamp!(VAMOSFull(Kp=1e-4, Vth=0.5, Rs=10.0, Rd=10.0, Cgs=1e-12, Cgd=0.5e-12),
-                       ctx, drain, gate, 0; x=x, spec=spec)
+                       ctx, drain, gate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -572,7 +572,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                 stamp!(VoltageSource(2.5; name=:Vin), ctx, vin, 0)  # Mid-rail input
                 stamp!(Resistor(10000.0; name=:Rd), ctx, vdd, vout)
-                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, vout, vin, 0; x=x, spec=spec)
+                stamp!(VAMOSCap(Kp=1e-4, Vth=0.5, Cgs=1e-12, Cgd=0.5e-12), ctx, vout, vin, 0; _mna_x_=x, _mna_spec_=spec)
                 # Load capacitance
                 stamp!(Capacitor(1e-12; name=:Cload), ctx, vout, 0)
 
@@ -627,7 +627,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VATempResistor(R0=1000.0, TC=0.004), ctx, vcc, 0; x=x, spec=spec)
+                stamp!(VATempResistor(R0=1000.0, TC=0.004), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -667,7 +667,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAGminResistor(R=1000.0), ctx, vcc, 0; x=x, spec=spec)
+                stamp!(VAGminResistor(R=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -707,7 +707,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is true, so uses R=2000
@@ -719,7 +719,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 ctx = MNAContext()
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; x=x, spec=s)
+                stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
                 return ctx
             end, (;), MNASpec())
             # $param_given(R) is false, so uses Ralt=500
@@ -754,7 +754,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; x=x, spec=s)
+            stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # R = 1000 * (1 + 0.001 * (100 - 27)) = 1000 * 1.073 = 1073
@@ -766,7 +766,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; x=x, spec=s)
+            stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
             return ctx
         end, (;), MNASpec())
         # Same result - alias forwards to tnom
@@ -877,7 +877,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAInternalResistor(R1=1000.0, R2=1000.0), ctx, vcc, 0; x=x, spec=spec)
+                stamp!(VAInternalResistor(R1=1000.0, R2=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -908,7 +908,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(9.0; name=:V1), ctx, vcc, 0)
-                stamp!(VAMultiInternal(R=1000.0), ctx, vcc, 0; x=x, spec=spec)
+                stamp!(VAMultiInternal(R=1000.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -942,8 +942,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 mid = get_node!(ctx, :mid)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                stamp!(sp_resistor(resistance=1000.0), ctx, vcc, mid; spec=spec, x=Float64[])
-                stamp!(sp_resistor(resistance=1000.0), ctx, mid, 0; spec=spec, x=Float64[])
+                stamp!(sp_resistor(resistance=1000.0), ctx, vcc, mid; _mna_spec_=spec, _mna_x_=Float64[])
+                stamp!(sp_resistor(resistance=1000.0), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
 
                 return ctx
             end
@@ -969,7 +969,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                 stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-                stamp!(sp_capacitor(capacitance=1e-6), ctx, mid, 0; spec=spec, x=Float64[])
+                stamp!(sp_capacitor(capacitance=1e-6), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
 
                 return ctx
             end
@@ -1005,7 +1005,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-                    stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; spec=spec, x=Float64[])
+                    stamp!(sp_inductor(inductance=1e-3), ctx, mid, 0; _mna_spec_=spec, _mna_x_=Float64[])
 
                     return ctx
                 end
@@ -1038,7 +1038,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     diode_a = get_node!(ctx, :diode_a)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
-                    stamp!(sp_diode(), ctx, diode_a, 0; spec=spec, x=x)
+                    stamp!(sp_diode(), ctx, diode_a, 0; _mna_spec_=spec, _mna_x_=x)
                     return ctx
                 end
 
@@ -1058,7 +1058,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(VoltageSource(1.0; name=:V1), ctx, vcc, 0)
                     stamp!(Resistor(1000.0; name=:R1), ctx, vcc, diode_a)
                     # Use rs=10Ω - this activates the internal node and series resistance
-                    stamp!(sp_diode(; rs=10.0), ctx, diode_a, 0; spec=spec, x=x)
+                    stamp!(sp_diode(; rs=10.0), ctx, diode_a, 0; _mna_spec_=spec, _mna_x_=x)
                     return ctx
                 end
 
@@ -1106,7 +1106,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(VoltageSource(0.7; name=:V2), ctx, vb, 0)
                     stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
                     stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; spec=spec, x=x)
+                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1134,7 +1134,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(Resistor(10000.0; name=:Rb), ctx, vb, base)
                     stamp!(Resistor(1000.0; name=:Rc), ctx, vcc, collector)
                     # Pass nothing for substrate - should trigger $port_connected(sub) == 0
-                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, nothing; spec=spec, x=x)
+                    stamp!(sp_bjt(; bf=100.0, is=1e-15), ctx, collector, base, 0, nothing; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1168,7 +1168,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # N-channel JFET (source grounded)
-                    stamp!(sp_jfet1(; vt0=-2.0, beta=1e-3), ctx, drain, gate, 0; spec=spec, x=x)
+                    stamp!(sp_jfet1(; vt0=-2.0, beta=1e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1202,7 +1202,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load
                     stamp!(Resistor(500.0; name=:Rd), ctx, vdd, drain)
                     # GaAs MESFET (source grounded)
-                    stamp!(sp_mes1(; vt0=-1.0, beta=2.5e-3), ctx, drain, gate, 0; spec=spec, x=x)
+                    stamp!(sp_mes1(; vt0=-1.0, beta=2.5e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1237,7 +1237,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # NMOS with proper dimensions (source and bulk grounded)
                     # l and w must be set for proper operation
-                    stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1271,7 +1271,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # N-channel JFET (source grounded)
-                    stamp!(sp_jfet2(; vto=-2.0, beta=1e-3), ctx, drain, gate, 0; spec=spec, x=x)
+                    stamp!(sp_jfet2(; vto=-2.0, beta=1e-3), ctx, drain, gate, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1305,7 +1305,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load resistor
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # NMOS with proper dimensions (source and bulk grounded)
-                    stamp!(sp_mos2(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_mos2(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1339,7 +1339,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load resistor
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # NMOS with proper dimensions (source and bulk grounded)
-                    stamp!(sp_mos3(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_mos3(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1372,7 +1372,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(VoltageSource(5.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(2.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_mos6(; l=1e-6, w=10e-6, vto=0.7, u0=600.0, tox=10e-9), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_mos6(; l=1e-6, w=10e-6, vto=0.7, u0=600.0, tox=10e-9), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1406,7 +1406,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     # Drain load resistor
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
                     # NMOS with proper dimensions (source and bulk grounded)
-                    stamp!(sp_mos9(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_mos9(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1439,7 +1439,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(VoltageSource(1.8; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(1.0; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_bsim3v3(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_bsim3v3(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1474,7 +1474,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(Resistor(100.0; name=:Rd), ctx, vdd, drain)
                     # VDMOS with 5 terminals: d, g, s, t(thermal), tc(thermal case)
                     # source, thermal nodes grounded
-                    stamp!(sp_vdmos(; vto=2.0, kp=0.5), ctx, drain, gate, 0, 0, 0; spec=spec, x=x)
+                    stamp!(sp_vdmos(; vto=2.0, kp=0.5), ctx, drain, gate, 0, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1524,7 +1524,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     stamp!(VoltageSource(1.0; name=:Vdd), ctx, vdd, 0)
                     stamp!(VoltageSource(0.5; name=:Vg), ctx, gate, 0)
                     stamp!(Resistor(1000.0; name=:Rd), ctx, vdd, drain)
-                    stamp!(sp_bsim4v8(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; spec=spec, x=x)
+                    stamp!(sp_bsim4v8(; l=100e-9, w=1e-6), ctx, drain, gate, 0, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1572,8 +1572,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     mid = get_node!(ctx, :mid)
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
-                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, vcc, mid; _mna_spec_=spec, _mna_x_=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1590,8 +1590,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     mid = get_node!(ctx, :mid)
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    stamp!(StringResistor(mode="double", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
-                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+                    stamp!(StringResistor(mode="double", R=1000.0), ctx, vcc, mid; _mna_spec_=spec, _mna_x_=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1609,8 +1609,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                     mid = get_node!(ctx, :mid)
 
                     stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-                    stamp!(StringResistor(mode="half", R=1000.0), ctx, vcc, mid; spec=spec, x=x)
-                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; spec=spec, x=x)
+                    stamp!(StringResistor(mode="half", R=1000.0), ctx, vcc, mid; _mna_spec_=spec, _mna_x_=x)
+                    stamp!(StringResistor(mode="normal", R=1000.0), ctx, mid, 0; _mna_spec_=spec, _mna_x_=x)
 
                     return ctx
                 end
@@ -1649,7 +1649,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                        ctx, vin, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Diode from input to output (forward biased for positive input)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vin, vout; x=x, spec=spec)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
 
                 # Load resistor and smoothing capacitor
                 stamp!(Resistor(params.Rload), ctx, vout, 0)
@@ -1701,7 +1701,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(Resistor(params.R), ctx, vin, vout)
 
                 # Clipping diode to ground
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vout, 0; x=x, spec=spec)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vout, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -1749,7 +1749,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 # MOSFET
                 stamp!(VAMOSCap(Kp=params.Kp, Vth=params.Vth, Cgs=1e-12, Cgd=0.5e-12),
-                       ctx, vdrain, vgate, 0; x=x, spec=spec)
+                       ctx, vdrain, vgate, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -1811,7 +1811,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 # Use sp_bjt directly (loaded and exported from Tier 6)
                 # Use default Is=1e-16 for better biasing
                 stamp!(sp_bjt(; bf=100.0),
-                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+                       ctx, vcollector, vbase, 0, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -1866,8 +1866,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                        ctx, vneg, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Two diodes to common output
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vpos, vout; x=x, spec=spec)
-                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vneg, vout; x=x, spec=spec)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vpos, vout; _mna_x_=x, _mna_spec_=spec)
+                stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vneg, vout; _mna_x_=x, _mna_spec_=spec)
 
                 # Load resistor and smoothing capacitor
                 stamp!(Resistor(params.Rload), ctx, vout, 0)
@@ -1926,8 +1926,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 out = get_node!(ctx, :out)
 
                 stamp!(VoltageSource(params.V), ctx, v, 0)
-                stamp!(sp_resistor(; r=params.R), ctx, v, out; spec=spec, x=x)
-                stamp!(sp_capacitor(; c=params.C), ctx, out, 0; spec=spec, x=x)
+                stamp!(sp_resistor(; r=params.R), ctx, v, out; _mna_spec_=spec, _mna_x_=x)
+                stamp!(sp_capacitor(; c=params.C), ctx, out, 0; _mna_spec_=spec, _mna_x_=x)
 
                 return ctx
             end
@@ -1959,8 +1959,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 vout = get_node!(ctx, :vout)
 
                 stamp!(VoltageSource(params.V), ctx, vin, 0)
-                stamp!(sp_diode(; is=1e-14), ctx, vin, vout; x=x, spec=spec)
-                stamp!(sp_resistor(; r=params.R), ctx, vout, 0; spec=spec, x=x)
+                stamp!(sp_diode(; is=1e-14), ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
+                stamp!(sp_resistor(; r=params.R), ctx, vout, 0; _mna_spec_=spec, _mna_x_=x)
 
                 return ctx
             end
@@ -1996,9 +1996,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
                        ctx, vgate, 0; t=spec.time, _sim_mode_=spec.mode)
-                stamp!(sp_resistor(; r=params.Rd), ctx, vdd, vdrain; spec=spec, x=x)
+                stamp!(sp_resistor(; r=params.Rd), ctx, vdd, vdrain; _mna_spec_=spec, _mna_x_=x)
                 stamp!(sp_mos1(; vto=1.0, kp=1e-4),
-                       ctx, vdrain, vgate, 0, 0; x=x, spec=spec)
+                       ctx, vdrain, vgate, 0, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -2038,10 +2038,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
                        ctx, vbase, 0; t=spec.time, _sim_mode_=spec.mode)
-                stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; spec=spec, x=x)
+                stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; _mna_spec_=spec, _mna_x_=x)
                 # Use default Is=1e-16 for proper biasing
                 stamp!(sp_bjt(; bf=100.0),
-                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+                       ctx, vcollector, vbase, 0, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end
@@ -2081,10 +2081,10 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
                 stamp!(VoltageSource(params.Vbase; name=:Vb), ctx, vbase, 0)
-                stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; spec=spec, x=x)
+                stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; _mna_spec_=spec, _mna_x_=x)
                 # Use default Is=1e-16 for proper biasing
                 stamp!(sp_bjt(; bf=100.0),
-                       ctx, vcollector, vbase, 0, 0; x=x, spec=spec)
+                       ctx, vcollector, vbase, 0, 0; _mna_x_=x, _mna_spec_=spec)
 
                 return ctx
             end

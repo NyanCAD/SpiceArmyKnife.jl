@@ -1384,11 +1384,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.SubcktCall}, s
         name = LString(instance.name)
 
         # Generate stamp! call for VA module
-        # VA devices use _sim_mode_ instead of mode (see generate_mna_stamp_method_nterm)
+        # VA devices use _mna_*_ prefixes to avoid conflicts (see generate_mna_stamp_method_nterm)
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    t = spec.time, _sim_mode_ = spec.mode, x = x)
+                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
             end
         end
     end
@@ -1484,11 +1484,11 @@ function cg_mna_instance_subcircuit!(state::CodegenState, instance::SNode{SP.Sub
 
         port_exprs = [cg_net_name!(state, port) for port in instance.nodes]
 
-        # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
+        # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
         return quote
             let dev = $va_module_ref(; $(explicit_kwargs...))
                 $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                    t = spec.time, _sim_mode_ = spec.mode, x = x)
+                    _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
             end
         end
     end
@@ -1745,11 +1745,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SC.Instance})
                 push!(explicit_kwargs, Expr(:kw, param_name, param_val))
             end
 
-            # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
+            # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
             return quote
                 let dev = $va_module_ref(; $(explicit_kwargs...))
                     $(MNA).stamp!(dev, ctx, $(port_exprs...);
-                        t = spec.time, _sim_mode_ = spec.mode, x = x)
+                        _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
                 end
             end
         elseif haskey(state.sema.subckts, master_sym)
@@ -1829,11 +1829,11 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.MOSFET})
         device_expr = Expr(:call, model_name, param_kwargs...)
     end
 
-    # NOTE: VA modules use _sim_mode_ to avoid conflicts with VA parameter names
+    # NOTE: VA modules use _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     return quote
         let dev = $device_expr
             $(MNA).stamp!(dev, ctx, $d, $g, $s, $b;
-                t = spec.time, _sim_mode_ = spec.mode, x = x)
+                _mna_t_ = spec.time, _mna_mode_ = spec.mode, _mna_x_ = x, _mna_spec_ = spec)
         end
     end
 end

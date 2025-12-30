@@ -2,9 +2,16 @@
 
 ## Executive Summary
 
-The current VA integration (`vasim.jl`) uses ForwardDiff to automatically extract Jacobians from Verilog-A contribution statements. While elegant, this approach allocates ~2KB per Newton iteration due to Dual number creation and COO stamping.
+The current VA integration (`vasim.jl`) uses ForwardDiff to automatically extract Jacobians from Verilog-A contribution statements. This approach allocates ~2KB per Newton iteration, but **ForwardDiff Duals should inline to simple arithmetic** when properly specialized.
 
-This document outlines a path to zero-allocation VA model evaluation while preserving correctness and GPU compatibility.
+The key insight is that Duals with compile-time known sizes are stack-allocated and should be zero-allocation. The allocations likely come from:
+1. Runtime type dispatch (`if x isa Dual{Tag}`)
+2. Dynamic tuple sizes for partials
+3. Closure variable capture
+
+This document outlines how to make Dual-based evaluation zero-allocation while preserving correctness and GPU compatibility.
+
+**Note**: Enzyme is an alternative AD approach but may have GPU compatibility issues. Sticking with ForwardDiff Duals is simpler and proven to work with StaticArrays.
 
 ## Current Architecture Analysis
 
@@ -68,12 +75,39 @@ end
 
 ## Zero-Allocation Architecture
 
+### Key Insight: Duals Inline to Arithmetic
+
+When ForwardDiff Duals have compile-time known sizes, they inline to simple scalar operations:
+
+```julia
+# This Dual code:
+V = Dual{Tag}(1.0, (1.0, 0.0))  # V with ∂V/∂V₁=1, ∂V/∂V₂=0
+I = V / R
+
+# Compiles to equivalent of:
+I_val = V_val / R
+I_partial_1 = V_partial_1 / R  # = 1/R
+I_partial_2 = V_partial_2 / R  # = 0
+```
+
+No heap allocation needed - just scalar arithmetic on the stack.
+
 ### Design Principles
 
-1. **Separate compilation from evaluation**: Discover structure once, evaluate many times
-2. **Static typing**: Use compile-time known sizes to avoid dynamic dispatch
-3. **Pre-computed indices**: Store COO indices, not Dual-based discovery
-4. **Symbolic derivatives where possible**: Many VA contributions have analytic Jacobians
+1. **Keep ForwardDiff Duals** - they work, just need proper specialization
+2. **Compile-time known sizes** - use `Val{N}` to fix partials tuple length
+3. **Eliminate runtime type dispatch** - use `@generated` or multiple dispatch
+4. **Pre-computed COO indices** - separate structure discovery from value evaluation
+
+### Why NOT Symbolic Derivatives
+
+Extracting symbolic derivatives from Verilog-A AST would require:
+- Pattern matching for all VA math functions
+- Handling nested expressions, conditionals, loops
+- Special cases for ddt(), ddx(), idt()
+- Massive complexity for marginal benefit
+
+ForwardDiff already does this correctly. We just need to make it zero-allocation.
 
 ### Type Hierarchy
 
@@ -176,120 +210,175 @@ end
 
 ## Implementation Phases
 
-### Phase 1: Pattern Extraction (No code changes to vasim.jl)
+### Phase 1: Fix Dual Size at Compile Time
 
-Create infrastructure to extract stamp patterns from existing stamp! calls:
+The generated stamp! method creates Duals with runtime-determined size. Fix this:
 
 ```julia
-# New file: src/mna/va_compiled.jl
+# Current (vasim.jl:1588) - partials tuple size known but not propagated:
+partials_tuple = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
+$node_sym = Dual{JacobianTag}($(Symbol("V_", i)), $partials_tuple...)
 
-struct VAStampPattern
-    G_entries::Vector{Tuple{Int,Int}}  # (row, col) pairs
-    C_entries::Vector{Tuple{Int,Int}}
-    b_entries::Vector{Int}             # row indices
-end
+# Better - use Partials{N} explicitly:
+# This ensures ForwardDiff knows the size at compile time
+$node_sym = Dual{JacobianTag,Float64,$n_all_nodes}(
+    $(Symbol("V_", i)),
+    Partials{$n_all_nodes,Float64}($partials_tuple))
+```
 
-function extract_stamp_pattern(builder, params, spec, n)
-    ctx = builder(params, spec; x=zeros(n))
-    return VAStampPattern(
-        [(i, j) for (i, j) in zip(ctx.G_I, ctx.G_J)],
-        [(i, j) for (i, j) in zip(ctx.C_I, ctx.C_J)],
-        collect(ctx.b_I)
-    )
+### Phase 2: Aggressive Inlining for Constant Folding
+
+The current code uses runtime `isa` checks (vasim.jl:1434-1461):
+
+```julia
+# Current - runtime dispatch:
+if I_branch isa ForwardDiff.Dual{ContributionTag}
+    # has ddt
+elseif I_branch isa ForwardDiff.Dual
+    # pure resistive
+else
+    # scalar
 end
 ```
 
-### Phase 2: Value-Only Evaluation
+**Key insight**: With aggressive inlining, these branches can be **constant-folded** by the compiler because the type of `I_branch` is known at compile time!
 
-Add a second pass that only evaluates values (not structure):
-
+**Fix 1**: Ensure `@inline` on all VA evaluation functions:
 ```julia
-function evaluate_stamps!(G_vals, C_vals, b_vals, dev, pattern, x, t, spec)
-    # Evaluate contribution expressions
-    # Write values to pre-sized arrays
-    # No COO structure modification
+@inline function va_ddt(x::Real)
+    Dual{ContributionTag}(zero(x), x)
+end
+
+@inline function evaluate_branch(...)
+    # The type of I_branch is inferrable from the contribution expression
+    I_branch = expr...
+    # If expr uses va_ddt, type is Dual{ContributionTag,...}
+    # If not, type is Dual{JacobianTag,...} or scalar
+    # Compiler knows this → constant folds the isa check
 end
 ```
 
-### Phase 3: Symbolic Jacobian for Common Patterns
+**Fix 2**: Use `@generated` to specialize at codegen time:
+```julia
+# Track at codegen time whether device has reactive components
+has_ddt = any(expr -> contains_ddt(expr), contributions)
 
-Many VA contributions have simple analytic Jacobians:
+# Generate specialized code path (no runtime check needed)
+if has_ddt
+    # Generate code that expects ContributionTag outer Dual
+else
+    # Generate code that expects JacobianTag Dual or scalar
+end
+```
 
-| Contribution | Jacobian |
-|--------------|----------|
-| `V/R` | `dI/dV = 1/R` |
-| `C*ddt(V)` | `dq/dV = C` |
-| `Is*(exp(V/Vt)-1)` | `dI/dV = Is/Vt * exp(V/Vt)` |
-| `gm*V` | `dI/dV = gm` |
+**Fix 3**: Mark stamp! functions for forced inlining:
+```julia
+# In generated stamp! method
+@inline function stamp!(dev::$symname, ctx, nodes...; x, t, spec)
+    # With @inline, the entire evaluation chain can be inlined
+    # Type inference propagates through, branches constant-fold
+    ...
+end
+```
 
-Generate specialized code for these patterns in `make_mna_device()`:
+When the entire call chain is inlined:
+1. Dual types are known at compile time
+2. `if x isa SomeType` evaluates to `if true` or `if false`
+3. Dead branches are eliminated
+4. Result: just scalar arithmetic
+
+### Phase 3: Pre-allocate COO Structure
+
+Separate structure discovery from value updates:
 
 ```julia
-# In vasim.jl, detect simple patterns
-function extract_symbolic_jacobian(expr, node_syms)
-    # Pattern match common forms
-    if is_linear_in_voltage(expr)
-        return generate_linear_jacobian(expr, node_syms)
-    elseif is_exp_form(expr)
-        return generate_exp_jacobian(expr, node_syms)
-    else
-        # Fall back to AD for complex expressions
-        return nothing
+struct VACompiledCircuit{N,T}
+    # COO indices (discovered once, frozen)
+    G_I::Vector{Int}
+    G_J::Vector{Int}
+    G_V::Vector{T}  # Pre-allocated, updated in-place
+
+    C_I::Vector{Int}
+    C_J::Vector{Int}
+    C_V::Vector{T}
+
+    b_I::Vector{Int}
+    b_V::Vector{T}
+
+    # Evaluation function (specialized for this device)
+    eval_fn::Function
+end
+
+function rebuild_values!(vc::VACompiledCircuit, x, t, params)
+    # Reset values (no allocation)
+    fill!(vc.G_V, zero(T))
+    fill!(vc.C_V, zero(T))
+    fill!(vc.b_V, zero(T))
+
+    # Evaluate with Duals and write to pre-allocated arrays
+    vc.eval_fn(vc.G_V, vc.C_V, vc.b_V, x, t, params)
+end
+```
+
+### Phase 4: StaticArrays for GPU Ensemble
+
+For small circuits with known size N, use StaticArrays throughout:
+
+```julia
+struct VAStaticCircuit{N,T,F}
+    # Device evaluator (generated, takes SVector returns SMatrix/SVector)
+    eval_fn::F
+    params::NamedTuple
+end
+
+# Evaluation with Duals but zero allocation (all stack):
+@inline function evaluate_static(
+    vc::VAStaticCircuit{N,T,F},
+    u::SVector{N,T}, t
+) where {N,T,F}
+    # Create Duals with StaticArrays partials
+    u_duals = create_jacobian_duals(u)  # Returns SVector of Duals
+
+    # Evaluate device (all on stack)
+    G, C, b = vc.eval_fn(u_duals, t, vc.params)
+
+    return G, C, b  # SMatrix, SMatrix, SVector
+end
+
+# The key: create_jacobian_duals uses Partials backed by SVector
+@generated function create_jacobian_duals(u::SVector{N,T}) where {N,T}
+    exprs = [:(Dual{JacobianTag,T,N}(u[$i],
+               Partials{N,T}(ntuple(j -> j == $i ? one(T) : zero(T), Val($N)))))
+             for i in 1:N]
+    :(SVector{$N}($(exprs...)))
+end
+```
+
+### Phase 5: Verify Zero Allocation
+
+Create tests that verify the full evaluation path is allocation-free:
+
+```julia
+@testset "VA model zero allocation" begin
+    # Compile VA resistor to static form
+    va_circuit = compile_va_static(va_resistor, params, Val(2))
+
+    u = @SVector [1.0, 0.0]
+
+    # Warmup
+    G, C, b = evaluate_static(va_circuit, u, 0.0)
+
+    # Test
+    function test_va_alloc(vc, n)
+        for _ in 1:n
+            u = @SVector [1.0, 0.0]
+            G, C, b = evaluate_static(vc, u, 0.0)
+        end
     end
-end
-```
+    test_va_alloc(va_circuit, 10)
 
-### Phase 4: StaticArrays Integration
-
-Create zero-allocation versions for GPU ensemble:
-
-```julia
-struct VAStaticResistor{T}
-    R::T
-end
-
-# Generated at compile time, no duals
-@inline function va_eval_resistor(dev::VAStaticResistor{T},
-                                   u::SVector{N,T}, t) where {N,T}
-    V1, V2 = u[1], u[2]
-    I = (V1 - V2) / dev.R
-    dI_dV1 = one(T) / dev.R
-    dI_dV2 = -one(T) / dev.R
-    return (I=I, dI=(dI_dV1, dI_dV2), q=zero(T), dq=(zero(T), zero(T)))
-end
-```
-
-### Phase 5: BSIM4 and Complex Models
-
-For complex models (BSIM4, PSP, etc.), use hybrid approach:
-
-1. **Model-specific optimizations**: Pre-compute expensive terms once per op
-2. **Caching**: Store intermediate values that don't change per iteration
-3. **Selective AD**: Only use duals for genuinely nonlinear sub-expressions
-
-```julia
-struct BSIM4Compiled{T}
-    # Static parameters
-    params::BSIM4Params{T}
-
-    # Cached values (recomputed when bias changes significantly)
-    cache::BSIM4Cache{T}
-
-    # Stamp pattern (fixed after first call)
-    pattern::VAStampPattern
-end
-
-function evaluate_bsim4!(vals, dev::BSIM4Compiled, x, t)
-    # Check if cache needs refresh
-    if needs_refresh(dev.cache, x)
-        refresh_cache!(dev.cache, x, dev.params)
-    end
-
-    # Evaluate using cached values (mostly scalar ops)
-    Ids, gm, gds, ... = compute_ids(dev.cache, x)
-
-    # Pack into output arrays
-    # No Dual allocation needed
+    allocs = @allocated test_va_alloc(va_circuit, 100)
+    @test allocs == 0
 end
 ```
 
@@ -361,10 +450,16 @@ end
 
 ## Conclusion
 
-Zero-allocation VA models are achievable through:
-1. Separating structure discovery from value evaluation
-2. Using compile-time code generation for common patterns
-3. Pre-computing symbolic Jacobians where possible
-4. Integrating with StaticArrays for GPU support
+Zero-allocation VA models are achievable by **fixing how Duals are used**, not replacing them:
 
-The migration can be done incrementally, starting with simple devices and progressing to complex models like BSIM4.
+1. **Fix Dual sizes at compile time** - Use `Dual{Tag,T,N}` with explicit N
+2. **Eliminate runtime type dispatch** - Generate specialized code paths at codegen time
+3. **Pre-allocate COO structure** - Separate structure discovery from value updates
+4. **Use StaticArrays for partials** - Stack-allocated Partials{N,T}
+
+ForwardDiff Duals inline to simple arithmetic when properly specialized. No need for:
+- Symbolic derivative extraction from VA AST
+- Analytical Jacobian tables
+- Complex pattern matching
+
+The migration can be done incrementally by modifying `generate_mna_stamp_method_nterm()` in vasim.jl to emit more specialized code.

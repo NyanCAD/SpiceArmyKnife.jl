@@ -196,9 +196,10 @@ sol = MNA.solve_dc(sys)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
-function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit)
+function parse_spice_to_mna(spice_code::String; circuit_name::Symbol=:circuit,
+                            imported_hdl_modules::Vector{Module}=Module[])
     ast = SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
-    return make_mna_circuit(ast; circuit_name)
+    return make_mna_circuit(ast; circuit_name, imported_hdl_modules)
 end
 
 """
@@ -262,7 +263,7 @@ macro mna_sp_str(str, flag="")
     enable_julia_escape = 'e' in flag
     inline = 'i' in flag
     sa = SpectreNetlistParser.parse(IOBuffer(str); start_lang=:spice, enable_julia_escape,
-        implicit_title = !inline, fname=String(__source__.file), line_offset=__source__.line-1)
+        implicit_title = !inline, fname=String(__source__.file), srcline=__source__.line)
 
     # Generate MNA builder function
     circuit_name = gensym(:circuit)

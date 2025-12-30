@@ -1,0 +1,28 @@
+spice 
+
+* Diode cascade
+
+.model D1N4007 D IS=76.9p RS=42.0m BV=1.00k IBV=5.00u CJO=26.5p  M=0.333 N=1.45 
+* TT=4.32u
+
+vs 1 0 sin offset=0 amplitude=50 frequency=100k
+r1 a 1 0.01
+c1 1 2 100n
+d1 0 1 d1n4007
+c2 0 10 100n
+d2 1 10 d1n4007
+c3 1 2  100n
+d3 10 2 d1n4007
+c4 10 20 100n
+d4 2 20 d1n4007
+
+.options method=gear
+
+*.print tran v(1) v(20)
+.tran 0 5m 0.01u 0.01u quiet
+* > data.out
+* .!gnuplot -e "plot \"data.out\" using 1:3 with lines, \"data.out\" using 1:2 with lines" -p
+
+.status
+
+.end

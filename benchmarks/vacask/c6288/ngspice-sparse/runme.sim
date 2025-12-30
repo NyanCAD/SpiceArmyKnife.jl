@@ -1,0 +1,79 @@
+C6288 16x16 multiplier
+
+.include "models.inc"
+.include "multiplier.inc"
+
+vdd vdd 0 1.2
+vss vss 0 0
+  
+*v1 in1 0 0 pulse(0 1.2 1n 10p 10p 1n)
+*v2 in2 0 0 pulse(0 1.2 1.5n 10p 10p 1n)
+*xload dummy out not
+*x1 out in1 in2 nor
+
+x1  a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15
++   b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15
++   p0 p1 p2 p3 p4 p5 p6 p7 p8 p9 p10 p11 p12 p13 p14 p15
++   p16 p17 p18 p19 p20 p21 p22 p23 p24 p25 p26 p27 p28 p29 p30 p31
++ c6288
+
+.subckt v01 out ref 
+  vdrv int 0 pulse 0 1.2 0.1n 0.1n
+  rdrv int out r=1
+.ends
+
+  xa0  a0  0 v01
+  xa1  a1  0 v01
+  xa2  a2  0 v01
+  xa3  a3  0 v01
+  xa4  a4  0 v01
+  xa5  a5  0 v01
+  xa6  a6  0 v01
+  xa7  a7  0 v01
+  xa8  a8  0 v01
+  xa9  a9  0 v01
+  xa10 a10 0 v01
+  xa11 a11 0 v01
+  xa12 a12 0 v01
+  xa13 a13 0 v01
+  xa14 a14 0 v01
+  xa15 a15 0 v01
+  
+  xvb0  b0  0 v01
+  xvb1  b1  0 v01
+  xvb2  b2  0 v01
+  xvb3  b3  0 v01
+  xvb4  b4  0 v01
+  xvb5  b5  0 v01
+  xvb6  b6  0 v01
+  xvb7  b7  0 v01
+  xvb8  b8  0 v01
+  xvb9  b9  0 v01
+  xvb10 b10 0 v01
+  xvb11 b11 0 v01
+  xvb12 b12 0 v01
+  xvb13 b13 0 v01
+  xvb14 b14 0 v01
+  xvb15 b15 0 v01
+  
+.control
+  pre_osdi psp103v4.osdi
+  save v(p0) v(p1) v(p2) v(p3) v(p4) v(p5) v(p6) v(p7) v(p8) v(p9)
+  save v(p10) v(p11) v(p12) v(p13) v(p14) v(p15) v(p16) v(p17) v(p18) v(p19)
+  save v(p20) v(p21) v(p22) v(p23) v(p24) v(p25) v(p26) v(p27) v(p28) v(p29)
+  save v(p30) v(p31)
+  save v(a0) v(a1) v(a2) v(a3) v(a4) v(a5) v(a6) v(a7)
+  save v(a8) v(a9) v(a10) v(a11) v(a12) v(a13) v(a14) v(a15)
+  save v(b0) v(b1) v(b2) v(b3) v(b4) v(b5) v(b6) v(b7)
+  save v(b8) v(b9) v(b10) v(b11) v(b12) v(b13) v(b14) v(b15)
+  tran 2p 2n uic
+  rusage all
+  set noaskquit
+  quit
+  plot p0*0.4 p1*0.4-1 p2*0.4-2 p3*0.4-3 p4*0.4-4 p5*0.4-5 p6*0.4-6 p7*0.4-7 
+  + p8*0.4-8 p9*0.4-9 p10*0.4-10 p11*0.4-11 p12*0.4-12 p13*0.4-13 p14*0.4-14 p15*0.4-15
+  + p16*0.4-16 p17*0.4-17 p18*0.4-18 p19*0.4-19 p20*0.4-20 p21*0.4-21 p22*0.4-22 p23*0.4-23
+  + p24*0.4-24 p25*0.4-25 p26*0.4-26 p27*0.4-27 p28*0.4-28 p29*0.4-29 p30*0.4-30 p31*0.4-31
+.endc
+
+.end

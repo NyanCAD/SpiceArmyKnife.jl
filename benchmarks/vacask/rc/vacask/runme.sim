@@ -1,0 +1,55 @@
+RC circuit excited by a pulse train 
+
+// Profile everything except evalAndLoad() and KLU
+// Demonstrates the general overhead
+
+load "spice/resistor.osdi"
+load "spice/capacitor.osdi"
+
+model r sp_resistor
+model c sp_capacitor
+model vsource vsource
+
+vs (1 0) vsource dc=0 type="pulse" val0=0 val1=1 rise=1u fall=1u width=1m period=2m
+r1 (1 2) r r=1k
+c1 (2 0) c c=1u
+
+control
+  // options tran_method="gear2"
+  options tran_method="trap" // nr_bypass=1
+  // options nr_residualcheck=1 reltol=1e-3 vntol=1e-6 tran_lteratio=3.5 tran_itl=50
+  // options relrefsol="pointlocal" relrefres="pointlocal" relreflte="pointlocal"
+  // options relrefsol="local" relrefres="local" relreflte="local"
+  analysis tran1 tran step=1u stop=1 maxstep=1u
+  print stats
+  postprocess(PYTHON, "runme.py")
+endc
+
+
+embed "runme.py" <<<FILE
+from rawfile import rawread
+from runtest import *
+import numpy as np
+import sys
+
+tests=[]
+
+tran1 = rawread('tran1.raw').get()
+t = tran1["time"]
+v1 = tran1["1"]
+v2 = tran1["2"]
+print("Points", t.size)
+
+# sys.exit(0)
+
+import matplotlib.pyplot as plt 
+
+fig1, ax1 = plt.subplots(1, 1)
+fig1.axes[0].set_title('RC pulse train')
+fig1.axes[0].set_ylabel('V [V]')
+fig1.axes[0].set_xlabel('time [ms]')
+fig1.axes[0].plot(t*1000, v1, color="blue", label="v(1)")
+fig1.axes[0].plot(t*1000, v2, color="red", label="v(2)", marker=".")
+plt.show()
+>>>FILE
+

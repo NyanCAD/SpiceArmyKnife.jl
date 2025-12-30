@@ -1,0 +1,65 @@
+Full-wave rectifier with smoothing and load
+
+// Profile everything except evalAndLoad() and KLU
+// Demonstrates the general overhead and the overhead of the nonlinear solver
+
+load "spice/resistor.osdi"
+load "spice/capacitor.osdi"
+load "spice/sn/diode.osdi"
+
+model r sp_resistor
+model c sp_capacitor
+model vsource vsource
+model d1n4007 sp_diode ( is=76.9p rs=42.0m bv=1.00k ibv=5.00u cjo=26.5p  m=0.333 n=1.45 /* tt=4.32u */ )
+
+vs (inp inn) vsource dc=0 type="sine" sinedc=0.0 ampl=20 freq=50.0
+
+d1 (inp outp) d1n4007
+d2 (outn inp) d1n4007
+d3 (inn outp) d1n4007
+d4 (outn inn) d1n4007
+cl (outp outn) c c=100u
+rl (outp outn) r r=1k
+rgnd1 (inn 0) r r=1G
+rgnd2 (outn 0) r r=1G
+
+control
+  options tran_method="gear2" nr_bypass=0 nr_contbypass=1 // tran_debug=1
+  // options tran_method="trap"  
+  // options nr_residualcheck=1 reltol=1e-3 vntol=1e-6 tran_lteratio=3.5 tran_itl=50
+  // options relref="pointlocal"
+  // options relrefsol="pointlocal" relrefres="pointlocal" relreflte="pointlocal"
+  // options relrefsol="local" relrefres="local" relreflte="local"
+  analysis tran1 tran step=1u stop=1 maxstep=1u 
+  print stats
+  postprocess(PYTHON, "runme.py")
+endc
+
+embed "runme.py" <<<FILE
+from rawfile import rawread
+from runtest import *
+import numpy as np
+import sys
+
+tests=[]
+
+tran1 = rawread('tran1.raw').get()
+t = tran1["time"]
+v1 = tran1["inp"] - tran1["inn"]
+v2 = tran1["outp"] - tran1["outn"]
+print("Points", t.size)
+
+# sys.exit(0)
+
+import matplotlib.pyplot as plt 
+
+fig1, ax1 = plt.subplots(1, 1)
+fig1.axes[0].set_title('Full wave rectifier with smoothing and load')
+fig1.axes[0].set_ylabel('V [V]')
+fig1.axes[0].set_xlabel('time [ms]')
+fig1.axes[0].plot(t*1000, v1, color="blue", label="v(1)")
+fig1.axes[0].plot(t*1000, v2, color="red", label="v(2)")
+plt.show()
+
+>>>FILE
+

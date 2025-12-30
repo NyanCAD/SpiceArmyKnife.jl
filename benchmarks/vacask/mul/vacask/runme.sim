@@ -1,0 +1,59 @@
+Diode cascade
+
+load "spice/resistor.osdi"
+load "spice/capacitor.osdi"
+load "spice/sn/diode.osdi"
+
+model r sp_resistor
+model c sp_capacitor
+model d1n4007 sp_diode ( is=76.9p rs=42.0m bv=1.00k ibv=5.00u cjo=26.5p  m=0.333 n=1.45 /* tt=4.32u */ )
+model vsource vsource
+
+parameters c=100n
+
+vs (a 0) vsource dc=0 type="sine" sinedc=0.0 ampl=50 freq=100k
+r1 (a 1) r r=0.01
+c1 (1 2) c c=c
+d1 (0 1) d1n4007
+c2 (0 10) c c=c
+d2 (1 10) d1n4007
+c3 (1 2) c c=c
+d3 (10 2) d1n4007
+c4 (10 20) c c=c
+d4 (2 20) d1n4007
+
+control
+  options tran_method="gear2" 
+  options nr_residualcheck=0 reltol=1e-3 vntol=1e-6 tran_lteratio=3.5 tran_itl=50
+  // options relrefsol="pointlocal" relrefres="pointlocal" relreflte="pointlocal"
+  // options relrefsol="local" relrefres="local" relreflte="local"
+  analysis tran1 tran step=0.01u stop=5m maxstep=0.01u 
+  print stats
+  postprocess(PYTHON, "runme.py")
+endc
+
+embed "runme.py" <<<FILE
+from rawfile import rawread
+from runtest import *
+import numpy as np
+import sys
+
+tests=[]
+
+tran1 = rawread('tran1.raw').get()
+t = tran1["time"]
+v20 = tran1["20"]
+print("Points", t.size)
+
+# sys.exit(0)
+
+import matplotlib.pyplot as plt 
+
+fig1, ax1 = plt.subplots(1, 1)
+fig1.axes[0].set_title('Diode cascade voltage multiplier')
+fig1.axes[0].set_ylabel('V [V]')
+fig1.axes[0].set_xlabel('time [ms]')
+fig1.axes[0].plot(t*1000, v20, color="red", label="v(1) exact")
+plt.show()
+
+>>>FILE

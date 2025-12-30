@@ -477,6 +477,11 @@ end
 
 spicecall(::Type{ParsedModel}, model, kwargs) = ParsedModel(model, case_adjust_kwargs(model, kwargs))
 
+# Used by aliasextract.jl for setting up debug scopes for net names
+function net_alias(net, name)
+    observed!(net.V, DScope(debug_scope[], name))
+end
+
 function modify_spice(io::IO, node::SNode, nt::NamedTuple, startof)
     params = get(nt, :params, NamedTuple())
     for childnode in AbstractTrees.children(node)

@@ -375,7 +375,7 @@ This handles duplicate COO entries (same (i,j)) by accumulation.
 # Complexity
 O(nnz) - linear in number of nonzeros, no allocation or sorting.
 """
-function update_sparse_from_coo!(S::SparseMatrixCSC, V::Vector{Float64},
+@inline function update_sparse_from_coo!(S::SparseMatrixCSC, V::Vector{Float64},
                                   mapping::Vector{Int}, n_entries::Int)
     nz = nonzeros(S)
     fill!(nz, 0.0)
@@ -397,7 +397,7 @@ end
 
 Update the b vector from direct and deferred stamps.
 """
-function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
+@inline function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
                           b_deferred_I::Vector{Int}, b_deferred_V::Vector{Float64},
                           n_nodes::Int)
     fill!(b, 0.0)

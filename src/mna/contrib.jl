@@ -148,7 +148,7 @@ Reactive part stamps:
 - C[p,p] += ∂q/∂Vp, C[p,n] += ∂q/∂Vn
 - C[n,p] -= ∂q/∂Vp, C[n,n] -= ∂q/∂Vn
 """
-function stamp_contribution!(
+@inline function stamp_contribution!(
     ctx::MNAContext,
     p::Int, n::Int,
     I_val::Real, I_jac_p::Real, I_jac_n::Real,
@@ -217,7 +217,7 @@ result = evaluate_contribution(contrib, 1.0, 0.0)
 # result.dq_dVp ≈ C
 ```
 """
-function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
+@inline function evaluate_contribution(contrib_fn, Vp::Real, Vn::Real)
     # Create voltage duals for Jacobian computation
     # JacobianTag ≺ ContributionTag ensures ContributionTag is always outer
     Vp_dual = Dual{JacobianTag}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
@@ -313,7 +313,7 @@ stamp_current_contribution!(ctx, p, n, V -> V/R + C * va_ddt(V), x)
 stamp_current_contribution!(ctx, p, n, V -> Is*(exp(V/Vt) - 1), x)
 ```
 """
-function stamp_current_contribution!(
+@inline function stamp_current_contribution!(
     ctx::MNAContext,
     p::Int, n::Int,
     contrib_fn,
@@ -356,7 +356,7 @@ Adds a current variable I and stamps:
 - G[I, p] = 1, G[I, n] = -1 (voltage constraint)
 - b[I] = v_fn(x) (voltage value)
 """
-function stamp_voltage_contribution!(
+@inline function stamp_voltage_contribution!(
     ctx::MNAContext,
     p::Int, n::Int,
     v_fn,
@@ -417,7 +417,7 @@ result = evaluate_charge_contribution(q_fn, 0.3, 0.0)
 # result.C gives the voltage-dependent capacitance at V=0.3
 ```
 """
-function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
+@inline function evaluate_charge_contribution(q_fn, Vp::Real, Vn::Real)
     # Create voltage duals for Jacobian computation
     Vp_dual = Dual{JacobianTag}(Vp, one(Vp), zero(Vp))  # ∂/∂Vp = 1, ∂/∂Vn = 0
     Vn_dual = Dual{JacobianTag}(Vn, zero(Vn), one(Vn))  # ∂/∂Vp = 0, ∂/∂Vn = 1
@@ -486,7 +486,7 @@ For charge q(V) at branch (p,n):
 
 The current I = dq/dt flows from p to n (positive current leaves p).
 """
-function stamp_charge_contribution!(
+@inline function stamp_charge_contribution!(
     ctx::MNAContext,
     p::Int, n::Int,
     q_fn,
@@ -560,7 +560,7 @@ stamp_multiport_charge!(ctx, (d, g, s, b), mosfet_charges, x)
 For each terminal pair (i, j), stamps:
 - C[i, j] += ∂qi/∂Vj (capacitance from node j affecting charge at node i)
 """
-function stamp_multiport_charge!(
+@inline function stamp_multiport_charge!(
     ctx::MNAContext,
     nodes::NTuple{N,Int},
     q_fn,

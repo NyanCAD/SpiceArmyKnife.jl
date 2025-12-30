@@ -1727,8 +1727,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
+    # NOTE: @inline is critical for performance - allows Julia to constant-fold Dual type checks
+    # and eliminate runtime dispatch on contribution types (ContributionTag vs pure Dual vs scalar)
     quote
-        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
+        @inline function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
                                      _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Float64[],
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec())

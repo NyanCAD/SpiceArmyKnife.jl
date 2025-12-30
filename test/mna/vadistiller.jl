@@ -1646,7 +1646,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 # Sine input: 2V amplitude, 1kHz
                 stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
-                       ctx, vin, 0; t=spec.time, mode=spec.mode)
+                       ctx, vin, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Diode from input to output (forward biased for positive input)
                 stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vin, vout; x=x, spec=spec)
@@ -1695,7 +1695,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 # Sine input
                 stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
-                       ctx, vin, 0; t=spec.time, mode=spec.mode)
+                       ctx, vin, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Series resistor
                 stamp!(Resistor(params.R), ctx, vin, vout)
@@ -1742,7 +1742,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 # Gate bias + AC signal
                 # Use DC offset + small AC to stay in active region
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
-                       ctx, vgate, 0; t=spec.time, mode=spec.mode)
+                       ctx, vgate, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Drain resistor
                 stamp!(Resistor(params.Rd), ctx, vdd, vdrain)
@@ -1802,7 +1802,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 # Base bias + AC signal
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
-                       ctx, vbase, 0; t=spec.time, mode=spec.mode)
+                       ctx, vbase, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Collector resistor
                 stamp!(Resistor(params.Rc), ctx, vcc, vcollector)
@@ -1861,9 +1861,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 # Two anti-phase sine sources (simulating center-tapped transformer)
                 stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vpos),
-                       ctx, vpos, 0; t=spec.time, mode=spec.mode)
+                       ctx, vpos, 0; t=spec.time, _sim_mode_=spec.mode)
                 stamp!(SinVoltageSource(0.0, -params.Vamp, params.freq; name=:Vneg),
-                       ctx, vneg, 0; t=spec.time, mode=spec.mode)
+                       ctx, vneg, 0; t=spec.time, _sim_mode_=spec.mode)
 
                 # Two diodes to common output
                 stamp!(VADDiode(Is=1e-14, N=1.0), ctx, vpos, vout; x=x, spec=spec)
@@ -1995,7 +1995,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
-                       ctx, vgate, 0; t=spec.time, mode=spec.mode)
+                       ctx, vgate, 0; t=spec.time, _sim_mode_=spec.mode)
                 stamp!(sp_resistor(; r=params.Rd), ctx, vdd, vdrain; spec=spec, x=x)
                 stamp!(sp_mos1(; vto=1.0, kp=1e-4),
                        ctx, vdrain, vgate, 0, 0; x=x, spec=spec)
@@ -2037,7 +2037,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
                 stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
-                       ctx, vbase, 0; t=spec.time, mode=spec.mode)
+                       ctx, vbase, 0; t=spec.time, _sim_mode_=spec.mode)
                 stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; spec=spec, x=x)
                 # Use default Is=1e-16 for proper biasing
                 stamp!(sp_bjt(; bf=100.0),

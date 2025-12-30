@@ -11,8 +11,8 @@
 using CedarSim
 using CedarSim.MNA
 using OrdinaryDiffEq
+using BenchmarkTools
 using Printf
-using Statistics
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")
@@ -22,43 +22,46 @@ const spice_code = read(spice_file, String)
 const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:rc_circuit)
 eval(circuit_code)
 
+"""
+    setup_simulation(; dtmax=1e-6)
+
+Create and return a fully-prepared MNASim ready for transient analysis.
+This separates problem setup from solve time for accurate benchmarking.
+"""
+function setup_simulation(; dtmax=1e-6)
+    sim = MNASim(rc_circuit)
+    # Perform DC operating point to initialize the circuit
+    MNA.assemble!(sim)
+    return sim
+end
+
 function run_benchmark(; warmup=true, dtmax=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
-    # Warmup run (if requested)
+    # Warmup run (compiles everything)
     if warmup
         println("Warmup run...")
-        sim = MNASim(rc_circuit)
+        sim = setup_simulation(; dtmax=dtmax)
         tran!(sim, (0.0, 0.001); dtmax=dtmax)
     end
 
-    # Benchmark runs
-    n_runs = 6
-    times = Float64[]
-    timepoints = Int[]
+    # Setup the simulation outside the timed region
+    sim = setup_simulation(; dtmax=dtmax)
 
-    for i in 1:n_runs
-        sim = MNASim(rc_circuit)
+    # Benchmark the actual simulation (not setup)
+    println("\nBenchmarking transient analysis...")
+    bench = @benchmark tran!($sim, $tspan; dtmax=$dtmax) samples=6 evals=1 seconds=600
 
-        t_start = time()
-        sol = tran!(sim, tspan; dtmax=dtmax)
-        t_elapsed = time() - t_start
-
-        if i > 1  # Skip first run (still filling caches)
-            push!(times, t_elapsed)
-            push!(timepoints, length(sol.t))
-        end
-
-        @printf("Run %d: %.3f s, %d timepoints\n", i, t_elapsed, length(sol.t))
-    end
-
-    avg_time = mean(times)
-    avg_timepoints = mean(timepoints)
+    # Also run once to get solution statistics
+    sim = setup_simulation(; dtmax=dtmax)
+    sol = tran!(sim, tspan; dtmax=dtmax)
 
     println("\n=== Results ===")
-    @printf("Average time: %.3f s\n", avg_time)
-    @printf("Average timepoints: %.0f\n", avg_timepoints)
-    @printf("Std deviation: %.3f s (%.1f%%)\n", std(times), 100*std(times)/avg_time)
+    @printf("Timepoints: %d\n", length(sol.t))
+    display(bench)
+    println()
+
+    return bench, sol
 end
 
 # Run if executed directly

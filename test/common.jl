@@ -237,7 +237,7 @@ Build and solve a circuit using MNA backend.
 
 # Example
 ```julia
-function my_circuit(params, spec)
+function my_circuit(params, spec, t::Real=0.0)
     ctx = MNAContext()
     vcc = get_node!(ctx, :vcc)
     stamp!(VoltageSource(5.0), ctx, vcc, 0)
@@ -262,7 +262,7 @@ Build and solve a transient simulation using MNA backend.
 
 # Example
 ```julia
-function rc_circuit(params, spec)
+function rc_circuit(params, spec, t::Real=0.0)
     ctx = MNAContext()
     vcc = get_node!(ctx, :vcc)
     out = get_node!(ctx, :out)

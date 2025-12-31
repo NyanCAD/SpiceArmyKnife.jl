@@ -37,8 +37,8 @@ endmodule
     # I(d,s) = 2*R*V(d,s)*V(g,s) = 2*2*5*3 = 60A flows from vcc to gnd
     # V1 sources this current (pushes out of positive terminal), so I_V1 = -60A
 
-    # Builder accepts x keyword for Newton iteration
-    function VRcircuit(params, spec; x=Float64[])
+    # Builder accepts time and x keyword for Newton iteration
+    function VRcircuit(params, spec, t::Real=0.0; x=Float64[])
         ctx = MNAContext()
         vcc = get_node!(ctx, :vcc)
         vg = get_node!(ctx, :vg)

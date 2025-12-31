@@ -232,7 +232,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         """
 
         # Build circuit: VoltageSource + VA Resistor
-        function va_resistor_circuit(params, spec)
+        function va_resistor_circuit(params, spec, t::Real=0.0)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
 
@@ -268,7 +268,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         C_val = 1e-6
         V_val = 5.0
 
-        function va_rc_circuit(params, spec)
+        function va_rc_circuit(params, spec, t::Real=0.0)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             cap = get_node!(ctx, :cap)
@@ -318,7 +318,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         endmodule
         """
 
-        function va_parallel_rc_circuit(params, spec)
+        function va_parallel_rc_circuit(params, spec, t::Real=0.0)
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
 

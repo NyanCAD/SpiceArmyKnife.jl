@@ -59,100 +59,146 @@ DAE Solver calls:
     evaluate_values!(p.eval_ctx, u, t)  ← NO ALLOCATION
 ```
 
-### EvalContext Design
+### EvalContext Design: Separating Mutable and Immutable State
+
+**Key Insight**: Julia optimizes immutable structs better (stack allocation, inlining, constant propagation). We should separate:
+- **Immutable**: Circuit structure, mappings, parameters, spec
+- **Mutable**: COO values, time, working storage
 
 ```julia
 """
-Pre-allocated evaluation context for zero-allocation Newton iterations.
+Immutable compiled circuit structure.
+Contains everything that doesn't change during iteration.
 """
-mutable struct EvalContext{T}
-    # Reference to compiled structure (immutable)
-    pc::PrecompiledCircuit
+struct CompiledStructure{F,P,S}
+    builder::F
+    params::P
+    spec::S          # Base spec (temp, mode, tolerances - but NOT time)
 
-    # Preallocated COO value storage (reused each iteration)
+    # System dimensions (fixed)
+    n::Int
+    n_nodes::Int
+    n_currents::Int
+
+    # Fixed sparsity pattern
+    G_coo_to_nz::Vector{Int}
+    C_coo_to_nz::Vector{Int}
+    G_n_coo::Int
+    C_n_coo::Int
+
+    # Sparse matrices (structure fixed, values updated via nzval)
+    G::SparseMatrixCSC{Float64,Int}
+    C::SparseMatrixCSC{Float64,Int}
+end
+
+"""
+Mutable evaluation workspace.
+Contains only values that change during iteration.
+Passed as `p` parameter to DAE solver.
+"""
+mutable struct EvalWorkspace{T}
+    # Reference to immutable structure
+    structure::CompiledStructure
+
+    # Preallocated COO value storage (zeroed and refilled each iteration)
     G_V::Vector{T}
     C_V::Vector{T}
-    b_direct::Vector{T}
-    b_deferred_V::Vector{T}
+    b::Vector{T}
 
-    # Current evaluation state (mutable)
+    # Current simulation time (updated each call)
     time::T
 
     # Working storage for device evaluation
-    # (for VA devices that need intermediate storage)
     work::Vector{T}
 end
 
-function EvalContext(pc::PrecompiledCircuit{F,P,S}) where {F,P,S}
-    EvalContext{Float64}(
-        pc,
-        zeros(Float64, pc.G_n_coo),
-        zeros(Float64, pc.C_n_coo),
-        zeros(Float64, pc.n),
-        zeros(Float64, 16),  # Typical deferred b size
+function EvalWorkspace(cs::CompiledStructure)
+    EvalWorkspace{Float64}(
+        cs,
+        zeros(Float64, cs.G_n_coo),
+        zeros(Float64, cs.C_n_coo),
+        zeros(Float64, cs.n),
         0.0,
-        zeros(Float64, 32)   # Working storage
+        zeros(Float64, 32)
     )
 end
 ```
+
+This design enables:
+1. **Compiler optimization**: `CompiledStructure` fields can be constant-propagated
+2. **Thread safety**: Each thread gets its own `EvalWorkspace`
+3. **Clear semantics**: Immutable parts can be shared, mutable parts are per-evaluation
 
 ## Passing Time Explicitly
 
 ### Current Pattern (Allocating)
 
 ```julia
-# Every iteration creates a new MNASpec
+# Every iteration creates a new MNASpec just to update time
 spec_t = MNASpec(temp=pc.spec.temp, mode=:tran, time=real_time(t))
 ctx = pc.builder(pc.params, spec_t; x=u)
 ```
 
-### Proposed Pattern A: Explicit Time Parameter
+### Recommended Pattern: Explicit Time Parameter
 
-Change builder signature to accept time explicitly:
+**Since API changes are acceptable**, the cleanest approach is passing time explicitly:
 
 ```julia
-# Builder signature
-function build_circuit(params, spec, t; x=Float64[])
-    # spec.time is base time (e.g., for DC), t is current simulation time
+# OLD builder signature (allocates MNASpec each call):
+function build_circuit(params, spec; x=Float64[])
+    t = spec.time  # Time buried in spec
 end
 
-# In fast_rebuild!
-evaluate_values!(eval_ctx, pc.params, pc.spec, t, u)
-```
-
-**Pros**: Clear separation, no spec mutation
-**Cons**: API change, breaks existing builders
-
-### Proposed Pattern B: Mutable Time in Spec
-
-Make `time` field mutable (or use Ref):
-
-```julia
-mutable struct MNASpecMut{T<:Real}
-    const temp::Float64
-    const mode::Symbol
-    time::T  # Mutable
-    # ... other const fields
+# NEW builder signature (time is explicit, spec is immutable):
+function build_circuit(params, spec, t::Real; x=Float64[])
+    # spec contains temp, mode, tolerances (never changes during simulation)
+    # t is current simulation time (changes each call, passed directly)
 end
 ```
 
-**Pros**: Minimal API change
-**Cons**: Mutable struct, potential thread-safety issues
+**Why this is better**:
 
-### Proposed Pattern C: Time via EvalContext (Recommended)
+1. **MNASpec stays immutable** - Better compiler optimization
+2. **No allocation** - `t` is passed by value (Float64)
+3. **Clear semantics** - Time is obviously the thing that changes each iteration
+4. **Thread-safe by design** - No shared mutable state
 
-Store time in EvalContext, builders read from context:
+### Updated MNASpec (Immutable, No Time Field)
 
 ```julia
-# EvalContext passed through
-function evaluate_circuit!(eval_ctx::EvalContext, params, u)
-    t = eval_ctx.time  # Read time from context
-    # Devices access eval_ctx.time directly
+# Time removed from MNASpec - it's passed explicitly
+struct MNASpec
+    temp::Float64      # Temperature (constant during simulation)
+    mode::Symbol       # :dcop, :tran, :ac (constant during simulation)
+    gmin::Float64      # Minimum conductance
+    tnom::Float64      # Nominal temperature
+    abstol::Float64    # Tolerances...
+    reltol::Float64
+    vntol::Float64
+    iabstol::Float64
 end
 ```
 
-**Pros**: Clean separation, zero allocation, thread-safe (each thread has own context)
-**Cons**: Requires device API changes
+### Time Storage in EvalWorkspace
+
+For convenience, time is cached in the mutable workspace:
+
+```julia
+mutable struct EvalWorkspace{T}
+    const structure::CompiledStructure
+    G_V::Vector{T}
+    C_V::Vector{T}
+    b::Vector{T}
+    time::T  # Cached for devices to access
+end
+
+function fast_rebuild!(ws::EvalWorkspace, u, t::Real)
+    ws.time = t  # Update cached time (single assignment, no allocation)
+    # ...
+end
+```
+
+Devices can access time via `ws.time` or receive it as an explicit parameter.
 
 ## Zeroing Matrices: Type-Agnostic and Sparse-Friendly
 
@@ -210,6 +256,38 @@ function evaluate_static(u::SVector{N,T}, p, t) where {N,T}
 end
 ```
 
+### MaybeInplace.jl for Dual In-Place/Out-of-Place Support
+
+[MaybeInplace.jl](https://github.com/SciML/MaybeInplace.jl) provides the `@bb` macro
+that writes code once for both mutable (Vector) and immutable (StaticArrays) types:
+
+```julia
+using MaybeInplace
+
+# The @bb macro conditionally mutates or reassigns based on array type
+function stamp_conductance!(G, p, n, val)
+    @bb @. G[p, p] += val
+    @bb @. G[p, n] -= val
+    @bb @. G[n, p] -= val
+    @bb @. G[n, n] += val
+    return G
+end
+```
+
+The macro expands to:
+```julia
+if setindex_trait(G) === CanSetindex()
+    @. G[p, p] += val   # In-place for Vector/SparseMatrix
+else
+    G = @. G[p, p] + val  # Reassignment for StaticArrays
+end
+```
+
+**Benefits for our use case**:
+1. Single codebase for CPU (in-place) and GPU ensemble (StaticArrays)
+2. No manual dispatch on array type
+3. Compiler can optimize both paths
+
 ### Recommended Generic Zeroing Function
 
 ```julia
@@ -224,90 +302,164 @@ end
     fill!(nonzeros(S), zero(T))
 end
 
-# For StaticArrays, just return fresh zero
+# For StaticArrays, just return fresh zero (no mutation)
 @inline zero_values(::Type{SVector{N,T}}) where {N,T} = zero(SVector{N,T})
 @inline zero_values(::Type{SMatrix{M,N,T}}) where {M,N,T} = zero(SMatrix{M,N,T})
 ```
 
+### Using MaybeInplace for Zeroing
+
+```julia
+using MaybeInplace
+
+# Works for both mutable and immutable arrays
+function reset_workspace!(ws)
+    @bb ws.G_V .= zero(eltype(ws.G_V))
+    @bb ws.C_V .= zero(eltype(ws.C_V))
+    @bb ws.b .= zero(eltype(ws.b))
+    return ws
+end
+```
+
 ## Implementation Plan
 
-### Phase 1: Add EvalContext to PrecompiledCircuit
+### Phase 1: Refactor PrecompiledCircuit into Immutable/Mutable Split
+
+Replace `mutable struct PrecompiledCircuit` with:
 
 ```julia
-mutable struct PrecompiledCircuit{F,P,S}
-    # ... existing fields ...
+# Immutable - can be shared, compiler optimizes field access
+struct CompiledStructure{F,P,S}
+    builder::F
+    params::P
+    spec::S  # Base spec without time
 
-    # NEW: Pre-allocated evaluation workspace
-    eval_ctx::EvalContext{Float64}
+    # Fixed dimensions
+    n::Int
+    n_nodes::Int
+    n_currents::Int
+
+    # Fixed sparsity pattern and mappings
+    G_coo_to_nz::Vector{Int}
+    C_coo_to_nz::Vector{Int}
+    G_n_coo::Int
+    C_n_coo::Int
+
+    # Sparse matrices (structure fixed)
+    G::SparseMatrixCSC{Float64,Int}
+    C::SparseMatrixCSC{Float64,Int}
+end
+
+# Mutable - per-evaluation, passed as p
+mutable struct EvalWorkspace{T}
+    const structure::CompiledStructure  # const for optimization
+    G_V::Vector{T}
+    C_V::Vector{T}
+    b::Vector{T}
+    time::T
 end
 ```
 
-Modify `compile_circuit` to create `EvalContext`.
+Note: Julia 1.8+ supports `const` fields in mutable structs for optimization.
 
-### Phase 2: Modify fast_rebuild! to Use EvalContext
+### Phase 2: New Evaluation API with Explicit Time
 
 ```julia
-function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
-    eval_ctx = pc.eval_ctx
-    eval_ctx.time = real_time(t)
+# New builder signature: time passed explicitly, not in spec
+function build_circuit(params, spec, t::Real; x=Float64[])
+    # t is current simulation time
+    # spec contains temp, mode, tolerances (immutable during simulation)
+end
+
+# fast_rebuild! becomes:
+function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
+    ws.time = t
+    cs = ws.structure
 
     # Zero COO values
-    zero_values!(eval_ctx.G_V)
-    zero_values!(eval_ctx.C_V)
-    zero_values!(eval_ctx.b_direct)
+    fill!(ws.G_V, zero(eltype(ws.G_V)))
+    fill!(ws.C_V, zero(eltype(ws.C_V)))
+    fill!(ws.b, zero(eltype(ws.b)))
 
     # Evaluate circuit into preallocated storage
-    evaluate_values!(eval_ctx, pc.params, u)
+    # NEW: Pass time explicitly, not via spec
+    evaluate_values!(ws, cs.params, cs.spec, t, u)
 
-    # Update sparse matrices (unchanged)
-    update_sparse_from_coo!(pc.G, eval_ctx.G_V, pc.G_coo_to_nz, pc.G_n_coo)
-    update_sparse_from_coo!(pc.C, eval_ctx.C_V, pc.C_coo_to_nz, pc.C_n_coo)
+    # Update sparse matrices
+    update_sparse_from_coo!(cs.G, ws.G_V, cs.G_coo_to_nz, cs.G_n_coo)
+    update_sparse_from_coo!(cs.C, ws.C_V, cs.C_coo_to_nz, cs.C_n_coo)
 end
 ```
 
-### Phase 3: Value-Only Device Evaluation
-
-Change from context-based stamping to direct-write stamping:
+### Phase 3: Value-Only Device Evaluation with MaybeInplace
 
 ```julia
+using MaybeInplace
+
 # OLD: Creates MNAContext, stamps into it
 function stamp!(dev::VADevice, ctx::MNAContext, p, n; x, t, spec)
-    # ... evaluate ...
     stamp_G!(ctx, p, n, G_val)  # Pushes to ctx.G_I, G_J, G_V
 end
 
-# NEW: Writes directly to preallocated slots
-@inline function evaluate!(dev::VADevice, eval_ctx::EvalContext,
-                           slot_G::Int, slot_b::Int, x, p, n)
+# NEW: Writes directly to preallocated slots, supports StaticArrays
+@inline function evaluate!(dev::VADevice, G_V, b, slot_G::Int, x, t, p, n)
     V_pn = x[p] - x[n]
     I = dev.Is * (exp(V_pn / dev.nVt) - 1)
     G = dev.Is / dev.nVt * exp(V_pn / dev.nVt)
 
-    # Write directly to preallocated slots
-    eval_ctx.G_V[slot_G] = G      # (p,p)
-    eval_ctx.G_V[slot_G+1] = -G   # (p,n)
-    eval_ctx.G_V[slot_G+2] = -G   # (n,p)
-    eval_ctx.G_V[slot_G+3] = G    # (n,n)
+    # Use @bb for in-place or out-of-place depending on array type
+    @bb G_V[slot_G] = G        # (p,p)
+    @bb G_V[slot_G+1] = -G     # (p,n)
+    @bb G_V[slot_G+2] = -G     # (n,p)
+    @bb G_V[slot_G+3] = G      # (n,n)
 
-    eval_ctx.b_direct[p] += I - G*V_pn
-    eval_ctx.b_direct[n] -= I - G*V_pn
+    @bb b[p] += I - G*V_pn
+    @bb b[n] -= I - G*V_pn
+
+    return G_V, b  # Return for StaticArrays case
 end
 ```
 
-### Phase 4: Store EvalContext in DAE `p` Parameter
+### Phase 4: Store EvalWorkspace in DAE `p` Parameter
 
 ```julia
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan; kwargs...)
-    pc = compile_circuit(circuit.builder, circuit.params, circuit.spec)
-    eval_ctx = pc.eval_ctx  # Use preallocated context
+    # Compile to immutable structure
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec)
 
-    function dae_residual!(resid, du, u, p, t)
-        # p is eval_ctx
+    # Create mutable workspace (this is what gets passed as p)
+    ws = EvalWorkspace(cs)
+
+    function dae_residual!(resid, du, u, p::EvalWorkspace, t)
         fast_residual!(resid, du, u, p, real_time(t))
     end
 
-    # Pass eval_ctx as p parameter
-    return DAEProblem(f, du0, u0, tspan; p=eval_ctx, kwargs...)
+    # Pass workspace as p parameter
+    return DAEProblem(f, du0, u0, tspan; p=ws, kwargs...)
+end
+```
+
+### Phase 5: Thread-Safe Ensemble Support
+
+```julia
+# For parallel parameter sweeps, each thread needs its own workspace
+function create_ensemble_workspaces(cs::CompiledStructure, n_threads::Int)
+    [EvalWorkspace(cs) for _ in 1:n_threads]
+end
+
+# Or use a workspace pool
+struct WorkspacePool
+    structure::CompiledStructure
+    workspaces::Vector{EvalWorkspace}
+    available::Channel{EvalWorkspace}
+end
+
+function borrow!(pool::WorkspacePool)
+    take!(pool.available)
+end
+
+function return!(pool::WorkspacePool, ws::EvalWorkspace)
+    put!(pool.available, ws)
 end
 ```
 
@@ -337,9 +489,62 @@ end
    - `StaticArrays` for small circuits (stack-allocated)
    - `CuSparseMatrixCSC` for large circuits
 
+## Design Rationale: Immutable vs Mutable
+
+### Why Separate Immutable and Mutable State?
+
+Julia's compiler can heavily optimize immutable structs:
+
+1. **Stack allocation**: Small immutable structs can live on the stack
+2. **Field inlining**: Accessing `cs.n_nodes` compiles to a constant if `cs` is known
+3. **Constant propagation**: Immutable fields can be propagated through function calls
+4. **No aliasing concerns**: Compiler knows immutable data won't change
+
+Example optimization:
+```julia
+# With immutable CompiledStructure, this:
+for k in 1:cs.G_n_coo
+    ws.G_V[k] = ...
+end
+
+# Can compile to (if cs.G_n_coo is constant):
+for k in 1:1247  # Literal constant
+    ws.G_V[k] = ...
+end
+```
+
+### Why `const` Fields in Mutable Structs?
+
+Julia 1.8+ allows `const` fields in mutable structs:
+
+```julia
+mutable struct EvalWorkspace{T}
+    const structure::CompiledStructure  # Never reassigned
+    G_V::Vector{T}                       # Values change
+    time::T                              # Updated each call
+end
+```
+
+This tells the compiler that `ws.structure` never changes after construction,
+enabling the same optimizations as for immutable structs on that field.
+
+### Thread Safety Model
+
+```
+CompiledStructure (immutable, shared)
+    ↓
+    ├─→ EvalWorkspace (thread 1)
+    ├─→ EvalWorkspace (thread 2)
+    └─→ EvalWorkspace (thread 3)
+```
+
+Each thread has its own mutable workspace, but all share the same
+immutable structure. No locking needed.
+
 ## References
 
 - [Julia SparseArrays Documentation](https://docs.julialang.org/en/v1/stdlib/SparseArrays/)
 - [Optimal in-place sparse modification (Julia Discourse)](https://discourse.julialang.org/t/optimal-way-to-do-in-place-modification-of-sparse-matrix/5170)
+- [MaybeInplace.jl](https://github.com/SciML/MaybeInplace.jl) - Dual in-place/out-of-place code
 - OpenVAF OSDI implementation (direct pointer model)
 - `doc/va_zero_allocation_plan.md` - Original plan

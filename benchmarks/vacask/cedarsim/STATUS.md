@@ -42,12 +42,66 @@ After fixing the parameter collision, PSP103 now fails with:
 UndefVarError: `_I_branch_NOII` not defined in `Main.PSP103VA_module`
 ```
 
-This is a different issue related to how PSP103 uses named branches for internal currents. The model uses `I(<branch_name>)` syntax for branches like `NOII` (no-impact ionization?), but the vasim code generator isn't properly defining these branch current variables.
+#### Root Cause Analysis
 
-**Investigation needed:**
-1. PSP103 uses named branches: `branch (DI, DG) NOII;` (or similar)
-2. The VA-to-Julia translation needs to define `_I_branch_NOII` for `I(NOII)` access
-3. Check vasim.jl branch handling code to ensure named branches are properly translated
+PSP103 uses named branches for **correlated noise modeling** (`PSP103_module.include` lines 46-49):
+
+```verilog
+electrical NOI;           // Internal node for noise correlation
+branch (NOI) NOII;        // Named branch from NOI to ground (NOII = NOI-I-I for gate current noise)
+branch (NOI) NOIR;        // Named branch (NOIR = NOI-R for resistive element)
+branch (NOI) NOIC;        // Named branch (NOIC = NOI-C for capacitive element)
+```
+
+These branches are used in the noise section (lines 2781-2786):
+
+```verilog
+I(NOII) <+  white_noise((nt / mig), "igig");           // Noise current contribution to NOII
+I(NOIR) <+  V(NOIR) / mig;                             // Resistive element
+I(NOIC) <+  ddt(CGeff * V(NOIC));                      // Capacitive element
+I(DI,SI) <+ sigVds * sqrt(MULT_i) * migid * I(NOII);  // READS I(NOII) as probe!
+```
+
+The critical issue is the last line: `I(NOII)` is used as a **probe** (reading the branch current) on the RHS of another contribution.
+
+#### Code Flow in vasim.jl
+
+1. **Contribution collection** (`vasim.jl:1219`): When `I(NOII) <+ expr` is parsed, it correctly identifies `is_branch=true` and `branch_name=:NOII`
+
+2. **Contribution processing** (`vasim.jl:1350-1355`): Current contributions go to `branch_contribs` keyed by `(p, n)` tuple. The `branch_name` is **lost**:
+   ```julia
+   if c.kind == :current
+       branch = (c.p, c.n)  # Only uses node pair, ignores branch_name!
+       branch_contribs[branch] = [expr]
+   ```
+
+3. **Branch current variable allocation** (`vasim.jl:1382-1388`): `branch_current_vars` is only populated for **voltage contributions** (e.g., inductors):
+   ```julia
+   for (branch_name, _) in voltage_branch_contribs  # Only voltage contributions!
+       branch_current_vars[branch_name] = I_var
+   ```
+
+4. **Branch current extraction** (`vasim.jl:1595-1600`): `_I_branch_NAME` is only defined for branches in `branch_current_vars` - which excludes current-contribution branches like NOII.
+
+5. **Probe access** (`vasim.jl:541`): When `I(NOII)` is used as a probe, it returns `Symbol("_I_branch_NOII")` - but this variable was never defined!
+
+#### Fix Required
+
+The vasim.jl code generator needs to:
+
+1. **Track named branches with current contributions** that are also used as probes
+2. **Define `_I_branch_NAME`** for such branches, initialized to the sum of their contributions
+3. Since `white_noise()` returns 0 in DC/transient (`vasim.jl:654-655`), the simplest fix is to initialize `_I_branch_NOII = 0.0` for noise-only branches
+
+A more complete fix would:
+- Accumulate all current contributions to named branches into `_I_branch_NAME`
+- Make this accumulated value available before any code that reads `I(branch_name)`
+
+#### Related Branches
+
+PSP103 has three noise branches (NOII, NOIR, NOIC). The same fix applies to all branches that:
+- Have current contributions (`I(branch) <+ expr`)
+- Are read as probes (`I(branch)` on RHS)
 
 ## Running Benchmarks
 

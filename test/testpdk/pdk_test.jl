@@ -76,7 +76,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
             out = get_node!(ctx, :out)
 
             # Use the PDK inverter (lowercase parameter names from SPICE)
-            typical.inv_x1_mna_builder(lens, spec, ctx, inp, out, vdd, vss, (;), Float64[];
+            typical.inv_x1_mna_builder(lens, spec, 0.0, ctx, inp, out, vdd, vss, (;), Float64[];
                                        wn=360e-9, wp=720e-9, l=180e-9)
 
             # Power supplies (VoltageSource.stamp! takes ctx, p, n - no spec)
@@ -116,7 +116,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
                 gnd = get_node!(ctx, :gnd)
 
                 # NMOS between vdd and gnd (lowercase parameter names from SPICE)
-                corner.nmos_1v8_mna_builder(lens, spec, ctx, vdd, gnd, gnd, gnd, (;), Float64[];
+                corner.nmos_1v8_mna_builder(lens, spec, 0.0, ctx, vdd, gnd, gnd, gnd, (;), Float64[];
                                            w=1e-6, l=180e-9)
 
                 # 1V supply (VoltageSource.stamp! takes ctx, p, n - no spec)

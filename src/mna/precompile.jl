@@ -334,6 +334,29 @@ end
 #==============================================================================#
 
 """
+    wrap_builder_with_time(builder) -> wrapped_builder
+
+Wrap an old-style builder (params, spec; x) to accept explicit time (params, spec, t; x).
+
+Old-style builders access time via `spec.time`. This wrapper creates a new MNASpec
+with the given time and calls the old builder. For zero-allocation, migrate to
+the new signature where time is passed explicitly.
+"""
+function wrap_builder_with_time(builder::F) where F
+    function wrapped_builder(params, spec, t::Real; x=Float64[])
+        # Create spec with explicit time for backwards compatibility
+        spec_with_time = MNASpec(
+            temp=spec.temp, mode=spec.mode, time=t,
+            gmin=spec.gmin, tnom=spec.tnom,
+            abstol=spec.abstol, reltol=spec.reltol,
+            vntol=spec.vntol, iabstol=spec.iabstol
+        )
+        return builder(params, spec_with_time; x=x)
+    end
+    return wrapped_builder
+end
+
+"""
     compile_structure(builder, params, spec) -> CompiledStructure
 
 Compile a circuit builder into an immutable CompiledStructure.
@@ -342,7 +365,9 @@ This performs structure discovery by calling the builder once,
 then creates the sparse matrices and COO→CSC mappings.
 
 # Arguments
-- `builder`: Circuit builder function `(params, spec; x=Float64[]) -> MNAContext`
+- `builder`: Circuit builder function. Can be either:
+  - New style: `(params, spec, t; x=Float64[]) -> MNAContext` (zero allocation)
+  - Old style: `(params, spec; x=Float64[]) -> MNAContext` (wrapped automatically)
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
 
@@ -351,14 +376,32 @@ An immutable `CompiledStructure` that can be shared across threads.
 Use `create_workspace(cs)` to create a mutable workspace for evaluation.
 """
 function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
-    # First pass: discover structure at zero operating point
-    ctx0 = builder(params, spec; x=Float64[])
+    # Try new-style builder first (params, spec, t; x=...)
+    # If it fails, wrap old-style builder (params, spec; x=...)
+    wrapped_builder = try
+        # Test if builder accepts time argument
+        builder(params, spec, 0.0; x=Float64[])
+        builder  # New-style, use as-is
+    catch e
+        if e isa MethodError
+            # Old-style builder, wrap it
+            wrap_builder_with_time(builder)
+        else
+            rethrow(e)
+        end
+    end
+
+    # First pass: discover structure at zero operating point (t=0.0)
+    ctx0 = wrapped_builder(params, spec, 0.0; x=Float64[])
     n = system_size(ctx0)
+
+    # Store the wrapped builder (may be original or wrapper)
+    WF = typeof(wrapped_builder)
 
     if n == 0
         # Empty circuit - return minimal structure
-        return CompiledStructure{F,P,S}(
-            builder, params, spec,
+        return CompiledStructure{WF,P,S}(
+            wrapped_builder, params, spec,
             0, 0, 0,
             Symbol[], Symbol[],
             Int[], Int[],
@@ -384,8 +427,8 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     n_G = length(ctx0.G_I)
     n_C = length(ctx0.C_I)
 
-    return CompiledStructure{F,P,S}(
-        builder, params, spec,
+    return CompiledStructure{WF,P,S}(
+        wrapped_builder, params, spec,
         n, ctx0.n_nodes, ctx0.n_currents,
         copy(ctx0.node_names), copy(ctx0.current_names),
         G_coo_to_nz, C_coo_to_nz,
@@ -736,21 +779,22 @@ end
 Zero-allocation rebuild of circuit at operating point u and time t.
 
 This version uses the EvalWorkspace which preallocates all storage.
-The builder is called with time passed explicitly via an updated spec.
+Time is passed explicitly to the builder, avoiding MNASpec allocation.
 
-# Note on allocation
-Currently still allocates an MNASpec and MNAContext per call because
-the builder API requires it. Future optimization: specialized value-only
-evaluation path that writes directly to workspace storage.
+# Builder API
+Builders must accept time as explicit parameter:
+    builder(params, spec, t::Real; x=Float64[]) -> MNAContext
+
+The spec contains temperature, mode, and tolerances (immutable during simulation).
+Time is passed separately since it changes every iteration.
 """
 function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     cs = ws.structure
     ws.time = real_time(t)
 
-    # Call builder at current operating point
-    # TODO: Future optimization - pass time explicitly to avoid MNASpec allocation
-    spec_t = MNASpec(temp=cs.spec.temp, mode=:tran, time=ws.time)
-    ctx = cs.builder(cs.params, spec_t; x=u)
+    # Call builder at current operating point with explicit time
+    # No MNASpec allocation - time is passed directly
+    ctx = cs.builder(cs.params, cs.spec, ws.time; x=u)
 
     # Structure must be constant
     @assert ctx.n_nodes == cs.n_nodes && ctx.n_currents == cs.n_currents (

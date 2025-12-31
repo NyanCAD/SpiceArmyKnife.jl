@@ -1444,32 +1444,35 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
         du0 = du0 === nothing ? du0_computed : du0
     end
 
-    # Compile circuit for fast evaluation
-    pc = compile_circuit(circuit.builder, circuit.params, circuit.spec)
-    residual! = make_compiled_dae_residual(pc)
-
     # Detect differential variables
     diff_vars = detect_differential_vars(circuit)
 
-    # Create DAEFunction with explicit Jacobian for better performance
-    # The Jacobian is J = G + gamma*C where gamma is the BDF coefficient
+    # Compile circuit structure (immutable) and create workspace (mutable)
+    # The workspace is passed as the p parameter to the DAE solver
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec)
+    ws = create_workspace(cs)
+
+    # Initialize workspace at t=0 with the DC operating point
+    # This is required for IDA's initialization to work properly
+    fast_rebuild!(ws, u0, 0.0)
+
+    residual! = make_workspace_dae_residual()
+
     if explicit_jacobian
-        jacobian! = make_compiled_dae_jacobian(pc)
-        # Create Jacobian prototype (sparsity pattern) from G + C
-        # This tells the solver which entries can be nonzero
-        jac_prototype = pc.G + pc.C
+        jacobian! = make_workspace_dae_jacobian()
+        jac_prototype = cs.G + cs.C
         f = SciMLBase.DAEFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
     else
-        # Fall back to solver-internal finite differencing
-        # Some solvers (e.g., IDA with time-dependent sources) may work better without explicit Jacobian
         f = SciMLBase.DAEFunction(residual!)
     end
 
+    # Note: p (workspace) must be positional argument (5th), not keyword
     return SciMLBase.DAEProblem(
         f,
         du0,
         u0,
-        Float64.(tspan);
+        Float64.(tspan),
+        ws;
         differential_vars = diff_vars,
         kwargs...
     )
@@ -1644,6 +1647,48 @@ Create a fast DAE Jacobian function using precompiled circuit.
 function make_compiled_dae_jacobian(pc::PrecompiledCircuit)
     function dae_jac!(J, du, u, p, gamma, t)
         fast_jacobian!(J, du, u, pc, gamma, real_time(t))
+        return nothing
+    end
+    return dae_jac!
+end
+
+#==============================================================================#
+# EvalWorkspace-based DAE Functions (Zero-Allocation Path)
+#==============================================================================#
+
+"""
+    make_workspace_dae_residual() -> Function
+
+Create a DAE residual function that uses EvalWorkspace passed as `p`.
+
+This is the zero-allocation path: the workspace is passed as the `p` parameter
+to the DAE solver, avoiding closure captures and enabling thread-local workspaces.
+
+# Usage
+```julia
+cs = compile_structure(builder, params, spec)
+ws = create_workspace(cs)
+residual! = make_workspace_dae_residual()
+# Pass ws as p parameter to DAEProblem
+prob = DAEProblem(f, du0, u0, tspan; p=ws, ...)
+```
+"""
+function make_workspace_dae_residual()
+    function dae_residual!(resid, du, u, p::EvalWorkspace, t)
+        fast_residual!(resid, du, u, p, real_time(t))
+        return nothing
+    end
+    return dae_residual!
+end
+
+"""
+    make_workspace_dae_jacobian() -> Function
+
+Create a DAE Jacobian function that uses EvalWorkspace passed as `p`.
+"""
+function make_workspace_dae_jacobian()
+    function dae_jac!(J, du, u, p::EvalWorkspace, gamma, t)
+        fast_jacobian!(J, du, u, p, gamma, real_time(t))
         return nothing
     end
     return dae_jac!

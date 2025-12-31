@@ -5,12 +5,20 @@
 # discovery (once) from value updates (every iteration).
 #
 # Key concepts:
-# - PrecompiledCircuit: Holds fixed sparsity pattern, updates values in-place
+# - CompiledStructure: Immutable circuit structure (sparsity pattern, mappings)
+# - EvalWorkspace: Mutable workspace for per-iteration values
 # - COO→CSC mapping: Maps COO indices to sparse matrix nonzero positions
 # - Fast stamping: Devices write to preallocated COO storage
 #
 # Inspired by OpenVAF's OSDI implementation which uses direct pointers to
 # matrix entries for maximum performance.
+#
+# Architecture (zero-allocation iteration):
+#   CompiledStructure (immutable, shared)
+#       ↓
+#   EvalWorkspace (mutable, per-thread)
+#       ↓
+#   fast_rebuild!(ws, u, t) → no allocation!
 #==============================================================================#
 
 using SparseArrays
@@ -22,11 +30,145 @@ using ForwardDiff: Dual, value
 real_time(t::Real) = Float64(t)
 real_time(t::Dual) = Float64(value(t))
 
+export CompiledStructure, EvalWorkspace, compile_structure, create_workspace
 export PrecompiledCircuit, compile_circuit, fast_residual!, fast_jacobian!
 export reset_coo_values!, update_sparse_from_coo!
 
 #==============================================================================#
-# PrecompiledCircuit Type
+# CompiledStructure: Immutable Circuit Structure
+#==============================================================================#
+
+"""
+    CompiledStructure{F,P,S}
+
+Immutable compiled circuit structure containing everything that doesn't change
+during Newton iterations.
+
+This separation enables:
+1. **Compiler optimization**: Fields can be constant-propagated
+2. **Thread safety**: Can be shared across threads (each has own EvalWorkspace)
+3. **Clear semantics**: Immutable parts shared, mutable parts per-evaluation
+
+# Fields
+- `builder::F`: Circuit builder function
+- `params::P`: Circuit parameters (NamedTuple)
+- `spec::S`: Base simulation spec (temp, mode, tolerances - NOT time)
+- `n::Int`: System size (n_nodes + n_currents)
+- `n_nodes::Int`: Number of voltage nodes
+- `n_currents::Int`: Number of current variables
+- `node_names::Vector{Symbol}`: Node names for solution interpretation
+- `current_names::Vector{Symbol}`: Current variable names
+- `G_coo_to_nz::Vector{Int}`: Mapping from COO index to G nonzeros
+- `C_coo_to_nz::Vector{Int}`: Mapping from COO index to C nonzeros
+- `G_n_coo::Int`: Number of COO entries in G
+- `C_n_coo::Int`: Number of COO entries in C
+- `G::SparseMatrixCSC`: Sparse G matrix (structure fixed, values in nzval)
+- `C::SparseMatrixCSC`: Sparse C matrix (structure fixed, values in nzval)
+"""
+struct CompiledStructure{F,P,S}
+    # Builder and parameters
+    builder::F
+    params::P
+    spec::S
+
+    # System dimensions (fixed)
+    n::Int
+    n_nodes::Int
+    n_currents::Int
+
+    # Node/current names for solution interpretation
+    node_names::Vector{Symbol}
+    current_names::Vector{Symbol}
+
+    # Fixed sparsity pattern mappings
+    G_coo_to_nz::Vector{Int}
+    C_coo_to_nz::Vector{Int}
+    G_n_coo::Int
+    C_n_coo::Int
+
+    # Sparse matrices (structure fixed, values updated via nonzeros())
+    G::SparseMatrixCSC{Float64,Int}
+    C::SparseMatrixCSC{Float64,Int}
+end
+
+"""
+    system_size(cs::CompiledStructure) -> Int
+
+Return the system size (number of unknowns).
+"""
+system_size(cs::CompiledStructure) = cs.n
+
+#==============================================================================#
+# EvalWorkspace: Mutable Per-Iteration Workspace
+#==============================================================================#
+
+"""
+    EvalWorkspace{T}
+
+Mutable evaluation workspace containing values that change each Newton iteration.
+Passed as the `p` parameter to DAE solvers.
+
+Each thread should have its own EvalWorkspace, while sharing the same
+CompiledStructure.
+
+# Fields
+- `structure::CompiledStructure`: Reference to immutable structure (const in Julia 1.8+)
+- `G_V::Vector{T}`: Preallocated COO values for G matrix
+- `C_V::Vector{T}`: Preallocated COO values for C matrix
+- `b::Vector{T}`: Preallocated RHS vector
+- `b_deferred_I::Vector{Int}`: Deferred b stamp indices
+- `b_deferred_V::Vector{T}`: Deferred b stamp values
+- `time::T`: Current simulation time (updated each call)
+- `resid_tmp::Vector{T}`: Working storage for residual computation
+"""
+mutable struct EvalWorkspace{T,CS<:CompiledStructure}
+    # Reference to immutable structure
+    # Note: In Julia 1.8+, this could be `const structure::CS`
+    structure::CS
+
+    # Preallocated COO value storage (zeroed and refilled each iteration)
+    G_V::Vector{T}
+    C_V::Vector{T}
+    b::Vector{T}
+
+    # Deferred b stamps (for current variables with negative indices)
+    b_deferred_I::Vector{Int}
+    b_deferred_V::Vector{T}
+
+    # Current simulation time (updated each call, avoids MNASpec allocation)
+    time::T
+
+    # Working storage
+    resid_tmp::Vector{T}
+end
+
+"""
+    create_workspace(cs::CompiledStructure{F,P,S}) -> EvalWorkspace
+
+Create a mutable evaluation workspace for the given compiled structure.
+"""
+function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
+    EvalWorkspace{Float64,typeof(cs)}(
+        cs,
+        zeros(Float64, cs.G_n_coo),
+        zeros(Float64, cs.C_n_coo),
+        zeros(Float64, cs.n),
+        Int[],
+        Float64[],
+        0.0,
+        zeros(Float64, cs.n)
+    )
+end
+
+"""
+    system_size(ws::EvalWorkspace) -> Int
+
+Return the system size from the workspace's structure.
+"""
+system_size(ws::EvalWorkspace) = system_size(ws.structure)
+
+#==============================================================================#
+# PrecompiledCircuit Type (Backwards Compatibility)
 #==============================================================================#
 
 """
@@ -190,6 +332,67 @@ end
 #==============================================================================#
 # Circuit Compilation
 #==============================================================================#
+
+"""
+    compile_structure(builder, params, spec) -> CompiledStructure
+
+Compile a circuit builder into an immutable CompiledStructure.
+
+This performs structure discovery by calling the builder once,
+then creates the sparse matrices and COO→CSC mappings.
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec; x=Float64[]) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Simulation specification (MNASpec)
+
+# Returns
+An immutable `CompiledStructure` that can be shared across threads.
+Use `create_workspace(cs)` to create a mutable workspace for evaluation.
+"""
+function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
+    # First pass: discover structure at zero operating point
+    ctx0 = builder(params, spec; x=Float64[])
+    n = system_size(ctx0)
+
+    if n == 0
+        # Empty circuit - return minimal structure
+        return CompiledStructure{F,P,S}(
+            builder, params, spec,
+            0, 0, 0,
+            Symbol[], Symbol[],
+            Int[], Int[],
+            0, 0,
+            spzeros(0, 0), spzeros(0, 0)
+        )
+    end
+
+    # Build sparse matrices to get sparsity pattern
+    # Need to resolve negative indices (current variables)
+    G_I_resolved = [resolve_index(ctx0, i) for i in ctx0.G_I]
+    G_J_resolved = [resolve_index(ctx0, j) for j in ctx0.G_J]
+    C_I_resolved = [resolve_index(ctx0, i) for i in ctx0.C_I]
+    C_J_resolved = [resolve_index(ctx0, j) for j in ctx0.C_J]
+
+    G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
+    C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
+
+    # Create COO→CSC mappings
+    G_coo_to_nz = compute_coo_to_nz_mapping(G_I_resolved, G_J_resolved, G)
+    C_coo_to_nz = compute_coo_to_nz_mapping(C_I_resolved, C_J_resolved, C)
+
+    n_G = length(ctx0.G_I)
+    n_C = length(ctx0.C_I)
+
+    return CompiledStructure{F,P,S}(
+        builder, params, spec,
+        n, ctx0.n_nodes, ctx0.n_currents,
+        copy(ctx0.node_names), copy(ctx0.current_names),
+        G_coo_to_nz, C_coo_to_nz,
+        n_G, n_C,
+        G, C
+    )
+end
 
 """
     compile_circuit(builder, params, spec; capacity_factor=2.0) -> PrecompiledCircuit
@@ -507,6 +710,134 @@ function fast_residual!(resid::Vector{Float64}, du::Vector{Float64},
 
     return nothing
 end
+
+#==============================================================================#
+# EvalWorkspace Fast Evaluation (Zero-Allocation Path)
+#==============================================================================#
+
+"""
+    reset_workspace!(ws::EvalWorkspace)
+
+Reset workspace COO values to zero while preserving structure.
+Called at the start of each evaluation before re-stamping.
+"""
+function reset_workspace!(ws::EvalWorkspace{T}) where T
+    fill!(ws.G_V, zero(T))
+    fill!(ws.C_V, zero(T))
+    fill!(ws.b, zero(T))
+    empty!(ws.b_deferred_I)
+    empty!(ws.b_deferred_V)
+    return nothing
+end
+
+"""
+    fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
+
+Zero-allocation rebuild of circuit at operating point u and time t.
+
+This version uses the EvalWorkspace which preallocates all storage.
+The builder is called with time passed explicitly via an updated spec.
+
+# Note on allocation
+Currently still allocates an MNASpec and MNAContext per call because
+the builder API requires it. Future optimization: specialized value-only
+evaluation path that writes directly to workspace storage.
+"""
+function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
+    cs = ws.structure
+    ws.time = real_time(t)
+
+    # Call builder at current operating point
+    # TODO: Future optimization - pass time explicitly to avoid MNASpec allocation
+    spec_t = MNASpec(temp=cs.spec.temp, mode=:tran, time=ws.time)
+    ctx = cs.builder(cs.params, spec_t; x=u)
+
+    # Structure must be constant
+    @assert ctx.n_nodes == cs.n_nodes && ctx.n_currents == cs.n_currents (
+        "Circuit structure changed: expected $(cs.n_nodes) nodes + $(cs.n_currents) currents, " *
+        "got $(ctx.n_nodes) + $(ctx.n_currents)")
+
+    n_G = length(ctx.G_I)
+    n_C = length(ctx.C_I)
+
+    @assert n_G == cs.G_n_coo "G matrix COO length changed: expected $(cs.G_n_coo), got $n_G"
+    @assert n_C == cs.C_n_coo "C matrix COO length changed: expected $(cs.C_n_coo), got $n_C"
+
+    # Copy COO values to workspace
+    @inbounds for k in 1:n_G
+        ws.G_V[k] = ctx.G_V[k]
+    end
+    @inbounds for k in 1:n_C
+        ws.C_V[k] = ctx.C_V[k]
+    end
+
+    # Update b vector: zero, copy direct stamps, then apply deferred stamps
+    # This mirrors update_b_vector! from the PrecompiledCircuit path
+    fill!(ws.b, zero(eltype(ws.b)))
+
+    # Copy direct stamps from ctx.b
+    n_b = min(length(ctx.b), length(ws.b))
+    @inbounds for i in 1:n_b
+        ws.b[i] = ctx.b[i]
+    end
+
+    # Apply deferred b stamps (negative indices for current variables)
+    @inbounds for (i, v) in zip(ctx.b_I, ctx.b_V)
+        # Resolve negative index: -k → n_nodes + k
+        idx = i >= 0 ? i : cs.n_nodes - i
+        if 1 <= idx <= length(ws.b)
+            ws.b[idx] += v
+        end
+    end
+
+    # Update sparse matrices in-place using precomputed mapping
+    update_sparse_from_coo!(cs.G, ws.G_V, cs.G_coo_to_nz, n_G)
+    update_sparse_from_coo!(cs.C, ws.C_V, cs.C_coo_to_nz, n_C)
+
+    return nothing
+end
+
+"""
+    fast_residual!(resid, du, u, ws::EvalWorkspace, t)
+
+Fast DAE residual evaluation using EvalWorkspace.
+
+Computes: F(du, u, t) = C*du + G*u - b = 0
+"""
+function fast_residual!(resid::AbstractVector, du::AbstractVector,
+                        u::AbstractVector, ws::EvalWorkspace, t::Real)
+    fast_rebuild!(ws, u, t)
+    cs = ws.structure
+
+    # F(du, u) = C*du + G*u - b = 0
+    mul!(resid, cs.C, du)
+    mul!(resid, cs.G, u, 1.0, 1.0)
+    resid .-= ws.b
+
+    return nothing
+end
+
+"""
+    fast_jacobian!(J, du, u, ws::EvalWorkspace, gamma, t)
+
+Fast DAE Jacobian computation using EvalWorkspace: J = G + gamma*C
+"""
+function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
+                        u::AbstractVector, ws::EvalWorkspace,
+                        gamma::Real, t::Real)
+    fast_rebuild!(ws, u, t)
+    cs = ws.structure
+
+    # J = G + gamma*C
+    copyto!(J, cs.G)
+    J .+= gamma .* cs.C
+
+    return nothing
+end
+
+#==============================================================================#
+# PrecompiledCircuit Fast Evaluation (Backwards Compatibility)
+#==============================================================================#
 
 """
     fast_jacobian!(J, du, u, pc::PrecompiledCircuit, gamma, t)

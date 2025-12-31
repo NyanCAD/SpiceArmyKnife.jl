@@ -160,8 +160,13 @@ function get_node!(ctx::MNAContext, name::Symbol)::Int
 
     # Extend b vector if needed
     if length(ctx.b) < system_size(ctx)
-        resize!(ctx.b, system_size(ctx))
-        ctx.b[end] = 0.0
+        old_len = length(ctx.b)
+        new_len = system_size(ctx)
+        resize!(ctx.b, new_len)
+        # Zero-initialize all new elements (resize! leaves them uninitialized)
+        @inbounds for j in (old_len+1):new_len
+            ctx.b[j] = 0.0
+        end
     end
 
     return ctx.n_nodes
@@ -453,8 +458,12 @@ The b vector contains source terms:
 
     # Extend b if needed
     if i > length(ctx.b)
+        old_len = length(ctx.b)
         resize!(ctx.b, i)
-        ctx.b[i] = 0.0
+        # Zero-initialize all new elements (resize! leaves them uninitialized)
+        @inbounds for j in (old_len+1):i
+            ctx.b[j] = 0.0
+        end
     end
 
     ctx.b[i] += v

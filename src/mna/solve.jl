@@ -124,7 +124,7 @@ end
 Create a DC solution from a system and solution vector.
 """
 DCSolution(sys::MNASystem, x::Vector{Float64}) =
-    DCSolution(x, sys.node_names, sys.current_names, sys.n_nodes)
+    DCSolution(copy(x), sys.node_names, sys.current_names, sys.n_nodes)
 
 # Accessors
 Base.getindex(sol::DCSolution, i::Int) = sol.x[i]

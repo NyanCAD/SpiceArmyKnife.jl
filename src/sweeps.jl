@@ -475,13 +475,12 @@ end
 #==============================================================================#
 
 """
-    tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
+    tran!(sim::MNASim, tspan; kwargs...)
 
-Transient analysis for MNA circuits using ODE formulation.
+Transient analysis for MNASim (convenience wrapper).
 
-This uses static matrix assembly (G, C, b computed once at t=0).
-For nonlinear circuits with voltage-dependent capacitors, use `tran!` with
-`MNACircuit` instead, which uses DAEProblem formulation.
+Internally converts to MNACircuit and uses the unified DAE-based code path
+that properly handles time-dependent sources and nonlinear devices.
 
 # Example
 ```julia
@@ -489,23 +488,14 @@ sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
 sol = tran!(sim, (0.0, 1e-3))
 sol(0.5e-3)  # State at t=0.5ms
 ```
+
+See `tran!(::MNACircuit, ...)` for full documentation and solver options.
 """
-function tran!(sim::MNASim, tspan::Tuple{Real,Real};
-               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
-    sys = MNA.assemble!(sim)
-    ode_data = MNA.make_ode_problem(sys, tspan)  # Uses DC solution for initial condition
-
-    f = ODEFunction(ode_data.f;
-                    mass_matrix = ode_data.mass_matrix,
-                    jac = ode_data.jac,
-                    jac_prototype = ode_data.jac_prototype)
-    prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
-
-    if solver === nothing
-        solver = Rodas5P()
-    end
-
-    return solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
+function tran!(sim::MNASim, tspan::Tuple{Real,Real}; kwargs...)
+    # Convert MNASim to MNACircuit for unified code path
+    # This ensures proper handling of time-dependent sources and nonlinear devices
+    circuit = MNA.MNACircuit(sim.builder, sim.params, sim.spec)
+    return tran!(circuit, tspan; kwargs...)
 end
 
 """

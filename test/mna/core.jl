@@ -1182,7 +1182,7 @@ using VerilogAParser
 
     @testset "MNASim basics" begin
         # Define a parameterized circuit builder (new API: params, spec)
-        function build_voltage_divider(params, spec)
+        function build_voltage_divider(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1224,7 +1224,7 @@ using VerilogAParser
     end
 
     @testset "MNASim with RC circuit" begin
-        function build_rc(params, spec)
+        function build_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1339,7 +1339,7 @@ using VerilogAParser
         # Build a parameterized RC circuit with a step voltage source
         # In :dcop mode, source returns dc_value
         # In :tran mode, source returns time-dependent value
-        function build_rc_step(params, spec)
+        function build_rc_step(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1473,7 +1473,7 @@ using VerilogAParser
         using OrdinaryDiffEq
 
         # Build RC circuit with time-dependent source that respects mode
-        function build_mode_aware_rc(params, spec)
+        function build_mode_aware_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1647,7 +1647,7 @@ using VerilogAParser
         @test spec4.mode == :ac
 
         # Test temperature-dependent circuit
-        function build_temp_dependent(params, spec)
+        function build_temp_dependent(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1706,7 +1706,7 @@ using VerilogAParser
 
     @testset "dc! and tran! API" begin
         # Define a simple RC circuit
-        function build_rc_simple(params, spec)
+        function build_rc_simple(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
@@ -1757,7 +1757,7 @@ using VerilogAParser
 
     @testset "Hierarchical scope access" begin
         # Build a circuit with hierarchical-like node names
-        function build_hierarchical(params, spec)
+        function build_hierarchical(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             # Simulate subcircuit x1 with nodes x1_in and x1_out
             x1_in = get_node!(ctx, :x1_in)

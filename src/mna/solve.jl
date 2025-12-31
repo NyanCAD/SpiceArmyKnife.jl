@@ -368,8 +368,8 @@ sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
 function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100,
                   explicit_jacobian::Bool=true) where {F,P}
-    # Build at x=0 to get system size and initial structure
-    ctx0 = builder(params, spec; x=Float64[])
+    # Build at x=0, t=0 to get system size and initial structure
+    ctx0 = builder(params, spec, 0.0; x=Float64[])
     sys0 = assemble!(ctx0)
     n = system_size(sys0)
 
@@ -381,7 +381,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     x0 = sys0.G \ sys0.b
 
     # Check if linear solution is good enough
-    ctx_check = builder(params, spec; x=x0)
+    ctx_check = builder(params, spec, 0.0; x=x0)
     sys_check = assemble!(ctx_check)
     resid0 = sys_check.G * x0 - sys_check.b
     if norm(resid0) < abstol
@@ -391,8 +391,8 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     # Need Newton iteration - create NonlinearProblem
     # Residual function: F(u) = G(u)*u - b(u)
     function residual!(F, u, p)
-        # Rebuild circuit at current operating point
-        ctx = builder(params, spec; x=u)
+        # Rebuild circuit at current operating point (t=0 for DC)
+        ctx = builder(params, spec, 0.0; x=u)
         sys = assemble!(ctx)
 
         # F(u) = G(u)*u - b(u)
@@ -409,7 +409,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
         # For well-linearized devices, dG/du * u ≈ contributions already in G
         # So J ≈ G (the conductance matrix at operating point)
         function jacobian!(J, u, p)
-            ctx = builder(params, spec; x=u)
+            ctx = builder(params, spec, 0.0; x=u)
             sys = assemble!(ctx)
             copyto!(J, sys.G)
             return nothing
@@ -437,7 +437,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     end
 
     # Get final system for node names
-    ctx_final = builder(params, spec; x=sol.u)
+    ctx_final = builder(params, spec, 0.0; x=sol.u)
     sys_final = assemble!(ctx_final)
 
     return DCSolution(sys_final, sol.u)
@@ -831,9 +831,9 @@ end
 
 export MNASim, alter
 
-# Callable interface - invokes builder with (params, spec)
+# Callable interface - invokes builder with (params, spec, t=0.0)
 function (sim::MNASim)()
-    return sim.builder(sim.params, sim.spec)
+    return sim.builder(sim.params, sim.spec, 0.0)
 end
 
 # Build and assemble in one step
@@ -929,9 +929,8 @@ sys = eval_circuit(build_rc, params, spec)
 """
 function eval_circuit(builder::F, params::P, spec::MNASpec;
                       t::Real=0.0, u=nothing) where {F,P}
-    # For now, t and u are passed through spec extension
-    # Future: could pass to builder for time-dependent/nonlinear devices
-    ctx = builder(params, spec)
+    # Call builder with explicit time parameter
+    ctx = builder(params, spec, t)
     return assemble!(ctx)
 end
 
@@ -1302,7 +1301,7 @@ export alter
 Get the system size (number of unknowns) for the circuit.
 """
 function system_size(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
     sys0 = assemble!(ctx0)
     return system_size(sys0)
 end
@@ -1319,7 +1318,7 @@ Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
 """
 function detect_differential_vars(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec; x=Float64[])
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1378,7 +1377,7 @@ function compute_initial_conditions(circuit::MNACircuit)
     # So: C*du0 = b - G*u0
     # For singular C (algebraic vars), du0 components are 0
 
-    ctx0 = circuit.builder(circuit.params, circuit.spec; x=u0)
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
     sys0 = assemble!(ctx0)
 
     rhs = sys0.b - sys0.G * u0
@@ -1588,7 +1587,7 @@ end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
     ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
-    ctx = circuit.builder(circuit.params, ac_spec; x=Float64[])
+    ctx = circuit.builder(circuit.params, ac_spec, 0.0; x=Float64[])
     sys = assemble!(ctx)
     return solve_ac(sys, freqs; kwargs...)
 end

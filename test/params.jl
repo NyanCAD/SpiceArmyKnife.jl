@@ -19,7 +19,7 @@ using CedarSim: dc!
 
 # MNA builder function equivalent to ParCir struct
 # Default values: R=2.0, V=5.0
-function build_par_cir(params, spec)
+function build_par_cir(params, spec, t::Real=0.0; x=Float64[])
     # Merge with defaults (like @kwdef did for the struct)
     defaults = (R=2.0, V=5.0)
     p = merge(defaults, params)
@@ -49,7 +49,7 @@ sol = dc!(sim)
 
 # MNA builder using ParamLens for hierarchical access
 # Structure: (child=(params=(R=..., V=...),),)
-function build_nested_par_cir(params, spec)
+function build_nested_par_cir(params, spec, t::Real=0.0; x=Float64[])
     lens = ParamLens(params)
     # lens.child(; defaults...) merges defaults with overrides
     p = lens.child(; R=2.0, V=5.0)
@@ -80,7 +80,7 @@ sol = dc!(sim)
 #==============================================================================#
 
 # MNA builder using ParamLens for parameter defaults with overrides
-function build_func_cir(params, spec)
+function build_func_cir(params, spec, t::Real=0.0; x=Float64[])
     lens = ParamLens(params)
     # Call lens with defaults - returns merged params
     p = lens(; V=5.0, R=2.0)

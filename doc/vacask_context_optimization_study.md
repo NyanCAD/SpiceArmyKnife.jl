@@ -1,5 +1,60 @@
 # VACASK Context Allocation Optimization Study
 
+## Current Status (2024-12 Update)
+
+### Completed Optimizations
+
+1. **Explicit Time Passing (Phase 2)**: Builder signature changed from `(params, spec; x)` to `(params, spec, t::Real=0.0; x)`. This eliminates MNASpec allocation (~80 bytes) per call.
+
+2. **SPICE Codegen Updated**: Both top-level and subcircuit builders now use explicit time parameter:
+   - Top-level: `function circuit(params, spec, t::Real=0.0; x=...)`
+   - Subcircuit: `function subckt_mna_builder(lens, spec, t::Real, ctx, ...)`
+
+3. **Unified Code Path**: `MNASim.tran!` now delegates to `MNACircuit.tran!` internally, ensuring all circuits use the same DAE-based path.
+
+4. **PrecompiledCircuit Updated**: `fast_rebuild!` now passes time explicitly to the builder, eliminating MNASpec allocation during iteration.
+
+### Current Benchmark Results
+
+**VACASK RC Benchmark** (`benchmarks/vacask/rc/cedarsim/runme.jl`):
+- **Simulation**: 1 second transient with pulse train, ~100K timepoints
+- **Time**: 361-946 ms (median ~660 ms)
+- **Memory**: 298 MiB, 5.3M allocations
+- **GC overhead**: 36-62% of runtime
+- **Comparison**: Previously was ~10+ seconds before explicit time optimization
+
+The high GC overhead (36-62%) indicates that the remaining MNAContext allocations are the primary bottleneck.
+
+### Remaining Allocation Sources
+
+The main remaining allocations come from:
+
+1. **MNAContext creation** (~1.9 KB per builder call):
+   - `G_I, G_J, G_V::Vector{Float64}` (COO triplets for G matrix)
+   - `C_I, C_J, C_V::Vector{Float64}` (COO triplets for C matrix)
+   - `b::Vector{Float64}`, `b_I::Vector{Int}`, `b_V::Vector{Float64}` (RHS)
+   - `node_to_idx::Dict{Symbol,Int}`, `node_names::Vector{Symbol}`
+   - `current_names::Vector{Symbol}`, `voltage_source_currents::Dict`
+
+2. **DAE solver overhead** (~93 KB per simulation):
+   - SciMLBase problem construction
+   - Sundials IDA internal allocations
+   - Solution storage and interpolation
+
+### Next Steps: EvalWorkspace Implementation
+
+To achieve zero per-iteration allocations, implement the EvalWorkspace pattern from this document:
+
+1. Separate `PrecompiledCircuit` into:
+   - `CompiledStructure` (immutable): circuit topology, mappings, sparse matrix structure
+   - `EvalWorkspace` (mutable): COO values, time, passed as `p` to DAE solver
+
+2. Add `evaluate_values!` function that fills preallocated COO storage instead of creating new `MNAContext`
+
+3. Store `EvalWorkspace` in DAE problem's `p` parameter
+
+---
+
 ## Problem Statement
 
 The current implementation allocates ~2KB per Newton iteration in `fast_rebuild!`:

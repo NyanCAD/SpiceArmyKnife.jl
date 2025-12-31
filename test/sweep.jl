@@ -286,7 +286,7 @@ end
 
     # Test nested parameter access with var-strings (like SPICE codegen will use)
     # Builder uses ParamLens for hierarchical params with defaults
-    function build_nested_resistor(params, spec)
+    function build_nested_resistor(params, spec, t::Real=0.0; x=Float64[])
         # Convert params to ParamLens for SPICE-style hierarchical access
         lens = ParamLens(params)
         # lens.inner(; defaults...) returns params merged with lens overrides

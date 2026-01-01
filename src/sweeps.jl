@@ -361,13 +361,13 @@ sweepify(x::SweepLike) = x
 sweepify(x) = Sweep(x)
 
 
-using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_ode_problem
+using .MNA: MNASim, MNACircuit, MNASystem, assemble!, solve_dc, make_ode_problem
 
 """
     CircuitSweep
 
 Provides a multi-dimensional sweep over sets of variables defined within a
-circuit.  When iterated over, returns the altered simulation object (MNASim).
+circuit.  When iterated over, returns the altered circuit object (MNACircuit).
 Parameter specification can be done with simple `Symbol`'s, or with more complex
 `@optic` values from the `Accessors` package.
 
@@ -377,8 +377,8 @@ Examples:
     cs = CircuitSweep(build_circuit, ProductSweep(R1 = 0.1:0.1:1.0); R2 = 100.0)
 
     # Iterate over the sweep:
-    for sim in cs
-        sol = dc!(sim)
+    for circuit in cs
+        sol = dc!(circuit)
         ...
     end
 
@@ -436,7 +436,7 @@ end
 """
     dc!(sim::MNASim)
 
-DC operating point analysis for MNA circuits.
+DC operating point analysis for MNA circuits (deprecated, use MNACircuit).
 Returns a `DCSolution` with voltage/current accessors.
 """
 function dc!(sim::MNASim)
@@ -477,7 +477,7 @@ end
 """
     tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
 
-Transient analysis for MNA circuits using ODE formulation.
+Transient analysis for MNA circuits using ODE formulation (deprecated, use MNACircuit).
 
 This uses static matrix assembly (G, C, b computed once at t=0).
 For nonlinear circuits with voltage-dependent capacitors, use `tran!` with
@@ -485,8 +485,8 @@ For nonlinear circuits with voltage-dependent capacitors, use `tran!` with
 
 # Example
 ```julia
-sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
-sol = tran!(sim, (0.0, 1e-3))
+circuit = MNACircuit(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
+sol = tran!(circuit, (0.0, 1e-3))
 sol(0.5e-3)  # State at t=0.5ms
 ```
 """

@@ -3,10 +3,10 @@ module params_tests
 include("common.jl")
 
 # MNA imports for parameter tests
-using CedarSim.MNA: MNAContext, MNASim, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using CedarSim.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current
-using CedarSim.MNA: alter  # MNA-specific alter for MNASim
+using CedarSim.MNA: alter  # MNA-specific alter for MNACircuit
 using CedarSim: ParamLens, IdentityLens
 using CedarSim: dc!
 
@@ -35,8 +35,8 @@ function build_par_cir(params, spec, t::Real=0.0; x=Float64[])
 end
 
 # Test with R=1.0 (equivalent to ParamSim(ParCir, R=1.0, temp=340.0))
-sim = MNASim(build_par_cir; spec=MNASpec(temp=340.0), R=1.0)
-sol = dc!(sim)
+circuit = MNACircuit(build_par_cir; spec=MNASpec(temp=340.0), R=1.0)
+sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
 @test current(sol, :I_V) == -5.0
 
@@ -65,10 +65,10 @@ end
 
 # Test with var"child.R"=1.0 (equivalent to ParamSim(NestedParCir, var"child.R"=1.0))
 # ParamLens expects (child=(params=(R=...,),)) structure
-sim = MNASim(build_nested_par_cir;
+circuit = MNACircuit(build_nested_par_cir;
              spec=MNASpec(temp=340.0),
              child=(params=(R=1.0,),))
-sol = dc!(sim)
+sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
 @test current(sol, :I_V) == -5.0
 
@@ -96,10 +96,10 @@ end
 
 # Test with R=1.0 (equivalent to ParamSim(FuncCir, var"R"=1.0))
 # ParamLens expects (params=(R=...,),) for top-level lens() calls
-sim = MNASim(build_func_cir;
+circuit = MNACircuit(build_func_cir;
              spec=MNASpec(temp=340.0),
              params=(R=1.0,))
-sol = dc!(sim)
+sol = dc!(circuit)
 # Current through voltage source: I = -V/R = -5.0/1.0 = -5.0
 @test current(sol, :I_V) == -5.0
 
@@ -171,11 +171,11 @@ Base.eval(m, :(using CedarSim: ParamLens))
 Base.eval(m, :(using CedarSim.SpectreEnvironment))
 mna_builder = Base.eval(m, mna_code)
 
-# Test that we can pass parameters to subcircuits via MNASim
+# Test that we can pass parameters to subcircuits via MNACircuit
 # ParamLens expects params wrapped in (params=(...),) for merging to work
 # Test with x1.x1.params.foo=2.0 - should set inner resistor R1 = foo = 2.0
-sim = MNASim(mna_builder; x1=(x1=(params=(foo=2.0,),),))
-sol = dc!(sim)
+circuit = MNACircuit(mna_builder; x1=(x1=(params=(foo=2.0,),),))
+sol = dc!(circuit)
 # With foo=2.0 override at x1.x1 level, R1 = foo = 2.0 Ohms
 # Current source i1 uses top-level foo=1 by default
 # V = I * R = 1A * 2Ω = 2V across R1
@@ -183,8 +183,8 @@ sol = dc!(sim)
 
 # Test with top-level foo=2.0 - should affect both i1 and (via expression) R1
 # params=(foo=2.0,) at top level merges with defaults
-sim = MNASim(mna_builder; params=(foo=2.0,))
-sol = dc!(sim)
+circuit = MNACircuit(mna_builder; params=(foo=2.0,))
+sol = dc!(circuit)
 # foo=2.0 at top level: i1 DC = 2A, R1 = foo+2000 = 2002Ω at inner level
 # With default foo expression in subcircuit: foo = parent_foo + 2000 = 2002
 # V = I * R = 2A * 2002Ω = 4004V
@@ -194,8 +194,8 @@ sol = dc!(sim)
 # are not yet supported by MNA codegen - the resistor stamp uses the foo parameter
 # directly without checking lens for component-level overrides.
 # For now, test that we can override foo at the subcircuit level with explicit value
-sim = MNASim(mna_builder; x1=(x1=(params=(foo=100.0,),),))
-sol = dc!(sim)
+circuit = MNACircuit(mna_builder; x1=(x1=(params=(foo=100.0,),),))
+sol = dc!(circuit)
 # Override foo=100.0 at x1.x1 level, R1 = foo = 100Ω, i1 uses foo=1, so I = 1A
 # V = I * R = 1A * 100Ω = 100V
 @test isapprox_deftol(voltage(sol, :out), -100)
@@ -262,19 +262,19 @@ modified = String(take!(io))
     @test other_params.R == 1000.0  # All defaults
 end
 
-@testset "MNASim alter() for parameter sweeps" begin
-    # Test alter() on MNASim objects
-    sim = MNASim(build_par_cir; R=1000.0, V=5.0)
-    sol = dc!(sim)
+@testset "MNACircuit alter() for parameter sweeps" begin
+    # Test alter() on MNACircuit objects
+    circuit = MNACircuit(build_par_cir; R=1000.0, V=5.0)
+    sol = dc!(circuit)
     @test voltage(sol, :vcc) ≈ 5.0
 
     # Alter R parameter
-    sim2 = alter(sim; R=500.0)
-    @test sim2.params.R == 500.0
-    @test sim2.params.V == 5.0  # Unchanged
+    circuit2 = alter(circuit; R=500.0)
+    @test circuit2.params.R == 500.0
+    @test circuit2.params.V == 5.0  # Unchanged
 
     # Both should give correct DC solution
-    sol2 = dc!(sim2)
+    sol2 = dc!(circuit2)
     @test voltage(sol2, :vcc) ≈ 5.0
 
     # Current should reflect new R: I = -V/R = -5/500 = -0.01

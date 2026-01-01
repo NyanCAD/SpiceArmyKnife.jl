@@ -1328,6 +1328,44 @@ function assemble!(circuit::MNACircuit)
     return assemble!(ctx)
 end
 
+"""
+    with_spec(circuit::MNACircuit, spec::MNASpec) -> MNACircuit
+
+Create a new circuit with a different spec (mode, temperature, etc.).
+"""
+function with_spec(circuit::MNACircuit, spec::MNASpec)
+    return MNACircuit(circuit.builder, circuit.params, spec)
+end
+
+"""
+    with_mode(circuit::MNACircuit, mode::Symbol) -> MNACircuit
+
+Create a new circuit with a different mode (:dcop, :tran, :ac).
+"""
+function with_mode(circuit::MNACircuit, mode::Symbol)
+    new_spec = MNASpec(temp=circuit.spec.temp, mode=mode)
+    return with_spec(circuit, new_spec)
+end
+
+"""
+    with_temp(circuit::MNACircuit, temp::Real) -> MNACircuit
+
+Create a new circuit with a different temperature.
+"""
+function with_temp(circuit::MNACircuit, temp::Real)
+    new_spec = MNASpec(temp=Float64(temp), mode=circuit.spec.mode)
+    return with_spec(circuit, new_spec)
+end
+
+"""
+    eval_circuit(circuit::MNACircuit; t=0.0, u=nothing) -> MNASystem
+
+Out-of-place evaluation from MNACircuit wrapper.
+"""
+function eval_circuit(circuit::MNACircuit; t::Real=0.0, u=nothing)
+    return eval_circuit(circuit.builder, circuit.params, circuit.spec; t=t, u=u)
+end
+
 # NOTE: make_dae_residual and make_dae_jacobian removed.
 # Use the compiled versions (make_compiled_dae_residual) for ~10x speedup.
 
@@ -1602,9 +1640,12 @@ end
 #==============================================================================#
 
 # Internal solve_dc/solve_ac methods for MNACircuit (called from sweeps.jl)
+# Note: Unlike some SPICE simulators that force :dcop mode, we respect the circuit's
+# spec to allow mode-aware testing. Use with_mode(circuit, :dcop) explicitly if needed.
 function solve_dc(circuit::MNACircuit)
-    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
-    return solve_dc(circuit.builder, circuit.params, dc_spec)
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    sys = assemble!(ctx)
+    return solve_dc(sys)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)

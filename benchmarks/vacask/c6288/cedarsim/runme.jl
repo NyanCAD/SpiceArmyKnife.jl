@@ -46,14 +46,14 @@ eval(circuit_code)
 """
     setup_simulation(; dtmax=2e-12)
 
-Create and return a fully-prepared MNASim ready for transient analysis.
+Create and return a fully-prepared MNACircuit ready for transient analysis.
 This separates problem setup from solve time for accurate benchmarking.
 """
 function setup_simulation(; dtmax=2e-12)
-    sim = MNASim(c6288_circuit)
+    circuit = MNACircuit(c6288_circuit)
     # Perform DC operating point to initialize the circuit
-    MNA.assemble!(sim)
-    return sim
+    MNA.assemble!(circuit)
+    return circuit
 end
 
 function run_benchmark(; warmup=true, dtmax=2e-12)
@@ -67,8 +67,8 @@ function run_benchmark(; warmup=true, dtmax=2e-12)
     if warmup
         println("Warmup run...")
         try
-            sim = setup_simulation(; dtmax=dtmax)
-            tran!(sim, (0.0, 10e-12); dtmax=dtmax, solver=solver)
+            circuit = setup_simulation(; dtmax=dtmax)
+            tran!(circuit, (0.0, 10e-12); dtmax=dtmax, solver=solver)
             println("Warmup completed")
         catch e
             println("Warmup failed: ", e)
@@ -78,15 +78,15 @@ function run_benchmark(; warmup=true, dtmax=2e-12)
     end
 
     # Setup the simulation outside the timed region
-    sim = setup_simulation(; dtmax=dtmax)
+    circuit = setup_simulation(; dtmax=dtmax)
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with ImplicitEuler...")
-    bench = @benchmark tran!($sim, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
-    sim = setup_simulation(; dtmax=dtmax)
-    sol = tran!(sim, tspan; dtmax=dtmax, solver=solver)
+    circuit = setup_simulation(; dtmax=dtmax)
+    sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))

@@ -1260,24 +1260,80 @@ end
 Compute consistent initial conditions via DC operating point.
 
 1. Solves DC problem (du=0) to get u0
-2. Computes du0 to satisfy F(du0, u0, 0) = 0
+2. For charge variables, computes q = Q(V) from the constraint
+3. Computes du0 to satisfy F(du0, u0, 0) = 0
 
 This is equivalent to CedarDCOp initialization.
 """
 function compute_initial_conditions(circuit::MNACircuit)
-    # DC solve for u0
+    # DC solve for u0 (node voltages and currents)
     dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
     u0 = solve_dc(circuit.builder, circuit.params, dc_spec).x
 
     n = length(u0)
+
+    # Get system structure to identify charge variables
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
+    sys0 = assemble!(ctx0)
+
+    # Fix charge variable initial values
+    # The DC solve may not correctly initialize charges because the constraint
+    # residual can be below abstol. We need to explicitly solve q = Q(V).
+    #
+    # For each charge variable at index q_idx, the constraint row in G is:
+    #   G[q_idx, q_idx] = 1 (coefficient of q)
+    #   G[q_idx, j] = -∂Q/∂Vj for voltage nodes j
+    #
+    # The constraint equation is: q - Q(V) = 0, or: q = Q(V)
+    # From G*x = b at the constraint row:
+    #   1*q + sum(-∂Q/∂Vj * Vj) = b[q_idx]
+    #   q = b[q_idx] + sum(∂Q/∂Vj * Vj)
+    #
+    # But actually, since b is the Newton companion, a simpler approach is to
+    # iterate: set q = Q(V) using the values from b recomputed at current x.
+    if sys0.n_charges > 0
+        # Re-solve for charge values using Newton iteration
+        # The constraint is q = Q(V), which can be solved directly
+        for iter in 1:5  # Few iterations should suffice
+            ctx_iter = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
+            sys_iter = assemble!(ctx_iter)
+
+            # For each charge variable, solve the constraint equation
+            n_nodes = sys_iter.n_nodes
+            n_currents = sys_iter.n_currents
+            for i in 1:sys_iter.n_charges
+                q_idx = n_nodes + n_currents + i
+
+                # Constraint row: G[q_idx, :] * x = b[q_idx]
+                # G[q_idx, q_idx] = 1, so: q = b[q_idx] - sum(G[q_idx, j] * x[j]) for j != q_idx
+                rhs = sys_iter.b[q_idx]
+                for j in 1:n
+                    if j != q_idx
+                        rhs -= sys_iter.G[q_idx, j] * u0[j]
+                    end
+                end
+                u0[q_idx] = rhs / sys_iter.G[q_idx, q_idx]
+            end
+
+            # Check convergence
+            ctx_check = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
+            sys_check = assemble!(ctx_check)
+            resid = sys_check.G * u0 - sys_check.b
+            if norm(resid) < 1e-12
+                break
+            end
+        end
+    end
+
+    # Recompute system at final u0
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
+    sys0 = assemble!(ctx0)
+
     du0 = zeros(n)
 
     # At t=0, need F(du0, u0) = C*du0 + G*u0 - b = 0
     # So: C*du0 = b - G*u0
     # For singular C (algebraic vars), du0 components are 0
-
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-    sys0 = assemble!(ctx0)
 
     rhs = sys0.b - sys0.G * u0
     diff_vars = detect_differential_vars(sys0)

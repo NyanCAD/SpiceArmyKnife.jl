@@ -12,17 +12,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  # Core tests - run quickly without heavy VA model parsing
+  test-core:
+    name: Core Tests - Julia ${{ matrix.version }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         version:
           - '1.11'
           - '1.12'
-        os:
-          - ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -70,5 +69,49 @@ jobs:
             Pkg.precompile()
           '
 
-      - name: Run CedarSim tests
+      - name: Run CedarSim core tests
         run: julia --project=test test/runtests.jl
+
+  # Integration tests - heavy VA model parsing, run separately to avoid OOM
+  test-integration:
+    name: Integration Tests - Julia ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Install dependencies
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+          '
+
+      - name: Install and precompile test dependencies
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.develop([
+              PackageSpec(path="."),
+              PackageSpec(path="SpectreNetlistParser.jl"),
+              PackageSpec(path="VerilogAParser.jl"),
+              PackageSpec(path="Lexers.jl")
+            ])
+            Pkg.instantiate()
+            Pkg.precompile()
+          '
+
+      - name: Run CedarSim integration tests
+        run: julia --project=test test/runtests.jl integration

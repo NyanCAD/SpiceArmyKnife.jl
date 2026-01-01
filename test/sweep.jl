@@ -5,7 +5,7 @@ using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
 # MNA imports for sweep tests
-using CedarSim.MNA: MNAContext, MNASim, get_node!, stamp!
+using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current, DCSolution
 using CedarSim: ParamLens
@@ -254,8 +254,8 @@ end
 #==============================================================================#
 
 @testset "simple dc!" begin
-    sim = MNASim(build_two_resistor; R1=100.0, R2=100.0)
-    sol = dc!(sim)
+    circuit = MNACircuit(build_two_resistor; R1=100.0, R2=100.0)
+    sol = dc!(circuit)
     @test sol isa DCSolution
     @test voltage(sol, :vcc) ≈ 1.0
     @test voltage(sol, :out) ≈ 0.5  # Voltage divider: 1V * 100/(100+100)

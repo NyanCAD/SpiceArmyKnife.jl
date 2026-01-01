@@ -2105,6 +2105,212 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
     end
 
+    #==========================================================================#
+    # Tier 7: DAE Code Path - Voltage-Dependent Capacitor Transient
+    #
+    # Tests for IDA (DAE solver) with nonlinear voltage-dependent capacitors
+    # from vadistiller models. These verify that matrix rebuilding at each
+    # Newton iteration correctly handles devices like diode junction caps
+    # and MOSFET gate/junction caps.
+    #==========================================================================#
+
+    @testset "Tier 7: DAE Transient with Voltage-Dependent Capacitors" begin
+        using CedarSim: tran!, dc!
+        using CedarSim.MNA: MNASolutionAccessor, SinVoltageSource
+
+        # Path to vadistiller models
+        vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
+
+        # Load models ONCE at the beginning of Tier 7 to avoid redefinition conflicts
+        # The sp_diode and sp_mos1 functions are already loaded in earlier tiers,
+        # so we just reference them here without reloading.
+
+        @testset "Diode junction capacitance (sp_diode with IDA)" begin
+            # Half-wave rectifier with junction capacitance
+            # The cjo parameter enables voltage-dependent junction capacitance
+            function diode_rectifier_with_cap(params, spec, t::Real=0.0; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                # Sine input
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
+                       ctx, vin, 0; t=t, _sim_mode_=spec.mode)
+
+                # Diode with junction capacitance (cjo=10pF, grading=0.5)
+                stamp!(sp_diode(; is=1e-14, cjo=10e-12, m=0.5, vj=0.7),
+                       ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
+
+                # Load resistor
+                stamp!(Resistor(params.R), ctx, vout, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(diode_rectifier_with_cap;
+                                 Vamp=5.0, freq=1000.0, R=1000.0)
+            tspan = (0.0, 3e-3)  # 3 periods
+
+            # Test with IDA (DAE solver - default)
+            sol_ida = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            @test sol_ida.retcode == SciMLBase.ReturnCode.Success
+
+            sys = assemble!(circuit)
+            acc = MNASolutionAccessor(sol_ida, sys)
+
+            T = 1e-3  # Period
+
+            # Verify reasonable number of timesteps (not too few, not exploding)
+            @test length(sol_ida.t) > 50  # Should have enough steps
+            @test length(sol_ida.t) < 100000  # But not exploding
+
+            # Verify voltages are bounded throughout simulation
+            for i in 1:length(sol_ida.t)
+                vin = sol_ida.u[i][1]
+                vout = sol_ida.u[i][2]
+                @test !isnan(vin) && !isnan(vout)
+                @test abs(vin) < 10.0  # Input shouldn't exceed 5V amplitude much
+                @test abs(vout) < 10.0  # Output shouldn't exceed input
+            end
+
+            # At positive peak (t=T/4), Vin ~ 5V, diode conducts
+            # Vout should be close to Vin (rectifier with no filter cap)
+            vin_pos = voltage(acc, :vin, T/4)
+            vout_pos = voltage(acc, :vout, T/4)
+            @test vin_pos > 4.5  # Near 5V peak
+            @test vout_pos > 0.0  # Should be positive
+
+            # At negative peak (t=3T/4), Vin ~ -5V, diode blocks
+            # Vout should decay toward 0 (just resistor load)
+            vin_neg = voltage(acc, :vin, 3T/4)
+            vout_neg = voltage(acc, :vout, 3T/4)
+            @test vin_neg < -4.5  # Near -5V
+            @test vout_neg >= -0.1  # Diode blocks, output stays near zero
+        end
+
+        @testset "MOSFET gate capacitance (sp_mos1 with IDA)" begin
+            # Common-source amplifier with gate capacitance
+            function cs_amp_with_cap(params, spec, t::Real=0.0; x=Float64[])
+                ctx = MNAContext()
+                vdd = get_node!(ctx, :vdd)
+                vgate = get_node!(ctx, :vgate)
+                vdrain = get_node!(ctx, :vdrain)
+
+                # DC supply
+                stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
+
+                # Gate bias + AC signal
+                stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
+                       ctx, vgate, 0; t=t, _sim_mode_=spec.mode)
+
+                # Drain resistor
+                stamp!(Resistor(params.Rd), ctx, vdd, vdrain)
+
+                # NMOS with gate overlap capacitance
+                # cgso/cgdo enable voltage-dependent gate capacitance
+                stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4,
+                               cgso=1e-12, cgdo=0.5e-12),
+                       ctx, vdrain, vgate, 0, 0; _mna_x_=x, _mna_spec_=spec)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(cs_amp_with_cap;
+                                 Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
+            tspan = (0.0, 2e-3)  # 2 periods
+
+            # Test with IDA (DAE solver - default)
+            sol_ida = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6)
+            @test sol_ida.retcode == SciMLBase.ReturnCode.Success
+
+            sys = assemble!(circuit)
+            acc = MNASolutionAccessor(sol_ida, sys)
+
+            T = 1e-3  # Period
+
+            # Verify voltages are bounded throughout simulation
+            for i in 1:length(sol_ida.t)
+                vdd = sol_ida.u[i][1]
+                vgate = sol_ida.u[i][2]
+                vdrain = sol_ida.u[i][3]
+                @test !isnan(vdd) && !isnan(vgate) && !isnan(vdrain)
+                @test abs(vdd - 5.0) < 0.01  # VDD should be stable
+                @test vgate > 1.0 && vgate < 2.0  # Gate in valid range
+                @test vdrain > 0.0 && vdrain < 5.5  # Drain in valid range
+            end
+
+            # Get drain voltages at different phases
+            vd_t0 = voltage(acc, :vdrain, T)  # Reference point
+            vd_pos = voltage(acc, :vdrain, T + T/4)  # Vg at positive peak
+            vd_neg = voltage(acc, :vdrain, T + 3T/4)  # Vg at negative peak
+
+            # Check for NaN (indicates solver instability)
+            @test !isnan(vd_t0) && !isnan(vd_pos) && !isnan(vd_neg)
+
+            # Common-source amplifier inverts: higher Vg → more current → lower Vd
+            @test vd_pos < vd_neg
+        end
+
+        @testset "Half-wave rectifier with filter cap (sp_diode with IDA)" begin
+            # Simpler half-wave rectifier with filter capacitor
+            # Tests junction capacitance + filter capacitor together
+            function halfwave_rectifier(params, spec, t::Real=0.0; x=Float64[])
+                ctx = MNAContext()
+                vin = get_node!(ctx, :vin)
+                vout = get_node!(ctx, :vout)
+
+                # AC input
+                stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
+                       ctx, vin, 0; t=t, _sim_mode_=spec.mode)
+
+                # Diode with junction capacitance
+                stamp!(sp_diode(; is=1e-14, cjo=5e-12, m=0.5),
+                       ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
+
+                # Filter capacitor + load resistor
+                stamp!(Capacitor(params.C), ctx, vout, 0)
+                stamp!(Resistor(params.R), ctx, vout, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(halfwave_rectifier;
+                                 Vamp=10.0, freq=50.0, R=1000.0, C=100e-6)
+            tspan = (0.0, 40e-3)  # 2 periods at 50Hz
+
+            # Test with IDA (DAE solver - default)
+            sol_ida = tran!(circuit, tspan; abstol=1e-6, reltol=1e-4)
+            @test sol_ida.retcode == SciMLBase.ReturnCode.Success
+
+            sys = assemble!(circuit)
+
+            # Verify simulation completed with reasonable number of steps
+            @test length(sol_ida.t) > 50
+            @test length(sol_ida.t) < 100000
+
+            # Verify voltages are bounded throughout simulation
+            for i in 1:length(sol_ida.t)
+                vin = sol_ida.u[i][1]
+                vout = sol_ida.u[i][2]
+                @test !isnan(vin) && !isnan(vout)
+                @test abs(vin) < 15.0  # Input shouldn't exceed 10V amplitude much
+                @test abs(vout) < 15.0  # Output shouldn't exceed input peak
+            end
+
+            # After 2 periods, output should have reached near-steady-state DC
+            # The peak input is 10V, after rectification ~9.3V (1 diode drop)
+            # With RC smoothing, we expect ripple but average should be substantial
+            vout_idx = findfirst(n -> n == :vout, sys.node_names)
+
+            if vout_idx !== nothing
+                v_final = sol_ida(40e-3)[vout_idx]
+                @test v_final > 5.0  # Should have substantial DC output
+                @test v_final < 12.0  # But not more than peak
+            end
+        end
+
+    end
+
 end
 
 #==============================================================================#

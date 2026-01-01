@@ -361,13 +361,13 @@ sweepify(x::SweepLike) = x
 sweepify(x) = Sweep(x)
 
 
-using .MNA: MNASim, MNASystem, assemble!, solve_dc, make_ode_problem
+using .MNA: MNACircuit, MNASystem, assemble!, solve_dc, make_ode_problem
 
 """
     CircuitSweep
 
 Provides a multi-dimensional sweep over sets of variables defined within a
-circuit.  When iterated over, returns the altered simulation object (MNASim).
+circuit.  When iterated over, returns the altered circuit object (MNACircuit).
 Parameter specification can be done with simple `Symbol`'s, or with more complex
 `@optic` values from the `Accessors` package.
 
@@ -377,8 +377,8 @@ Examples:
     cs = CircuitSweep(build_circuit, ProductSweep(R1 = 0.1:0.1:1.0); R2 = 100.0)
 
     # Iterate over the sweep:
-    for sim in cs
-        sol = dc!(sim)
+    for circuit in cs
+        sol = dc!(circuit)
         ...
     end
 
@@ -406,13 +406,6 @@ function CircuitSweep(builder::Function, iterator::SweepLike; spec=MNA.MNASpec()
     return CircuitSweep(builder, circuit, iterator)
 end
 
-# Legacy constructor for backwards compatibility with MNASim
-function CircuitSweep(builder::T, sim::MNA.MNASim, iterator::SweepLike) where {T<:Function}
-    # Convert MNASim to MNACircuit
-    circuit = MNA.MNACircuit(sim.builder, sim.params, sim.spec)
-    return CircuitSweep(builder, circuit, iterator)
-end
-
 Base.length(cs::CircuitSweep) = length(cs.iterator)
 Base.size(cs::CircuitSweep) = size(cs.iterator)
 Base.size(cs::CircuitSweep, d::Integer) = get(size(cs), d, 1)
@@ -432,16 +425,6 @@ end
 #==============================================================================#
 # DC Analysis
 #==============================================================================#
-
-"""
-    dc!(sim::MNASim)
-
-DC operating point analysis for MNA circuits.
-Returns a `DCSolution` with voltage/current accessors.
-"""
-function dc!(sim::MNASim)
-    return MNA.solve_dc(sim)
-end
 
 """
     dc!(circuit::MNACircuit)
@@ -473,40 +456,6 @@ end
 #==============================================================================#
 # Transient Analysis
 #==============================================================================#
-
-"""
-    tran!(sim::MNASim, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8, kwargs...)
-
-Transient analysis for MNA circuits using ODE formulation.
-
-This uses static matrix assembly (G, C, b computed once at t=0).
-For nonlinear circuits with voltage-dependent capacitors, use `tran!` with
-`MNACircuit` instead, which uses DAEProblem formulation.
-
-# Example
-```julia
-sim = MNASim(build_circuit; Vcc=5.0, R=1000.0, C=1e-6)
-sol = tran!(sim, (0.0, 1e-3))
-sol(0.5e-3)  # State at t=0.5ms
-```
-"""
-function tran!(sim::MNASim, tspan::Tuple{Real,Real};
-               solver=nothing, abstol=1e-10, reltol=1e-8, kwargs...)
-    sys = MNA.assemble!(sim)
-    ode_data = MNA.make_ode_problem(sys, tspan)  # Uses DC solution for initial condition
-
-    f = ODEFunction(ode_data.f;
-                    mass_matrix = ode_data.mass_matrix,
-                    jac = ode_data.jac,
-                    jac_prototype = ode_data.jac_prototype)
-    prob = ODEProblem(f, ode_data.u0, ode_data.tspan)
-
-    if solver === nothing
-        solver = Rodas5P()
-    end
-
-    return solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
-end
 
 """
     tran!(circuit::MNACircuit, tspan; solver=IDA(), abstol=1e-10, reltol=1e-8, kwargs...)

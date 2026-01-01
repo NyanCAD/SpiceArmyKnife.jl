@@ -1172,15 +1172,15 @@ using VerilogAParser
     end
 
     #==========================================================================#
-    # MNASim: Parameterized Circuit Wrapper
+    # MNACircuit: Parameterized Circuit Wrapper
     #==========================================================================#
 
-    # Import MNASim and related exports
-    using CedarSim.MNA: MNASim, MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
+    # Import MNACircuit and related exports
+    using CedarSim.MNA: MNASpec, alter, with_mode, with_spec, with_temp, eval_circuit
     using CedarSim.MNA: MNACircuit
     using SciMLBase: ODEProblem as SciMLODEProblem
 
-    @testset "MNASim basics" begin
+    @testset "MNACircuit basics" begin
         # Define a parameterized circuit builder (new API: params, spec)
         function build_voltage_divider(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
@@ -1194,36 +1194,36 @@ using VerilogAParser
             return ctx
         end
 
-        # Create sim with parameters
-        sim = MNASim(build_voltage_divider; Vcc=10.0, R1=1000.0, R2=1000.0)
+        # Create circuit with parameters
+        circuit = MNACircuit(build_voltage_divider; Vcc=10.0, R1=1000.0, R2=1000.0)
 
-        @test sim.spec.mode == :tran
-        @test sim.params.Vcc == 10.0
-        @test sim.params.R1 == 1000.0
+        @test circuit.spec.mode == :tran
+        @test circuit.params.Vcc == 10.0
+        @test circuit.params.R1 == 1000.0
 
         # Build and solve
-        sol = solve_dc(sim)
+        sol = solve_dc(circuit)
         @test voltage(sol, :out) ≈ 5.0  # Voltage divider: Vcc * R2/(R1+R2)
 
         # Alter parameters
-        sim2 = alter(sim; R2=3000.0)
-        @test sim2.params.R2 == 3000.0
-        @test sim2.params.R1 == 1000.0  # Unchanged
+        circuit2 = alter(circuit; R2=3000.0)
+        @test circuit2.params.R2 == 3000.0
+        @test circuit2.params.R1 == 1000.0  # Unchanged
 
-        sol2 = solve_dc(sim2)
+        sol2 = solve_dc(circuit2)
         @test voltage(sol2, :out) ≈ 7.5  # 10 * 3000/4000
 
         # Change mode
-        sim3 = with_mode(sim, :dcop)
-        @test sim3.spec.mode == :dcop
-        @test sim3.params.Vcc == 10.0  # Params preserved
+        circuit3 = with_mode(circuit, :dcop)
+        @test circuit3.spec.mode == :dcop
+        @test circuit3.params.Vcc == 10.0  # Params preserved
 
         # Test out-of-place eval_circuit
-        sys = eval_circuit(sim)
+        sys = eval_circuit(circuit)
         @test sys isa MNASystem
     end
 
-    @testset "MNASim with RC circuit" begin
+    @testset "MNACircuit with RC circuit" begin
         function build_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
@@ -1236,21 +1236,21 @@ using VerilogAParser
             return ctx
         end
 
-        sim = MNASim(build_rc; Vcc=5.0, R=1000.0, C=1e-6)
+        circuit = MNACircuit(build_rc; Vcc=5.0, R=1000.0, C=1e-6)
 
         # DC solution (capacitor is open circuit)
-        sol = solve_dc(sim)
+        sol = solve_dc(circuit)
         @test voltage(sol, :out) ≈ 5.0  # At DC, capacitor is open
 
         # AC sweep - cutoff fc = 1/(2πRC) ≈ 159Hz for R=1kΩ, C=1μF
         # At 10Hz (well below cutoff), gain should be ~1
         freqs = [10.0, 100.0, 1000.0]
-        ac_sol = solve_ac(sim, freqs)
+        ac_sol = solve_ac(circuit, freqs)
 
         # At 10Hz (f << fc), gain ≈ 1 (within 1%)
-        @test abs(voltage(ac_sol, :out)[1]) > 0.99 * sim.params.Vcc
+        @test abs(voltage(ac_sol, :out)[1]) > 0.99 * circuit.params.Vcc
         # At 1000Hz (f >> fc), gain should be < 0.2 (rolloff)
-        @test abs(voltage(ac_sol, :out)[3]) < 0.2 * sim.params.Vcc
+        @test abs(voltage(ac_sol, :out)[3]) < 0.2 * circuit.params.Vcc
     end
 
     @testset "DC-initialized transient (ODE)" begin
@@ -1360,17 +1360,17 @@ using VerilogAParser
             return ctx
         end
 
-        # Create parameterized simulation
-        sim = MNASim(build_rc_step; Vcc=5.0, R=1000.0, C=1e-6)
+        # Create parameterized circuit
+        circuit = MNACircuit(build_rc_step; Vcc=5.0, R=1000.0, C=1e-6)
 
         # Test 1: DC analysis with default mode (:tran)
-        sol_dc = solve_dc(sim)
+        sol_dc = solve_dc(circuit)
         @test voltage(sol_dc, :vcc) ≈ 5.0
         @test voltage(sol_dc, :out) ≈ 5.0  # steady state
 
         # Test 2: Change parameters using alter()
-        sim_modified = alter(sim; R=2000.0, C=2e-6)
-        sol_mod = solve_dc(sim_modified)
+        circuit_modified = alter(circuit; R=2000.0, C=2e-6)
+        sol_mod = solve_dc(circuit_modified)
         @test voltage(sol_mod, :vcc) ≈ 5.0
         @test voltage(sol_mod, :out) ≈ 5.0  # same DC, different dynamics
 
@@ -1380,42 +1380,23 @@ using VerilogAParser
         @test τ_modified == 4 * τ_original
 
         # Test 3: Change Vcc parameter and verify DC changes
-        sim_highv = alter(sim; Vcc=10.0)
-        sol_highv = solve_dc(sim_highv)
+        circuit_highv = alter(circuit; Vcc=10.0)
+        sol_highv = solve_dc(circuit_highv)
         @test voltage(sol_highv, :out) ≈ 10.0
 
         # Test 4: Mode switching with with_mode()
-        sim_dcop = with_mode(sim, :dcop)
-        @test sim_dcop.spec.mode == :dcop
-        sol_dcop = solve_dc(sim_dcop)
+        circuit_dcop = with_mode(circuit, :dcop)
+        @test circuit_dcop.spec.mode == :dcop
+        sol_dcop = solve_dc(circuit_dcop)
         @test voltage(sol_dcop, :out) ≈ 5.0
 
         # Test 5: Transient simulation with different parameters
-        # Compare τ=1ms circuit vs τ=4ms circuit
-        function run_transient(sim_instance)
-            sys = assemble!(sim_instance)
-            R = sim_instance.params.R
-            C = sim_instance.params.C
-            τ = R * C
-            tspan = (0.0, 5τ)
+        # Compare τ=1ms circuit vs τ=4ms circuit using high-level tran! API
+        τ_fast = circuit.params.R * circuit.params.C  # 1ms
+        τ_slow = circuit_modified.params.R * circuit_modified.params.C  # 4ms
 
-            ode_data = make_ode_problem(sys, tspan)  # DC-initialized by default
-
-            M = ode_data.mass_matrix
-            f = ode_data.f
-            u0 = ode_data.u0
-            jac = ode_data.jac
-            jac_proto = ode_data.jac_prototype
-
-            ode_fn = ODEFunction(f; mass_matrix=M, jac=jac, jac_prototype=jac_proto)
-            prob = ODEProblem(ode_fn, u0, tspan)
-            sol = solve(prob, Rodas5P(); reltol=1e-8, abstol=1e-10)
-
-            return sol, τ
-        end
-
-        sol_fast, τ_fast = run_transient(sim)  # τ=1ms
-        sol_slow, τ_slow = run_transient(sim_modified)  # τ=4ms
+        sol_fast = tran!(circuit, (0.0, 5τ_fast); solver=Rodas5P())
+        sol_slow = tran!(circuit_modified, (0.0, 5τ_slow); solver=Rodas5P())
 
         # Both should start at steady state (DC-initialized)
         @test sol_fast(0.0)[2] ≈ 5.0 rtol=1e-3
@@ -1426,13 +1407,13 @@ using VerilogAParser
         @test sol_slow(5*τ_slow)[2] ≈ 5.0 rtol=1e-3
 
         # Test 6: Chain multiple alterations
-        sim_chain = alter(alter(sim; Vcc=3.3); R=4700.0)
-        sol_chain = solve_dc(sim_chain)
+        circuit_chain = alter(alter(circuit; Vcc=3.3); R=4700.0)
+        sol_chain = solve_dc(circuit_chain)
         @test voltage(sol_chain, :vcc) ≈ 3.3
         @test voltage(sol_chain, :out) ≈ 3.3
-        @test sim_chain.params.R == 4700.0
-        @test sim_chain.params.Vcc == 3.3
-        @test sim_chain.params.C == 1e-6  # unchanged from original
+        @test circuit_chain.params.R == 4700.0
+        @test circuit_chain.params.Vcc == 3.3
+        @test circuit_chain.params.C == 1e-6  # unchanged from original
     end
 
     @testset "Time-dependent source with mode" begin
@@ -1495,18 +1476,18 @@ using VerilogAParser
             return ctx
         end
 
-        # Create sim with both DC and steady-state parameters
-        sim = MNASim(build_mode_aware_rc; Vdc=0.0, Vss=5.0, R=1000.0, C=1e-6)
+        # Create circuit with both DC and steady-state parameters
+        circuit = MNACircuit(build_mode_aware_rc; Vdc=0.0, Vss=5.0, R=1000.0, C=1e-6)
 
         # Test DC mode gives Vdc
-        sim_dcop = with_mode(sim, :dcop)
-        sol_dcop = solve_dc(sim_dcop)
+        circuit_dcop = with_mode(circuit, :dcop)
+        sol_dcop = solve_dc(circuit_dcop)
         @test voltage(sol_dcop, :vcc) ≈ 0.0
         @test voltage(sol_dcop, :out) ≈ 0.0
 
         # Test transient mode gives Vss
-        sim_tran = with_mode(sim, :tran)
-        sol_tran = solve_dc(sim_tran)
+        circuit_tran = with_mode(circuit, :tran)
+        sol_tran = solve_dc(circuit_tran)
         @test voltage(sol_tran, :vcc) ≈ 5.0
         @test voltage(sol_tran, :out) ≈ 5.0
 
@@ -1516,13 +1497,13 @@ using VerilogAParser
         # 2. Run transient (with sources at transient values)
 
         # First, get DC operating point (cap starts at 0V)
-        dcop_sys = assemble!(sim_dcop)
+        dcop_sys = assemble!(circuit_dcop)
         dc_sol = solve_dc(dcop_sys)
         V_cap_dc = voltage(dc_sol, :out)
         @test V_cap_dc ≈ 0.0  # Cap at 0V in DC mode
 
         # Now run transient with source at 5V, cap starting at 0V
-        tran_sys = assemble!(sim_tran)
+        tran_sys = assemble!(circuit_tran)
         τ = 1000.0 * 1e-6  # 1ms
         tspan = (0.0, 5τ)
 
@@ -1663,30 +1644,30 @@ using VerilogAParser
         end
 
         # At 27°C (nominal), R_temp = R0
-        sim_27 = MNASim(build_temp_dependent;
+        circuit_27 = MNACircuit(build_temp_dependent;
                         spec=MNASpec(temp=27.0),
                         Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0)
-        sol_27 = solve_dc(sim_27)
+        sol_27 = solve_dc(circuit_27)
         @test voltage(sol_27, :out) ≈ 5.0  # Equal resistors
 
         # At 127°C, R_temp = 1000 * (1 + 0.004*100) = 1400 Ω
-        sim_127 = with_temp(sim_27, 127.0)
-        @test sim_127.spec.temp == 127.0
-        sol_127 = solve_dc(sim_127)
+        circuit_127 = with_temp(circuit_27, 127.0)
+        @test circuit_127.spec.temp == 127.0
+        sol_127 = solve_dc(circuit_127)
         # Voltage divider: Vout = Vcc * R2/(R_temp + R2) = 10 * 1000/2400 ≈ 4.167V
         @test voltage(sol_127, :out) ≈ 10.0 * 1000.0 / 2400.0 rtol=1e-6
 
         # At -73°C, R_temp = 1000 * (1 + 0.004*(-100)) = 600 Ω
-        sim_m73 = with_temp(sim_27, -73.0)
-        sol_m73 = solve_dc(sim_m73)
+        circuit_m73 = with_temp(circuit_27, -73.0)
+        sol_m73 = solve_dc(circuit_m73)
         # Voltage divider: Vout = 10 * 1000/1600 = 6.25V
         @test voltage(sol_m73, :out) ≈ 10.0 * 1000.0 / 1600.0 rtol=1e-6
 
         # Test with_spec
         new_spec = MNASpec(temp=85.0, mode=:dcop)
-        sim_85 = with_spec(sim_27, new_spec)
-        @test sim_85.spec.temp == 85.0
-        @test sim_85.spec.mode == :dcop
+        circuit_85 = with_spec(circuit_27, new_spec)
+        @test circuit_85.spec.temp == 85.0
+        @test circuit_85.spec.mode == :dcop
 
         # Test eval_circuit directly
         sys = eval_circuit(build_temp_dependent,
@@ -1704,7 +1685,7 @@ using VerilogAParser
     using CedarSim: dc!, tran!
     using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
 
-    @testset "dc! and tran! API" begin
+    @testset "dc! and tran! API with MNACircuit" begin
         # Define a simple RC circuit
         function build_rc_simple(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
@@ -1718,20 +1699,20 @@ using VerilogAParser
             return ctx
         end
 
-        sim = MNASim(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
+        circuit = MNACircuit(build_rc_simple; Vcc=5.0, R=1000.0, C=1e-6)
         τ = 1000.0 * 1e-6  # 1ms
 
-        # Test dc!(sim) - matches CedarSim API
-        dc_sol = dc!(sim)
+        # Test dc!(circuit) - matches CedarSim API
+        dc_sol = dc!(circuit)
         @test dc_sol isa DCSolution
         @test voltage(dc_sol, :out) ≈ 5.0  # DC steady state
 
-        # Test tran!(sim, tspan) - matches CedarSim API
-        ode_sol = tran!(sim, (0.0, 5τ))
+        # Test tran!(circuit, tspan) with ODE solver (Rodas5P)
+        ode_sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P())
         @test ode_sol.retcode == ReturnCode.Success
 
         # Wrap for symbolic access
-        sys = assemble!(sim)
+        sys = assemble!(circuit)
         acc = MNASolutionAccessor(ode_sol, sys)
 
         # Test voltage access by name
@@ -1755,7 +1736,7 @@ using VerilogAParser
         @test length(state_at_tau) == 3  # vcc, out, I_V
     end
 
-    @testset "Hierarchical scope access" begin
+    @testset "Hierarchical scope access with MNACircuit" begin
         # Build a circuit with hierarchical-like node names
         function build_hierarchical(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
@@ -1767,13 +1748,13 @@ using VerilogAParser
             stamp!(VoltageSource(params.Vcc), ctx, vcc, 0)
             stamp!(Resistor(params.R1), ctx, vcc, x1_in)
             stamp!(Resistor(params.R2), ctx, x1_in, x1_out)
-            stamp!(Resistor(params.R3), ctx, x1_out, 0)
+            stamp!(Capacitor(params.C), ctx, x1_out, 0)  # Add cap for transient
 
             return ctx
         end
 
-        sim = MNASim(build_hierarchical; Vcc=10.0, R1=1000.0, R2=1000.0, R3=1000.0)
-        sys = assemble!(sim)
+        circuit = MNACircuit(build_hierarchical; Vcc=10.0, R1=1000.0, R2=1000.0, C=1e-6)
+        sys = assemble!(circuit)
 
         # Test ScopedSystem
         s = scope(sys)
@@ -1785,8 +1766,8 @@ using VerilogAParser
         @test node_ref.name == :out
         @test node_ref.path == [:x1]
 
-        # Test with tran!
-        ode_sol = tran!(sim, (0.0, 1e-3))
+        # Test with tran! using ODE solver
+        ode_sol = tran!(circuit, (0.0, 1e-3); solver=Rodas5P())
         acc = MNASolutionAccessor(ode_sol, sys)
 
         # Access via NodeRef

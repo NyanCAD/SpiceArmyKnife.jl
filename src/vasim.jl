@@ -1488,6 +1488,12 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Same sign convention as G matrix
         # Only stamp if device has reactive components (determined by TYPE, not value)
         # This ensures consistent COO structure for precompilation
+        #
+        # NOTE: Charge formulation for voltage-dependent capacitors is available via
+        # stamp_charge_state!() in contrib.jl. To use it, detect voltage dependence
+        # with is_voltage_dependent_charge() and call stamp_charge_state!() instead.
+        # For now, we use standard C matrix stamping which works for linear capacitors.
+        # Voltage-dependent capacitors will result in a state-dependent mass matrix.
         for k in 1:n_all_nodes
             k_node = all_node_params[k]
             dq_sym = Symbol("dq_dV", k)

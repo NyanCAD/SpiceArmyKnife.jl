@@ -72,6 +72,161 @@ ForwardDiff.:≺(::Type, ::Type{ContributionTag}) = true   # All external tags A
 ForwardDiff.:≺(::Type{JacobianTag}, ::Type) = false      # JacobianTag is NOT less than external tags
 ForwardDiff.:≺(::Type, ::Type{JacobianTag}) = true       # External tags ARE less than JacobianTag
 
+#==============================================================================#
+# Voltage-Dependent Capacitor Detection (Charge Formulation Support)
+#
+# To detect if a capacitor is voltage-dependent (C(V) = ∂Q/∂V varies with V),
+# we check if ∂²Q/∂V² ≠ 0 using an additional dual layer.
+#
+# See doc/voltage_dependent_capacitors.md for full design.
+#==============================================================================#
+
+"""
+    CapacitanceDerivTag
+
+Tag for detecting voltage-dependent capacitance via second derivatives.
+
+Used to compute ∂C/∂V = ∂²Q/∂V². If this is non-zero, the capacitance
+depends on voltage and requires charge formulation for constant mass matrix.
+
+Precedence ordering: CapacitanceDerivTag ≺ JacobianTag ≺ ContributionTag
+- CapacitanceDerivTag is innermost (for ∂²/∂V²)
+- JacobianTag is middle (for ∂/∂V)
+- ContributionTag is outermost (separates resistive/reactive)
+"""
+struct CapacitanceDerivTag end
+
+# Self-comparison
+ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{CapacitanceDerivTag}) = false
+
+# CapacitanceDerivTag is inner to both JacobianTag and ContributionTag
+ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{JacobianTag}) = true
+ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type{ContributionTag}) = true
+ForwardDiff.:≺(::Type{JacobianTag}, ::Type{CapacitanceDerivTag}) = false
+ForwardDiff.:≺(::Type{ContributionTag}, ::Type{CapacitanceDerivTag}) = false
+
+# CapacitanceDerivTag vs external tags: CapacitanceDerivTag is outer to external
+ForwardDiff.:≺(::Type{CapacitanceDerivTag}, ::Type) = false
+ForwardDiff.:≺(::Type, ::Type{CapacitanceDerivTag}) = true
+
+export CapacitanceDerivTag, is_voltage_dependent_charge
+
+"""
+    is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real) -> Bool
+
+Detect if a contribution contains voltage-dependent capacitance.
+
+Uses nested AD to check if ∂C/∂V = ∂²Q/∂V² ≠ 0. If so, the capacitance
+C(V) = ∂Q/∂V varies with voltage and requires charge formulation to
+achieve a constant mass matrix for SciML solvers.
+
+# Arguments
+- `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
+- `Vp`, `Vn`: Operating point voltages
+
+# Returns
+- `true` if the contribution has voltage-dependent capacitance
+- `false` if purely resistive or has constant capacitance
+
+# Examples
+```julia
+# Linear capacitor: I = C * ddt(V) -> C is constant
+is_voltage_dependent_charge(V -> 1e-12 * va_ddt(V), 1.0, 0.0)  # false
+
+# Nonlinear capacitor: I = ddt(C0 * V^2) -> C = 2*C0*V varies with V
+is_voltage_dependent_charge(V -> va_ddt(1e-12 * V^2), 1.0, 0.0)  # true
+
+# Junction cap: I = ddt(Cj0 * φ * (1 - (1-V/φ)^(1-m))) -> C varies with V
+is_voltage_dependent_charge(V -> va_ddt(...), 0.3, 0.0)  # true
+```
+
+# Implementation
+Uses triple-nested duals:
+1. CapacitanceDerivTag (innermost): carries ∂²/∂V² information
+2. JacobianTag (middle): carries ∂/∂V partials
+3. ContributionTag (outermost): separates resistive/reactive via va_ddt
+
+The detection checks if the reactive part's JacobianTag partials contain
+non-zero CapacitanceDerivTag partials (indicating ∂C/∂V ≠ 0).
+"""
+@inline function is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real)::Bool
+    # Create triple-nested duals for second derivative detection
+    # Structure: CapacitanceDerivTag wraps the base value, then JacobianTag wraps that
+    #
+    # For Vp: we want ∂/∂Vp and ∂²/∂Vp²
+    # Inner (CapacitanceDerivTag): Dual(Vp, 1.0) for ∂/∂Vp (first pass)
+    # Outer (JacobianTag): wraps the inner dual
+    #
+    # IMPORTANT: To detect voltage dependence at the TYPE level (not VALUE level),
+    # we evaluate at multiple points. Some polynomials have ∂²Q/∂V² = 0 at certain
+    # points (e.g., Q = V³ has ∂²Q/∂V² = 6V = 0 at V=0). We test at the given
+    # operating point AND at a perturbed point to catch these cases.
+
+    # Test at given operating point
+    if _is_voltage_dependent_at_point(contrib_fn, Vp, Vn)
+        return true
+    end
+
+    # Test at a perturbed point to catch cases where ∂²Q/∂V² = 0 at the operating point
+    # but the function is still nonlinear (e.g., V³ at V=0)
+    eps = 1e-3  # Small perturbation
+    if _is_voltage_dependent_at_point(contrib_fn, Vp + eps, Vn)
+        return true
+    end
+
+    return false
+end
+
+"""
+Internal helper: check voltage dependence at a single point.
+"""
+@inline function _is_voltage_dependent_at_point(contrib_fn, Vp::Real, Vn::Real)::Bool
+    # Inner duals: CapacitanceDerivTag with ∂/∂Vp and ∂/∂Vn seeds
+    Vp_inner = Dual{CapacitanceDerivTag}(Float64(Vp), 1.0)  # ∂/∂Vp = 1
+    Vn_inner = Dual{CapacitanceDerivTag}(Float64(Vn), -1.0) # ∂/∂Vn = -1 (for Vpn = Vp - Vn)
+
+    # Outer duals: JacobianTag wrapping inner duals
+    # Partials are also CapacitanceDerivTag duals to track second derivatives
+    one_inner = Dual{CapacitanceDerivTag}(1.0, 0.0)
+    zero_inner = Dual{CapacitanceDerivTag}(0.0, 0.0)
+
+    Vp_dual = Dual{JacobianTag}(Vp_inner, one_inner, zero_inner)   # ∂/∂Vp = 1, ∂/∂Vn = 0
+    Vn_dual = Dual{JacobianTag}(Vn_inner, zero_inner, one_inner)   # ∂/∂Vp = 0, ∂/∂Vn = 1
+
+    # Compute Vpn = Vp - Vn
+    Vpn_dual = Vp_dual - Vn_dual
+
+    # Evaluate contribution
+    result = contrib_fn(Vpn_dual)
+
+    # Check if result has reactive component with voltage-dependent capacitance
+    if result isa Dual{ContributionTag}
+        # Has ddt: extract reactive part (the charge)
+        react = partials(result, 1)  # This is Dual{JacobianTag} containing q and ∂q/∂V
+
+        if react isa Dual{JacobianTag}
+            # Extract ∂q/∂Vp which is the capacitance C
+            dq_dVp = partials(react, 1)  # This should be Dual{CapacitanceDerivTag}
+
+            if dq_dVp isa Dual{CapacitanceDerivTag}
+                # The partials of dq_dVp give ∂C/∂V = ∂²q/∂V²
+                d2q_dV2 = partials(dq_dVp, 1)
+                return !iszero(d2q_dV2)
+            elseif dq_dVp isa Real
+                # Constant capacitance (no second derivative)
+                return false
+            end
+        elseif react isa Dual{CapacitanceDerivTag}
+            # JacobianTag collapsed - check inner partials
+            d2q_dV2 = partials(react, 1)
+            return !iszero(d2q_dV2)
+        end
+    end
+
+    # No reactive component or constant capacitance
+    return false
+end
+
 """
     va_ddt(x)
 
@@ -601,3 +756,228 @@ function stamp_multiport_charge!(
 end
 
 export stamp_multiport_charge!
+
+#==============================================================================#
+# Charge State Variable Stamping (Voltage-Dependent Capacitors)
+#
+# For voltage-dependent capacitors, we reformulate using charge as an explicit
+# state variable to achieve a constant mass matrix. See doc/voltage_dependent_capacitors.md
+#==============================================================================#
+
+export stamp_charge_state!
+
+"""
+    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name) -> Int
+
+Stamp a voltage-dependent capacitor using charge formulation for constant mass matrix.
+
+Instead of stamping C(V) into the mass matrix (which would be state-dependent),
+this adds charge `q` as an explicit state variable with:
+- `dq/dt = I` (differential equation, constant mass entry of 1)
+- `q = Q(V)` (algebraic constraint enforced via Newton)
+
+This yields a constant mass matrix suitable for SciML Rosenbrock solvers.
+
+# Arguments
+- `ctx`: MNA context
+- `p`, `n`: Branch nodes (current flows from p to n)
+- `q_fn`: Function `V -> Q(V)` that computes charge from branch voltage
+- `x`: Current solution vector
+- `charge_name`: Unique name for the charge variable
+
+# Returns
+The system index of the allocated charge variable.
+
+# MNA Formulation
+
+The charge formulation adds these equations:
+
+1. **KCL coupling** (current I = dq/dt flows from p to n):
+   - `C[p, q_idx] = +1`  (current leaves p)
+   - `C[n, q_idx] = -1`  (current enters n)
+
+2. **Charge dynamics** (dq/dt with constant mass):
+   - `C[q_idx, q_idx] = 1`  (constant coefficient!)
+
+3. **Algebraic constraint** (q - Q(V) = 0):
+   - `G[q_idx, q_idx] = 1`  (∂F/∂q = 1)
+   - `G[q_idx, p] = -∂Q/∂Vp`
+   - `G[q_idx, n] = -∂Q/∂Vn`
+   - `b[q_idx]` = Newton companion for constraint
+
+# Example
+```julia
+# Nonlinear junction capacitor: Q(V) = Cj0 * φ * (1 - (1-V/φ)^(1-m))
+Cj0, phi, m = 1e-12, 0.7, 0.5
+q_fn(V) = Cj0 * phi * (1 - (1 - V/phi)^(1-m)) / (1-m)
+
+q_idx = stamp_charge_state!(ctx, a, c, q_fn, x, :Q_Cj_D1)
+```
+
+See doc/voltage_dependent_capacitors.md for full derivation.
+"""
+function stamp_charge_state!(
+    ctx::MNAContext,
+    p::Int, n::Int,
+    q_fn,
+    x::AbstractVector,
+    charge_name::Symbol
+)
+    # Allocate charge state variable
+    q_idx = alloc_charge!(ctx, charge_name, p, n)
+
+    # Get operating point voltages
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+
+    # Get current charge value (for Newton companion)
+    # If x doesn't have the charge variable yet, use the equilibrium value
+    q_current = length(x) >= q_idx ? x[q_idx] : 0.0
+
+    # Evaluate charge function and capacitances
+    result = evaluate_charge_contribution(q_fn, Vp, Vn)
+
+    # --- 1. Mass matrix entries (constant coefficients!) ---
+    #
+    # NOTE: The constraint row (q_idx) is ALGEBRAIC - no C entry on diagonal.
+    # The dq/dt terms only appear in the KCL equations (rows p and n).
+    # This correctly models: q = Q(V) as an algebraic constraint, with
+    # the current I = dq/dt appearing in KCL.
+
+    # KCL coupling: current I = dq/dt flows from p to n
+    # At node p: current leaves → +dq/dt contribution
+    # At node n: current enters → -dq/dt contribution
+    if p != 0
+        stamp_C!(ctx, p, q_idx, 1.0)
+    end
+    if n != 0
+        stamp_C!(ctx, n, q_idx, -1.0)
+    end
+
+    # --- 2. Conductance matrix (constraint Jacobian) ---
+
+    # Constraint equation: F = q - Q(V) = 0
+    # Jacobian: ∂F/∂q = 1, ∂F/∂Vp = -∂Q/∂Vp, ∂F/∂Vn = -∂Q/∂Vn
+
+    stamp_G!(ctx, q_idx, q_idx, 1.0)
+
+    if p != 0
+        stamp_G!(ctx, q_idx, p, -result.dq_dVp)
+    end
+    if n != 0
+        stamp_G!(ctx, q_idx, n, -result.dq_dVn)
+    end
+
+    # --- 3. RHS (Newton companion model for constraint) ---
+
+    # Newton companion: b = F(x₀) - J(x₀)*x₀ + J(x₀)*x
+    # Rearranging: J*x = b where b = F(x₀) - J*x₀
+    #
+    # For constraint F = q - Q(V):
+    # F(x₀) = q₀ - Q(Vp₀, Vn₀) = q₀ - result.q
+    #
+    # J*x₀ = 1*q₀ + (-∂Q/∂Vp)*Vp₀ + (-∂Q/∂Vn)*Vn₀
+    #      = q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀
+    #
+    # b = F(x₀) - J*x₀
+    #   = (q₀ - result.q) - (q₀ - result.dq_dVp*Vp₀ - result.dq_dVn*Vn₀)
+    #   = -result.q + result.dq_dVp*Vp₀ + result.dq_dVn*Vn₀
+    #
+    # Note: This ensures that at equilibrium (q = Q(V)), the constraint is satisfied.
+
+    b_constraint = -result.q + result.dq_dVp * Vp + result.dq_dVn * Vn
+    stamp_b!(ctx, q_idx, b_constraint)
+
+    return q_idx
+end
+
+"""
+    stamp_charge_state!(ctx, p, n, q_fn, x, charge_name::String) -> Int
+
+String convenience overload.
+"""
+stamp_charge_state!(ctx::MNAContext, p::Int, n::Int, q_fn, x::AbstractVector, charge_name::String) =
+    stamp_charge_state!(ctx, p, n, q_fn, x, Symbol(charge_name))
+
+#==============================================================================#
+# Automatic Detection and Stamping for VA Code Generation
+#==============================================================================#
+
+export stamp_reactive_with_detection!
+
+"""
+    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, charge_name) -> Bool
+
+Detect if a contribution has voltage-dependent capacitance and stamp accordingly.
+
+This function is designed for use by VA code generation. It:
+1. Detects if the contribution has voltage-dependent capacitance
+2. If voltage-dependent: uses charge formulation (stamp_charge_state!)
+3. If constant capacitance: uses standard C matrix stamping
+
+# Arguments
+- `ctx`: MNA context
+- `p`, `n`: Branch nodes
+- `contrib_fn`: Function `V -> I` that may contain `va_ddt(Q(V))`
+- `x`: Current solution vector
+- `charge_name`: Name for charge variable (used if voltage-dependent)
+
+# Returns
+- `true` if charge formulation was used (voltage-dependent)
+- `false` if standard C matrix stamping was used (constant capacitance)
+
+# Example
+```julia
+# In generated VA stamp code:
+contrib_fn = V -> V/R + va_ddt(C * V^2)  # Voltage-dependent capacitor
+
+used_charge = stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, :Q_branch)
+# Returns true, allocated charge variable, and stamped charge formulation
+```
+"""
+function stamp_reactive_with_detection!(
+    ctx::MNAContext,
+    p::Int, n::Int,
+    contrib_fn,
+    x::AbstractVector,
+    charge_name::Symbol
+)
+    # Get operating point
+    Vp = p == 0 ? 0.0 : (length(x) >= p ? x[p] : 0.0)
+    Vn = n == 0 ? 0.0 : (length(x) >= n ? x[n] : 0.0)
+
+    # Detect voltage dependence
+    is_vdep = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
+
+    if is_vdep
+        # Extract charge function from contribution
+        # contrib_fn(V) returns I which may include va_ddt(Q(V))
+        # We need to extract Q(V) for stamp_charge_state!
+        q_fn = V -> begin
+            result = contrib_fn(V)
+            if result isa Dual{ContributionTag}
+                # Extract charge from reactive part
+                return value(partials(result, 1))
+            else
+                return 0.0
+            end
+        end
+
+        stamp_charge_state!(ctx, p, n, q_fn, x, charge_name)
+        return true
+    else
+        # Use standard C matrix stamping
+        result = evaluate_contribution(contrib_fn, Vp, Vn)
+
+        if result.has_reactive
+            stamp_C!(ctx, p, p, result.dq_dVp)
+            stamp_C!(ctx, p, n, result.dq_dVn)
+            stamp_C!(ctx, n, p, -result.dq_dVp)
+            stamp_C!(ctx, n, n, -result.dq_dVn)
+        end
+        return false
+    end
+end
+
+stamp_reactive_with_detection!(ctx::MNAContext, p::Int, n::Int, contrib_fn, x::AbstractVector, name::String) =
+    stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, Symbol(name))

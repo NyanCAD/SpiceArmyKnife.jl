@@ -10,6 +10,7 @@
 export MNAContext, MNASystem
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
+export alloc_charge!, get_charge_idx, has_charge, n_charges
 export stamp_G!, stamp_C!, stamp_b!
 export stamp_conductance!, stamp_capacitance!
 export system_size
@@ -90,6 +91,14 @@ mutable struct MNAContext
     b_I::Vector{Int}
     b_V::Vector{Float64}
 
+    # Charge state variables (for voltage-dependent capacitors)
+    # See doc/voltage_dependent_capacitors.md
+    # These are differential variables with dq/dt = I and constraint q = Q(V)
+    charge_names::Vector{Symbol}
+    n_charges::Int
+    # Branch nodes (p, n) for each charge - links charge to KCL
+    charge_branches::Vector{Tuple{Int,Int}}
+
     # Track if system has been finalized
     finalized::Bool
 end
@@ -116,6 +125,9 @@ function MNAContext()
         Float64[],          # b
         Int[],              # b_I (deferred b stamps)
         Float64[],          # b_V (deferred b stamps)
+        Symbol[],           # charge_names
+        0,                  # n_charges
+        Tuple{Int,Int}[],   # charge_branches
         false               # finalized
     )
 end
@@ -124,8 +136,18 @@ end
     system_size(ctx::MNAContext) -> Int
 
 Return the total system size (number of unknowns).
+Includes nodes, current variables, and charge state variables.
+
+System vector layout: [V₁...Vₙ, I₁...Iₘ, q₁...qₖ]
 """
-@inline system_size(ctx::MNAContext) = ctx.n_nodes + ctx.n_currents
+@inline system_size(ctx::MNAContext) = ctx.n_nodes + ctx.n_currents + ctx.n_charges
+
+"""
+    n_charges(ctx::MNAContext) -> Int
+
+Return the number of charge state variables.
+"""
+@inline n_charges(ctx::MNAContext) = ctx.n_charges
 
 #==============================================================================#
 # Node and Current Variable Allocation
@@ -354,6 +376,92 @@ function n_internal_nodes(ctx::MNAContext)::Int
 end
 
 #==============================================================================#
+# Charge State Variable Allocation (Voltage-Dependent Capacitors)
+#==============================================================================#
+
+"""
+    alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int) -> Int
+
+Allocate a charge state variable for a voltage-dependent capacitor.
+
+Charge variables are used to reformulate voltage-dependent capacitors with
+a constant mass matrix. Instead of `C(V) * dV/dt`, we use:
+- `dq/dt = I` (differential equation with constant coefficient)
+- `q = Q(V)` (algebraic constraint)
+
+This yields a constant mass matrix suitable for SciML Rosenbrock solvers.
+
+# Arguments
+- `ctx`: MNA context
+- `name`: Unique name for the charge variable
+- `p`, `n`: Branch nodes - current flows from p to n
+
+# Returns
+System index for the charge variable (n_nodes + n_currents + charge_number).
+Unlike current variables, charge indices are NOT deferred (positive indices).
+
+# Example
+```julia
+# For voltage-dependent junction capacitor on branch (a, c):
+q_idx = alloc_charge!(ctx, :Q_Cj_D1, a, c)
+
+# Now stamp:
+# - C[q_idx, q_idx] = 1.0 (dq/dt term)
+# - C[a, q_idx] = 1.0, C[c, q_idx] = -1.0 (current I = dq/dt in KCL)
+# - G[q_idx, ...] and b[q_idx] for constraint q = Q(V)
+```
+
+See doc/voltage_dependent_capacitors.md for full formulation.
+"""
+function alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int)::Int
+    ctx.n_charges += 1
+    push!(ctx.charge_names, name)
+    push!(ctx.charge_branches, (p, n))
+
+    # Return the actual system index (not deferred like currents)
+    # Charge variables come after nodes and currents
+    return ctx.n_nodes + ctx.n_currents + ctx.n_charges
+end
+
+alloc_charge!(ctx::MNAContext, name::String, p::Int, n::Int) = alloc_charge!(ctx, Symbol(name), p, n)
+
+"""
+    get_charge_idx(ctx::MNAContext, name::Symbol) -> Int
+
+Look up a charge variable index by name.
+Returns the actual system index (n_nodes + n_currents + k).
+Throws an error if the charge variable doesn't exist.
+"""
+function get_charge_idx(ctx::MNAContext, name::Symbol)::Int
+    idx = findfirst(==(name), ctx.charge_names)
+    idx === nothing && error("Charge variable $name not found in MNA context")
+    return ctx.n_nodes + ctx.n_currents + idx
+end
+
+get_charge_idx(ctx::MNAContext, name::String) = get_charge_idx(ctx, Symbol(name))
+
+"""
+    has_charge(ctx::MNAContext, name::Symbol) -> Bool
+
+Check if a charge variable with the given name exists.
+"""
+function has_charge(ctx::MNAContext, name::Symbol)::Bool
+    return name in ctx.charge_names
+end
+
+"""
+    get_charge_branch(ctx::MNAContext, name::Symbol) -> Tuple{Int, Int}
+
+Get the branch nodes (p, n) for a charge variable.
+The current I = dq/dt flows from p to n.
+"""
+function get_charge_branch(ctx::MNAContext, name::Symbol)::Tuple{Int, Int}
+    idx = findfirst(==(name), ctx.charge_names)
+    idx === nothing && error("Charge variable $name not found in MNA context")
+    return ctx.charge_branches[idx]
+end
+
+#==============================================================================#
 # Stamping Primitives
 #==============================================================================#
 
@@ -548,6 +656,9 @@ function clear!(ctx::MNAContext)
     empty!(ctx.b)
     empty!(ctx.b_I)
     empty!(ctx.b_V)
+    empty!(ctx.charge_names)
+    ctx.n_charges = 0
+    empty!(ctx.charge_branches)
     ctx.finalized = false
     return nothing
 end
@@ -559,8 +670,11 @@ function Base.show(io::IO, ctx::MNAContext)
     if n_int > 0
         print(io, " ($(n_int) internal)")
     end
-    print(io, ", currents=$(ctx.n_currents), ")
-    print(io, "G_nnz=$(length(ctx.G_V)), ")
+    print(io, ", currents=$(ctx.n_currents)")
+    if ctx.n_charges > 0
+        print(io, ", charges=$(ctx.n_charges)")
+    end
+    print(io, ", G_nnz=$(length(ctx.G_V)), ")
     print(io, "C_nnz=$(length(ctx.C_V))")
     print(io, ")")
 end
@@ -584,6 +698,14 @@ function Base.show(io::IO, ::MIME"text/plain", ctx::MNAContext)
         println(io, "  Current variables ($(ctx.n_currents)):")
         for (i, name) in enumerate(ctx.current_names)
             println(io, "    [$(ctx.n_nodes + i)] $name")
+        end
+    end
+    if ctx.n_charges > 0
+        println(io, "  Charge variables ($(ctx.n_charges)):")
+        base_idx = ctx.n_nodes + ctx.n_currents
+        for (i, name) in enumerate(ctx.charge_names)
+            (p, n) = ctx.charge_branches[i]
+            println(io, "    [$(base_idx + i)] $name (branch $p → $n)")
         end
     end
     println(io, "  G matrix: $(length(ctx.G_V)) entries")

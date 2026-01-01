@@ -133,7 +133,8 @@ end
     sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
 
     # Check voltage divider: V_mid = V * R2 / (R1 + R2) = 10 * 0.5 = 5.0
-    @test voltage(sol, :mid) ≈ 5.0 atol=1e-10
+    # Note: default gmin=1e-12 slightly pulls node voltages toward ground
+    @test voltage(sol, :mid) ≈ 5.0 atol=1e-8
     @test voltage(sol, :vin) ≈ 10.0 atol=1e-10
 end
 
@@ -158,7 +159,8 @@ end
     # DC solve using builder
     sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
     @test voltage(sol, :vin) ≈ 5.0 atol=1e-10
-    @test voltage(sol, :out) ≈ 5.0 atol=1e-10  # No load, so V_out = V_in
+    # Note: default gmin=1e-12 slightly pulls node voltages toward ground
+    @test voltage(sol, :out) ≈ 5.0 atol=1e-8  # Nearly V_in due to high impedance
 end
 
 @testset "fast_residual! computation" begin

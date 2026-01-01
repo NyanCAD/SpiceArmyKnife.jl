@@ -373,17 +373,34 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     # Resolve typed indices to actual matrix positions
     G_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.G_I]
     G_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.G_J]
+    G_V_copy = copy(ctx0.G_V)
+
+    # Add gmin diagonal entries for voltage nodes to ensure they exist in sparsity pattern
+    # Use ctx0.gmin if set, otherwise spec.gmin
+    gmin_val = ctx0.gmin > 0 ? ctx0.gmin : spec.gmin
+    if gmin_val > 0 && ctx0.n_nodes > 0
+        # Add diagonal entries for each voltage node
+        for i in 1:ctx0.n_nodes
+            push!(G_I_resolved, i)
+            push!(G_J_resolved, i)
+            push!(G_V_copy, gmin_val)
+        end
+    end
+
     C_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.C_I]
     C_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.C_J]
 
-    G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
+    G = sparse(G_I_resolved, G_J_resolved, G_V_copy, n, n)
     C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
 
-    # Create COO→CSC mappings
-    G_coo_to_nz = compute_coo_to_nz_mapping(G_I_resolved, G_J_resolved, G)
+    # Create COO→CSC mappings (only for device stamps, not gmin)
+    # The gmin entries are added directly to G during fast_rebuild
+    n_G_device = length(ctx0.G_I)
+    G_I_device = G_I_resolved[1:n_G_device]
+    G_J_device = G_J_resolved[1:n_G_device]
+    G_coo_to_nz = compute_coo_to_nz_mapping(G_I_device, G_J_device, G)
     C_coo_to_nz = compute_coo_to_nz_mapping(C_I_resolved, C_J_resolved, C)
 
-    n_G = length(ctx0.G_I)
     n_C = length(ctx0.C_I)
 
     return CompiledStructure{F,P,S}(
@@ -391,7 +408,7 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
         n, ctx0.n_nodes, ctx0.n_currents,
         copy(ctx0.node_names), copy(ctx0.current_names),
         G_coo_to_nz, C_coo_to_nz,
-        n_G, n_C,
+        n_G_device, n_C,
         G, C
     )
 end
@@ -481,31 +498,46 @@ function compile_circuit(builder::F, params::P, spec::S;
     # Resolve typed indices to actual matrix positions
     G_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.G_I]
     G_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.G_J]
+    G_V_resolved = copy(ctx0.G_V)
+
+    # Add gmin diagonal entries for voltage nodes to ensure they exist in sparsity pattern
+    # Use ctx0.gmin if set, otherwise spec.gmin
+    gmin_val = ctx0.gmin > 0 ? ctx0.gmin : spec.gmin
+    if gmin_val > 0 && ctx0.n_nodes > 0
+        for i in 1:ctx0.n_nodes
+            push!(G_I_resolved, i)
+            push!(G_J_resolved, i)
+            push!(G_V_resolved, gmin_val)
+        end
+    end
+
     C_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.C_I]
     C_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.C_J]
 
-    G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
+    G = sparse(G_I_resolved, G_J_resolved, G_V_resolved, n, n)
     C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
 
     # Get RHS vector
     b = get_rhs(ctx0)
 
-    # Create COO→CSC mappings
-    G_coo_to_nz = compute_coo_to_nz_mapping(G_I_resolved, G_J_resolved, G)
+    # Create COO→CSC mappings (only for device stamps, not gmin)
+    # The gmin entries are added directly to G during fast_rebuild via apply_gmin!
+    n_G = length(ctx0.G_I)
+    G_I_device = G_I_resolved[1:n_G]
+    G_J_device = G_J_resolved[1:n_G]
+    G_coo_to_nz = compute_coo_to_nz_mapping(G_I_device, G_J_device, G)
     C_coo_to_nz = compute_coo_to_nz_mapping(C_I_resolved, C_J_resolved, C)
 
-    # Preallocate COO arrays with extra capacity for nonlinear variation
-    n_G = length(ctx0.G_I)
     n_C = length(ctx0.C_I)
     capacity_G = max(n_G, ceil(Int, n_G * capacity_factor))
     capacity_C = max(n_C, ceil(Int, n_C * capacity_factor))
 
-    # Copy COO data (resolved indices)
+    # Copy COO data (resolved indices - device stamps only)
     G_I = zeros(Int, capacity_G)
     G_J = zeros(Int, capacity_G)
     G_V = zeros(Float64, capacity_G)
-    G_I[1:n_G] = G_I_resolved
-    G_J[1:n_G] = G_J_resolved
+    G_I[1:n_G] = G_I_device
+    G_J[1:n_G] = G_J_device
     G_V[1:n_G] = ctx0.G_V
 
     C_I = zeros(Int, capacity_C)
@@ -596,6 +628,49 @@ function update_sparse_from_coo!(S::SparseMatrixCSC, V::Vector{Float64},
 
     return nothing
 end
+
+"""
+    apply_gmin!(G::SparseMatrixCSC, n_nodes::Int, gmin::Float64)
+
+Add gmin to the diagonal entries for voltage nodes.
+
+This is a standard SPICE convergence aid that adds a small conductance
+from each voltage node to ground, preventing singular matrices from
+floating nodes.
+
+# Arguments
+- `G`: Conductance matrix (modified in-place)
+- `n_nodes`: Number of voltage nodes (indices 1:n_nodes are voltage nodes)
+- `gmin`: Minimum conductance value to add
+
+# Note
+This must be called AFTER update_sparse_from_coo! since that function
+zeros the matrix first.
+"""
+function apply_gmin!(G::SparseMatrixCSC, n_nodes::Int, gmin::Float64)
+    if gmin <= 0.0 || n_nodes <= 0
+        return nothing
+    end
+
+    nz = nonzeros(G)
+    colptr = G.colptr
+    rowval = rowvals(G)
+
+    # Add gmin to diagonal entries for voltage nodes
+    @inbounds for j in 1:n_nodes
+        # Search column j for the diagonal entry (row j)
+        for k in colptr[j]:(colptr[j+1]-1)
+            if rowval[k] == j
+                nz[k] += gmin
+                break
+            end
+        end
+    end
+
+    return nothing
+end
+
+export apply_gmin!
 
 """
     update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
@@ -693,6 +768,9 @@ function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
     update_sparse_from_coo!(pc.G, pc.G_V, pc.G_coo_to_nz, n_G)
     update_sparse_from_coo!(pc.C, pc.C_V, pc.C_coo_to_nz, n_C)
     update_b_vector!(pc.b, pc.b_direct, pc.b_deferred_I, pc.b_deferred_V, pc.n_nodes, pc.n_currents)
+
+    # Apply gmin to voltage node diagonals (from spec)
+    apply_gmin!(pc.G, pc.n_nodes, pc.spec.gmin)
 
     return nothing
 end
@@ -815,6 +893,9 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
     # Update sparse matrices in-place using precomputed mapping
     update_sparse_from_coo!(cs.G, ws.G_V, cs.G_coo_to_nz, n_G)
     update_sparse_from_coo!(cs.C, ws.C_V, cs.C_coo_to_nz, n_C)
+
+    # Apply gmin to voltage node diagonals (from spec)
+    apply_gmin!(cs.G, cs.n_nodes, cs.spec.gmin)
 
     return nothing
 end

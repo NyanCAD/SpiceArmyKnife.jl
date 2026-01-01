@@ -370,6 +370,8 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
                   explicit_jacobian::Bool=true) where {F,P}
     # Build at x=0, t=0 to get system size and initial structure
     ctx0 = builder(params, spec, 0.0; x=Float64[])
+    # Apply gmin from spec for convergence
+    set_gmin!(ctx0, spec.gmin)
     sys0 = assemble!(ctx0)
     n = system_size(sys0)
 
@@ -382,18 +384,26 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
 
     # Check if linear solution is good enough
     ctx_check = builder(params, spec, 0.0; x=x0)
+    set_gmin!(ctx_check, spec.gmin)
     sys_check = assemble!(ctx_check)
     resid0 = sys_check.G * x0 - sys_check.b
     if norm(resid0) < abstol
         return DCSolution(sys_check, x0)
     end
 
+    # Helper to build and assemble with gmin
+    gmin_val = spec.gmin
+    function build_with_gmin(u)
+        ctx = builder(params, spec, 0.0; x=u)
+        set_gmin!(ctx, gmin_val)
+        return assemble!(ctx)
+    end
+
     # Need Newton iteration - create NonlinearProblem
     # Residual function: F(u) = G(u)*u - b(u)
     function residual!(F, u, p)
         # Rebuild circuit at current operating point (t=0 for DC)
-        ctx = builder(params, spec, 0.0; x=u)
-        sys = assemble!(ctx)
+        sys = build_with_gmin(u)
 
         # F(u) = G(u)*u - b(u)
         mul!(F, sys.G, u)
@@ -409,8 +419,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
         # For well-linearized devices, dG/du * u ≈ contributions already in G
         # So J ≈ G (the conductance matrix at operating point)
         function jacobian!(J, u, p)
-            ctx = builder(params, spec, 0.0; x=u)
-            sys = assemble!(ctx)
+            sys = build_with_gmin(u)
             copyto!(J, sys.G)
             return nothing
         end
@@ -437,8 +446,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     end
 
     # Get final system for node names
-    ctx_final = builder(params, spec, 0.0; x=sol.u)
-    sys_final = assemble!(ctx_final)
+    sys_final = build_with_gmin(sol.u)
 
     return DCSolution(sys_final, sol.u)
 end

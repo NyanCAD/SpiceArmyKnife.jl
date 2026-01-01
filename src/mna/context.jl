@@ -15,6 +15,7 @@ export alloc_charge!, get_charge_idx, has_charge, n_charges
 export stamp_G!, stamp_C!, stamp_b!
 export stamp_conductance!, stamp_capacitance!
 export system_size
+export set_gmin!
 
 #==============================================================================#
 # Typed Index References
@@ -165,14 +166,22 @@ mutable struct MNAContext
 
     # Track if system has been finalized
     finalized::Bool
+
+    # Simulation parameters (set from MNASpec when building circuit)
+    gmin::Float64  # Minimum conductance added to node diagonals for convergence
 end
 
 """
-    MNAContext()
+    MNAContext(; gmin::Float64=0.0)
 
 Create an empty MNA context ready for circuit stamping.
+
+# Arguments
+- `gmin`: Minimum conductance added to each node diagonal during assembly.
+          This helps convergence with high-impedance nodes. Default: 0.0 (disabled).
+          Typically set from `MNASpec.gmin` via `set_gmin!(ctx, spec.gmin)`.
 """
-function MNAContext()
+function MNAContext(; gmin::Float64=0.0)
     MNAContext(
         Symbol[],           # node_names
         Dict{Symbol,Int}(), # node_to_idx
@@ -192,7 +201,8 @@ function MNAContext()
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
-        false               # finalized
+        false,              # finalized
+        gmin                # gmin
     )
 end
 
@@ -712,6 +722,42 @@ function clear!(ctx::MNAContext)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
     ctx.finalized = false
+    ctx.gmin = 0.0
+    return nothing
+end
+
+"""
+    set_gmin!(ctx::MNAContext, gmin::Real)
+
+Set the minimum conductance (gmin) that will be added to each voltage node
+diagonal during assembly.
+
+This is typically called at the start of a circuit builder function:
+```julia
+function build_circuit(params, spec, t::Real=0.0; x=Float64[])
+    ctx = MNAContext()
+    set_gmin!(ctx, spec.gmin)
+    # ... stamp devices ...
+    return ctx
+end
+```
+
+# SPICE Compatibility
+GMIN is a standard SPICE convergence aid. It adds a small conductance from
+each voltage node to ground, preventing completely floating nodes from
+causing singular matrices. The default SPICE value is typically 1e-12 S.
+
+# When to Use
+- Enable gmin for circuits with high-impedance nodes or floating gates
+- Leave disabled (0.0) for precision-critical linear analysis
+- For VA models, use `\$simparam("gmin", 1e-12)` instead (handled separately)
+
+# Note
+The gmin from MNASpec is also available to VA devices via `\$simparam("gmin", default)`.
+Setting context gmin is for the matrix-level convergence aid, not device-level access.
+"""
+function set_gmin!(ctx::MNAContext, gmin::Real)
+    ctx.gmin = Float64(gmin)
     return nothing
 end
 

@@ -21,6 +21,7 @@ using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!, resolve_in
 using CedarSim.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
 using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
 using CedarSim.MNA: stamp!, system_size
+using CedarSim.MNA: MNAIndex, NodeIndex, CurrentIndex, ChargeIndex
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using CedarSim.MNA: TimeDependentVoltageSource, PWLVoltageSource, get_source_value, pwl_value
 using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS
@@ -71,9 +72,9 @@ using VerilogAParser
         @test n1_again == 1
         @test ctx.n_nodes == 2
 
-        # Current variables (now return deferred negative indices)
+        # Current variables return typed CurrentIndex
         i1 = alloc_current!(ctx, :I_V1)
-        @test i1 < 0  # Deferred index
+        @test i1 isa CurrentIndex
         @test resolve_index(ctx, i1) == 3  # n_nodes + 1
         @test ctx.n_currents == 1
         @test system_size(ctx) == 3
@@ -132,9 +133,9 @@ using VerilogAParser
         stamp_conductance!(ctx, a, a_int, 0.001)  # R = 1k between a and a_int
         @test length(ctx.G_V) == 4
 
-        # Current variables work alongside internal nodes (deferred indices)
+        # Current variables work alongside internal nodes (typed indices)
         i1 = alloc_current!(ctx, :I_V1)
-        @test i1 < 0  # Deferred index
+        @test i1 isa CurrentIndex
         @test resolve_index(ctx, i1) == 6  # n_nodes + 1 = 5 + 1
         @test system_size(ctx) == 6
     end
@@ -187,8 +188,8 @@ using VerilogAParser
         stamp_G!(ctx, n2, n2, 1.0)
 
         @test length(ctx.G_V) == 4
-        @test ctx.G_I == [1, 1, 2, 2]
-        @test ctx.G_J == [1, 2, 1, 2]
+        @test ctx.G_I == [NodeIndex(1), NodeIndex(1), NodeIndex(2), NodeIndex(2)]
+        @test ctx.G_J == [NodeIndex(1), NodeIndex(2), NodeIndex(1), NodeIndex(2)]
         @test ctx.G_V == [1.0, -1.0, -1.0, 1.0]
 
         # Stamp C matrix
@@ -287,8 +288,8 @@ using VerilogAParser
         V = VoltageSource(5.0; name=:V1)
         I_idx = stamp!(V, ctx, vcc, 0)  # vcc to ground
 
-        # I_idx is now a deferred index (negative), resolved at assembly time
-        @test I_idx < 0  # Current variable index (deferred)
+        # I_idx is now a typed CurrentIndex, resolved at assembly time
+        @test I_idx isa CurrentIndex
         @test resolve_index(ctx, I_idx) == 2  # n_nodes + 1
 
         sys = assemble!(ctx)
@@ -329,8 +330,8 @@ using VerilogAParser
         L = Inductor(1e-3; name=:L1)  # 1mH
         I_idx = stamp!(L, ctx, n1, n2)
 
-        # I_idx is now a deferred index (negative)
-        @test I_idx < 0  # Current variable index (deferred)
+        # I_idx is now a typed CurrentIndex
+        @test I_idx isa CurrentIndex
         @test resolve_index(ctx, I_idx) == 3  # After 2 nodes
 
         sys = assemble!(ctx)
@@ -386,8 +387,8 @@ using VerilogAParser
         E = VCVS(10.0; name=:E1)  # Gain = 10
         I_idx = stamp!(E, ctx, out_p, out_n, in_p, in_n)
 
-        # I_idx is now a deferred index (negative)
-        @test I_idx < 0  # Current variable index (deferred)
+        # I_idx is now a typed CurrentIndex
+        @test I_idx isa CurrentIndex
         @test resolve_index(ctx, I_idx) == 5  # After 4 nodes
 
         sys = assemble!(ctx)
@@ -419,8 +420,8 @@ using VerilogAParser
         (I_out_idx, I_in_idx) = stamp!(H, ctx, out_p, out_n, in_p, in_n)
 
         # I_in allocated first (index 5), I_out second (index 6)
-        # Indices are now deferred (negative)
-        @test I_in_idx < 0 && I_out_idx < 0
+        # Indices are now typed CurrentIndex
+        @test I_in_idx isa CurrentIndex && I_out_idx isa CurrentIndex
         @test resolve_index(ctx, I_in_idx) == 5   # First current variable (after 4 nodes)
         @test resolve_index(ctx, I_out_idx) == 6  # Second current variable
 
@@ -458,8 +459,8 @@ using VerilogAParser
         F = CCCS(2.0; name=:F1)  # Current gain = 2
         I_in_idx = stamp!(F, ctx, out_p, out_n, in_p, in_n)
 
-        # Index is now deferred (negative)
-        @test I_in_idx < 0
+        # Index is now typed CurrentIndex
+        @test I_in_idx isa CurrentIndex
         @test resolve_index(ctx, I_in_idx) == 5  # After 4 nodes
 
         sys = assemble!(ctx)

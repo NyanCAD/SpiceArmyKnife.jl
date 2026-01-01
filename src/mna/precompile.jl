@@ -116,7 +116,7 @@ CompiledStructure.
 - `G_V::Vector{T}`: Preallocated COO values for G matrix
 - `C_V::Vector{T}`: Preallocated COO values for C matrix
 - `b::Vector{T}`: Preallocated RHS vector
-- `b_deferred_I::Vector{Int}`: Deferred b stamp indices
+- `b_deferred_I::Vector{MNAIndex}`: Deferred b stamp indices (typed indices)
 - `b_deferred_V::Vector{T}`: Deferred b stamp values
 - `time::T`: Current simulation time (updated each call)
 - `resid_tmp::Vector{T}`: Working storage for residual computation
@@ -131,8 +131,8 @@ mutable struct EvalWorkspace{T,CS<:CompiledStructure}
     C_V::Vector{T}
     b::Vector{T}
 
-    # Deferred b stamps (for current variables with negative indices)
-    b_deferred_I::Vector{Int}
+    # Deferred b stamps (for current/charge variables with typed indices)
+    b_deferred_I::Vector{MNAIndex}
     b_deferred_V::Vector{T}
 
     # Current simulation time (updated each call, avoids MNASpec allocation)
@@ -153,7 +153,7 @@ function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
         zeros(Float64, cs.G_n_coo),
         zeros(Float64, cs.C_n_coo),
         zeros(Float64, cs.n),
-        Int[],
+        MNAIndex[],
         Float64[],
         0.0,
         zeros(Float64, cs.n)
@@ -215,7 +215,7 @@ without any allocation or sorting.
 - `G_I, G_J, G_V`: Preallocated COO storage for G matrix
 - `C_I, C_J, C_V`: Preallocated COO storage for C matrix
 - `b_direct::Vector{Float64}`: Direct b stamps (positive indices)
-- `b_deferred_I, b_deferred_V`: Deferred b stamps (negative indices)
+- `b_deferred_I, b_deferred_V`: Deferred b stamps (typed MNAIndex values)
 - `G, C`: Preallocated sparse matrices with fixed sparsity
 - `b::Vector{Float64}`: Preallocated RHS vector
 - `G_coo_to_nz::Vector{Int}`: Mapping from COO index to G nonzeros
@@ -247,7 +247,7 @@ mutable struct PrecompiledCircuit{F,P,S}
 
     # b vector storage
     b_direct::Vector{Float64}
-    b_deferred_I::Vector{Int}
+    b_deferred_I::Vector{MNAIndex}
     b_deferred_V::Vector{Float64}
 
     # Preallocated sparse matrices (fixed sparsity pattern)
@@ -370,11 +370,11 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     end
 
     # Build sparse matrices to get sparsity pattern
-    # Need to resolve negative indices (current variables)
-    G_I_resolved = [resolve_index(ctx0, i) for i in ctx0.G_I]
-    G_J_resolved = [resolve_index(ctx0, j) for j in ctx0.G_J]
-    C_I_resolved = [resolve_index(ctx0, i) for i in ctx0.C_I]
-    C_J_resolved = [resolve_index(ctx0, j) for j in ctx0.C_J]
+    # Resolve typed indices to actual matrix positions
+    G_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.G_I]
+    G_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.G_J]
+    C_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.C_I]
+    C_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.C_J]
 
     G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
     C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
@@ -469,7 +469,7 @@ function compile_circuit(builder::F, params::P, spec::S;
             0, Symbol[], Symbol[], 0, 0,
             Int[], Int[], Float64[],
             Int[], Int[], Float64[],
-            Float64[], Int[], Float64[],
+            Float64[], MNAIndex[], Float64[],
             spzeros(0, 0), spzeros(0, 0), Float64[],
             Int[], Int[],
             0, 0,
@@ -478,11 +478,11 @@ function compile_circuit(builder::F, params::P, spec::S;
     end
 
     # Build sparse matrices to get sparsity pattern
-    # Need to resolve negative indices (current variables)
-    G_I_resolved = [resolve_index(ctx0, i) for i in ctx0.G_I]
-    G_J_resolved = [resolve_index(ctx0, j) for j in ctx0.G_J]
-    C_I_resolved = [resolve_index(ctx0, i) for i in ctx0.C_I]
-    C_J_resolved = [resolve_index(ctx0, j) for j in ctx0.C_J]
+    # Resolve typed indices to actual matrix positions
+    G_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.G_I]
+    G_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.G_J]
+    C_I_resolved = Int[resolve_index(ctx0, i) for i in ctx0.C_I]
+    C_J_resolved = Int[resolve_index(ctx0, j) for j in ctx0.C_J]
 
     G = sparse(G_I_resolved, G_J_resolved, ctx0.G_V, n, n)
     C = sparse(C_I_resolved, C_J_resolved, ctx0.C_V, n, n)
@@ -599,14 +599,15 @@ end
 
 """
     update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
-                     b_deferred_I::Vector{Int}, b_deferred_V::Vector{Float64},
-                     n_nodes::Int)
+                     b_deferred_I::Vector{MNAIndex}, b_deferred_V::Vector{Float64},
+                     n_nodes::Int, n_currents::Int)
 
 Update the b vector from direct and deferred stamps.
+Deferred stamps use typed MNAIndex values resolved using n_nodes and n_currents.
 """
 function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
-                          b_deferred_I::Vector{Int}, b_deferred_V::Vector{Float64},
-                          n_nodes::Int)
+                          b_deferred_I::Vector{MNAIndex}, b_deferred_V::Vector{Float64},
+                          n_nodes::Int, n_currents::Int)
     fill!(b, 0.0)
 
     # Copy direct stamps
@@ -615,10 +616,18 @@ function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
         b[i] = b_direct[i]
     end
 
-    # Apply deferred stamps (negative indices for current variables)
-    @inbounds for (i, v) in zip(b_deferred_I, b_deferred_V)
-        # Resolve negative index: -k → n_nodes + k
-        idx = i >= 0 ? i : n_nodes - i
+    # Apply deferred stamps (typed indices for current/charge variables)
+    @inbounds for (idx_typed, v) in zip(b_deferred_I, b_deferred_V)
+        # Resolve typed index to actual position
+        idx = if idx_typed isa NodeIndex
+            idx_typed.idx
+        elseif idx_typed isa CurrentIndex
+            n_nodes + idx_typed.k
+        elseif idx_typed isa ChargeIndex
+            n_nodes + n_currents + idx_typed.k
+        else
+            0  # GroundIndex - skip
+        end
         if 1 <= idx <= length(b)
             b[idx] += v
         end
@@ -683,7 +692,7 @@ function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
     # Update sparse matrices in-place using precomputed mapping
     update_sparse_from_coo!(pc.G, pc.G_V, pc.G_coo_to_nz, n_G)
     update_sparse_from_coo!(pc.C, pc.C_V, pc.C_coo_to_nz, n_C)
-    update_b_vector!(pc.b, pc.b_direct, pc.b_deferred_I, pc.b_deferred_V, pc.n_nodes)
+    update_b_vector!(pc.b, pc.b_direct, pc.b_deferred_I, pc.b_deferred_V, pc.n_nodes, pc.n_currents)
 
     return nothing
 end
@@ -786,10 +795,18 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
         ws.b[i] = ctx.b[i]
     end
 
-    # Apply deferred b stamps (negative indices for current variables)
-    @inbounds for (i, v) in zip(ctx.b_I, ctx.b_V)
-        # Resolve negative index: -k → n_nodes + k
-        idx = i >= 0 ? i : cs.n_nodes - i
+    # Apply deferred b stamps (typed indices for current/charge variables)
+    @inbounds for (idx_typed, v) in zip(ctx.b_I, ctx.b_V)
+        # Resolve typed index to actual position
+        idx = if idx_typed isa NodeIndex
+            idx_typed.idx
+        elseif idx_typed isa CurrentIndex
+            cs.n_nodes + idx_typed.k
+        elseif idx_typed isa ChargeIndex
+            cs.n_nodes + cs.n_currents + idx_typed.k
+        else
+            0  # GroundIndex - skip
+        end
         if 1 <= idx <= length(ws.b)
             ws.b[idx] += v
         end

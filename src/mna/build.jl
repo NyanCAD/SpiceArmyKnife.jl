@@ -42,8 +42,15 @@ struct MNASystem{T<:Real}
     b::Vector{T}
     node_names::Vector{Symbol}
     current_names::Vector{Symbol}
+    charge_names::Vector{Symbol}
     n_nodes::Int
     n_currents::Int
+    n_charges::Int
+end
+
+# Backwards-compatible constructor (no charges)
+function MNASystem{T}(G, C, b, node_names, current_names, n_nodes, n_currents) where {T<:Real}
+    MNASystem{T}(G, C, b, node_names, current_names, Symbol[], n_nodes, n_currents, 0)
 end
 
 """
@@ -51,7 +58,7 @@ end
 
 Return the total system size (number of unknowns).
 """
-system_size(sys::MNASystem) = sys.n_nodes + sys.n_currents
+system_size(sys::MNASystem) = sys.n_nodes + sys.n_currents + sys.n_charges
 
 #==============================================================================#
 # Matrix Assembly
@@ -90,8 +97,8 @@ function assemble_G(ctx::MNAContext; gmin::Float64=0.0)
         end
     end
 
-    I_resolved = [resolve_index(ctx, i) for i in ctx.G_I]
-    J_resolved = [resolve_index(ctx, j) for j in ctx.G_J]
+    I_resolved = Int[resolve_index(ctx, i) for i in ctx.G_I]
+    J_resolved = Int[resolve_index(ctx, j) for j in ctx.G_J]
 
     if gmin > 0
         # Add GMIN from each voltage node to ground
@@ -130,8 +137,8 @@ function assemble_C(ctx::MNAContext)
         return spzeros(Float64, n, n)
     end
     # Resolve any negative indices (current variables)
-    I_resolved = [resolve_index(ctx, i) for i in ctx.C_I]
-    J_resolved = [resolve_index(ctx, j) for j in ctx.C_J]
+    I_resolved = Int[resolve_index(ctx, i) for i in ctx.C_I]
+    J_resolved = Int[resolve_index(ctx, j) for j in ctx.C_J]
     return sparse(I_resolved, J_resolved, ctx.C_V, n, n)
 end
 
@@ -200,8 +207,10 @@ function assemble!(ctx::MNAContext)
         G, C, b,
         copy(ctx.node_names),
         copy(ctx.current_names),
+        copy(ctx.charge_names),
         ctx.n_nodes,
-        ctx.n_currents
+        ctx.n_currents,
+        ctx.n_charges
     )
 end
 
@@ -222,6 +231,13 @@ node_voltage_indices(sys::MNASystem) = 1:sys.n_nodes
 Return the indices in the solution vector corresponding to current variables.
 """
 current_variable_indices(sys::MNASystem) = (sys.n_nodes + 1):(sys.n_nodes + sys.n_currents)
+
+"""
+    charge_variable_indices(sys::MNASystem) -> UnitRange{Int}
+
+Return the indices in the solution vector corresponding to charge variables.
+"""
+charge_variable_indices(sys::MNASystem) = (sys.n_nodes + sys.n_currents + 1):(sys.n_nodes + sys.n_currents + sys.n_charges)
 
 """
     get_node_index(sys::MNASystem, name::Symbol) -> Int
@@ -245,6 +261,16 @@ function get_current_index(sys::MNASystem, name::Symbol)
     return idx === nothing ? error("Unknown current: $name") : sys.n_nodes + idx
 end
 
+"""
+    get_charge_index(sys::MNASystem, name::Symbol) -> Int
+
+Get the solution vector index for a charge variable by name.
+"""
+function get_charge_index(sys::MNASystem, name::Symbol)
+    idx = findfirst(==(name), sys.charge_names)
+    return idx === nothing ? error("Unknown charge: $name") : sys.n_nodes + sys.n_currents + idx
+end
+
 #==============================================================================#
 # Pretty Printing
 #==============================================================================#
@@ -263,6 +289,7 @@ function Base.show(io::IO, ::MIME"text/plain", sys::MNASystem{T}) where T
     println(io, "  System size: $n")
     println(io, "  Voltage nodes: $(sys.n_nodes)")
     println(io, "  Current variables: $(sys.n_currents)")
+    println(io, "  Charge variables: $(sys.n_charges)")
     println(io, "  G matrix: $(nnz(sys.G)) nonzeros")
     println(io, "  C matrix: $(nnz(sys.C)) nonzeros")
     if !isempty(sys.node_names)
@@ -270,6 +297,9 @@ function Base.show(io::IO, ::MIME"text/plain", sys::MNASystem{T}) where T
     end
     if !isempty(sys.current_names)
         println(io, "  Currents: $(join(sys.current_names, ", "))")
+    end
+    if !isempty(sys.charge_names)
+        println(io, "  Charges: $(join(sys.charge_names, ", "))")
     end
 end
 
@@ -321,7 +351,7 @@ end
 Display the G matrix (for debugging small circuits).
 """
 function show_G(sys::MNASystem)
-    all_names = vcat(sys.node_names, sys.current_names)
+    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
     show_matrix(stdout, sys.G, all_names)
 end
 
@@ -331,6 +361,6 @@ end
 Display the C matrix (for debugging small circuits).
 """
 function show_C(sys::MNASystem)
-    all_names = vcat(sys.node_names, sys.current_names)
+    all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
     show_matrix(stdout, sys.C, all_names)
 end

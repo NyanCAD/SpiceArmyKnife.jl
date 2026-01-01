@@ -1525,21 +1525,8 @@ sol = solve(prob_dae, IDA())  # Correctly handles nonlinear C(V)
 
 # See Also
 - `DAEProblem(circuit, tspan)` - Recommended for nonlinear circuits with IDA
-
-# Keyword Arguments
-- `u0`: Initial state (default: DC solution)
-- `nonlinear_mass_matrix`: If true, wrap the mass matrix in a MatrixOperator with
-  an `update_func!` that updates C(u) at each time step. However, **note that
-  standard implicit ODE solvers (ImplicitEuler, Rodas5P, etc.) do NOT call
-  `update_coefficients!` on the mass matrix**, so this option currently gives
-  the same results as the static mass matrix. Use `DAEProblem` instead for
-  circuits with voltage-dependent capacitance (junction caps, nonlinear caps).
-
-  This option uses dense matrices internally to avoid sparse broadcast issues
-  with MatrixOperator, so it's only suitable for small circuits.
 """
-function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
-                               u0=nothing, nonlinear_mass_matrix::Bool=false, kwargs...)
+function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, kwargs...)
     builder = circuit.builder
     params = circuit.params
     base_spec = circuit.spec
@@ -1570,48 +1557,17 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
         return nothing
     end
 
-    if nonlinear_mass_matrix
-        # Use MatrixOperator for state-dependent mass matrix C(u).
-        #
-        # The mass matrix (capacitance) depends on the solution vector u (voltage).
-        # We provide an update_func! that rebuilds the circuit at the current (u, t)
-        # and copies the updated capacitance matrix into the operator's storage.
-        #
-        # Note: We use a DENSE matrix for the MatrixOperator because sparse matrix
-        # broadcast operations with MatrixOperator are not supported (causes
-        # StackOverflowError in jacobian2W! when computing W = -γ*M + J).
-        # For large circuits, use DAEProblem instead which handles this correctly.
-        M = Matrix(pc.C)  # Convert to dense
+    # Note: Mass matrix pc.C is evaluated at the initial DC operating point and
+    # remains constant during integration. For voltage-dependent capacitance
+    # (junction capacitance), use DAEProblem instead - it rebuilds the C matrix
+    # at each step via fast_rebuild!.
 
-        function mass_update!(A, u, p, t)
-            fast_rebuild!(pc, u, real_time(t))
-            # Copy pc.C values into A (dense)
-            copyto!(A, pc.C)
-            return nothing
-        end
-
-        mass_op = MatrixOperator(M; update_func! = mass_update!)
-
-        # Also need dense Jacobian prototype for consistent matrix operations
-        f = SciMLBase.ODEFunction(
-            rhs!;
-            mass_matrix = mass_op,
-            jac = jac!,
-            jac_prototype = Matrix(-pc.G)
-        )
-    else
-        # Static mass matrix (legacy behavior)
-        # Note: Mass matrix pc.C is evaluated at the initial DC operating point and
-        # remains constant during integration. For voltage-dependent capacitance
-        # (junction capacitance), use nonlinear_mass_matrix=true or DAEProblem.
-
-        f = SciMLBase.ODEFunction(
-            rhs!;
-            mass_matrix = pc.C,
-            jac = jac!,
-            jac_prototype = -pc.G
-        )
-    end
+    f = SciMLBase.ODEFunction(
+        rhs!;
+        mass_matrix = pc.C,
+        jac = jac!,
+        jac_prototype = -pc.G
+    )
 
     return SciMLBase.ODEProblem(f, u0, Float64.(tspan); kwargs...)
 end

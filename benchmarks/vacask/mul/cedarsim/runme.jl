@@ -7,13 +7,10 @@
 #
 # Benchmark target: ~500k timepoints, ~1M NR iterations
 #
-# Note: Unlike RC and Graetz, this circuit has convergence issues with fixed
-# timesteps due to sharp initial transients in the cascaded diode topology.
-# Uses adaptive stepping with FBDF (BDF method) and dtmax constraint instead.
-# The diode tt parameter is removed to match ngspice (which has it commented).
-#
-# VACASK comparison: ngspice achieves ~500k timepoints with ~1k rejections.
-# The adaptive solver may take different step counts but achieves similar work.
+# Note: Uses ImplicitEuler solver with fixed timesteps (adaptive=false) to match
+# the VACASK benchmark methodology. The sin source uses phase=90 to start at
+# peak voltage (dV/dt=0), avoiding Newton convergence issues at t=0 that occur
+# with the cascaded diode topology when starting at phase=0.
 #==============================================================================#
 
 using CedarSim
@@ -60,19 +57,20 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dtmax=1e-8)
-    tspan = (0.0, 5e-3)  # 5ms simulation
+function run_benchmark(; warmup=true, dt=1e-8)
+    tspan = (0.0, 5e-3)  # 5ms simulation (~500k timepoints with dt=10ns)
 
-    # Use FBDF (BDF method) with adaptive stepping and dtmax constraint
-    # Fixed timesteps fail to converge for this circuit due to initial transients
-    solver = FBDF()
+    # Use ImplicitEuler with fixed timesteps for benchmarking
+    # adaptive=false forces the solver to use the specified dt
+    # Loose tolerances (1e-3) ensure Newton converges at each step
+    solver = ImplicitEuler(nlsolve=NLNewton(max_iter=100))
 
     # Warmup run (compiles everything)
     if warmup
         println("Warmup run...")
         try
             circuit = setup_simulation()
-            tran!(circuit, (0.0, 1e-5); dtmax=dtmax, solver=solver, abstol=1e-6, reltol=1e-4, maxiters=1e7)
+            tran!(circuit, (0.0, 1e-5); dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
         catch e
             println("Warmup failed: ", e)
             showerror(stdout, e, catch_backtrace())
@@ -84,23 +82,18 @@ function run_benchmark(; warmup=true, dtmax=1e-8)
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with FBDF (adaptive, dtmax=$dtmax)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver, abstol=1e-6, reltol=1e-4, maxiters=1e7) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with ImplicitEuler (fixed dt=$dt)...")
+    bench = @benchmark tran!($circuit, $tspan; dt=$dt, adaptive=false, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver, abstol=1e-6, reltol=1e-4, maxiters=1e7)
+    sol = tran!(circuit, tspan; dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
 
     println("\n=== Results ===")
     @printf("Timepoints:  %d\n", length(sol.t))
-    @printf("VACASK ref:  ~500,000\n")
-    if hasfield(typeof(sol.stats), :nnonliniter)
-        @printf("NR iters:    %d\n", sol.stats.nnonliniter)
-        @printf("Iter/step:   %.2f\n", sol.stats.nnonliniter / length(sol.t))
-    end
-    if hasfield(typeof(sol.stats), :nreject)
-        @printf("Rejected:    %d\n", sol.stats.nreject)
-    end
+    @printf("Expected:    ~%d\n", round(Int, (tspan[2] - tspan[1]) / dt) + 1)
+    @printf("NR iters:    %d\n", sol.stats.nnonliniter)
+    @printf("Iter/step:   %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
     println()
 

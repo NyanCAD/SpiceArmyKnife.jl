@@ -2121,13 +2121,11 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # Path to vadistiller models
         vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
-        @testset "Diode junction capacitance (sp_diode with IDA)" begin
-            # Load sp_diode model with junction capacitance
-            diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
-            va = VerilogAParser.parse(IOBuffer(diode_va))
-            @test !va.ps.errored
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+        # Load models ONCE at the beginning of Tier 7 to avoid redefinition conflicts
+        # The sp_diode and sp_mos1 functions are already loaded in earlier tiers,
+        # so we just reference them here without reloading.
 
+        @testset "Diode junction capacitance (sp_diode with IDA)" begin
             # Half-wave rectifier with junction capacitance
             # The cjo parameter enables voltage-dependent junction capacitance
             function diode_rectifier_with_cap(params, spec, t::Real=0.0; x=Float64[])
@@ -2191,12 +2189,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         @testset "MOSFET gate capacitance (sp_mos1 with IDA)" begin
-            # Load sp_mos1 model
-            mos1_va = read(joinpath(vadistiller_path, "mos1.va"), String)
-            va = VerilogAParser.parse(IOBuffer(mos1_va))
-            @test !va.ps.errored
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-
             # Common-source amplifier with gate capacitance
             function cs_amp_with_cap(params, spec, t::Real=0.0; x=Float64[])
                 ctx = MNAContext()
@@ -2260,11 +2252,6 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         @testset "Half-wave rectifier with filter cap (sp_diode with IDA)" begin
-            # Load sp_diode model (already loaded above, but re-parse for safety)
-            diode_va = read(joinpath(vadistiller_path, "diode.va"), String)
-            va = VerilogAParser.parse(IOBuffer(diode_va))
-            Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-
             # Simpler half-wave rectifier with filter capacitor
             # Tests junction capacitance + filter capacitor together
             function halfwave_rectifier(params, spec, t::Real=0.0; x=Float64[])

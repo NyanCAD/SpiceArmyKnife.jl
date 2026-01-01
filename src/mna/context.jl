@@ -8,12 +8,95 @@
 #==============================================================================#
 
 export MNAContext, MNASystem
+export MNAIndex, NodeIndex, CurrentIndex, ChargeIndex, GroundIndex
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
 export stamp_G!, stamp_C!, stamp_b!
 export stamp_conductance!, stamp_capacitance!
 export system_size
+
+#==============================================================================#
+# Typed Index References
+#
+# MNA indices are typed to distinguish between different variable types:
+# - NodeIndex: Voltage nodes (resolved immediately, index 1..n_nodes)
+# - CurrentIndex: Current variables (deferred, resolved to n_nodes + k)
+# - ChargeIndex: Charge variables (deferred, resolved to n_nodes + n_currents + k)
+# - GroundIndex: Ground node (always resolves to 0, stamps are skipped)
+#
+# This prevents index corruption when n_nodes changes during stamping.
+#==============================================================================#
+
+# Offset to distinguish charge indices from current indices in deferred index scheme
+# Current k → -k, Charge k → -(CHARGE_INDEX_OFFSET + k)
+const CHARGE_INDEX_OFFSET = 1000000
+
+"""
+    MNAIndex
+
+Abstract type for MNA system indices. Subtypes represent different variable types
+that are resolved to actual matrix indices at assembly time.
+"""
+abstract type MNAIndex end
+
+"""
+    GroundIndex
+
+Represents the ground node (index 0). Stamps involving ground are skipped.
+"""
+struct GroundIndex <: MNAIndex end
+const GROUND = GroundIndex()
+
+"""
+    NodeIndex
+
+Index for a voltage node. Contains the actual matrix row/column index.
+Node indices are stable and don't need deferred resolution.
+"""
+struct NodeIndex <: MNAIndex
+    idx::Int
+end
+
+"""
+    CurrentIndex
+
+Index for a current variable (e.g., from voltage sources, inductors).
+Contains the current variable number k; resolved to n_nodes + k at assembly.
+"""
+struct CurrentIndex <: MNAIndex
+    k::Int  # Current variable number (1-based)
+end
+
+"""
+    ChargeIndex
+
+Index for a charge state variable (voltage-dependent capacitors).
+Contains the charge variable number k; resolved to n_nodes + n_currents + k at assembly.
+"""
+struct ChargeIndex <: MNAIndex
+    k::Int  # Charge variable number (1-based)
+end
+
+# Allow Int to be used where MNAIndex is expected (backward compatibility)
+# Positive = node, 0 = ground, negative = current (-k means current k)
+# Very negative (< -CHARGE_INDEX_OFFSET) = charge
+Base.convert(::Type{MNAIndex}, x::Int) = x == 0 ? GROUND : (x > 0 ? NodeIndex(x) :
+    (x > -CHARGE_INDEX_OFFSET ? CurrentIndex(-x) : ChargeIndex(-(x + CHARGE_INDEX_OFFSET))))
+
+# Allow MNAIndex in integer contexts (for backward compatibility with existing stamps)
+Base.convert(::Type{Int}, x::GroundIndex) = 0
+Base.convert(::Type{Int}, x::NodeIndex) = x.idx
+Base.convert(::Type{Int}, x::CurrentIndex) = -x.k
+Base.convert(::Type{Int}, x::ChargeIndex) = -(CHARGE_INDEX_OFFSET + x.k)
+
+# Comparison with integers
+Base.:(==)(x::GroundIndex, y::Int) = y == 0
+Base.:(==)(x::Int, y::GroundIndex) = x == 0
+Base.:(==)(x::NodeIndex, y::Int) = x.idx == y
+Base.:(==)(x::Int, y::NodeIndex) = x == y.idx
+Base.:(!=)(x::MNAIndex, y::Int) = !(x == y)
+Base.:(!=)(x::Int, y::MNAIndex) = !(x == y)
 
 """
     MNAContext
@@ -243,19 +326,36 @@ end
 alloc_current!(ctx::MNAContext, name::String) = alloc_current!(ctx, Symbol(name))
 
 """
-    resolve_index(ctx::MNAContext, idx::Int) -> Int
+    resolve_index(ctx::MNAContext, idx) -> Int
 
-Resolve an index that may be negative (current variable) to an actual system index.
-- Positive indices (node indices) are returned unchanged
-- Zero (ground) is returned unchanged
-- Negative indices (-k) are translated to n_nodes + k (current variable k)
+Resolve an MNA index to an actual system row/column index.
 
-This allows current variable indices to be stamped before all nodes are known,
+Supports both typed indices (MNAIndex subtypes) and legacy integer encoding:
+- GroundIndex / 0: Returns 0 (stamps involving ground are skipped)
+- NodeIndex / positive Int: Returns the node index unchanged
+- CurrentIndex / negative Int (-k): Returns n_nodes + k
+- ChargeIndex / very negative Int (-(CHARGE_INDEX_OFFSET+k)): Returns n_nodes + n_currents + k
+
+This allows current and charge variable indices to be stamped before all nodes are known,
 and resolved at assembly time when n_nodes is final.
 """
+@inline resolve_index(ctx::MNAContext, ::GroundIndex)::Int = 0
+@inline resolve_index(ctx::MNAContext, idx::NodeIndex)::Int = idx.idx
+@inline resolve_index(ctx::MNAContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
+@inline resolve_index(ctx::MNAContext, idx::ChargeIndex)::Int = ctx.n_nodes + ctx.n_currents + idx.k
+
+# Legacy integer interface (for backward compatibility)
 @inline function resolve_index(ctx::MNAContext, idx::Int)::Int
     idx >= 0 && return idx  # Node index or ground
-    return ctx.n_nodes - idx  # -k → n_nodes + k
+    # Check if it's a charge index (below -CHARGE_INDEX_OFFSET)
+    if idx <= -CHARGE_INDEX_OFFSET
+        # Charge variable: -(CHARGE_INDEX_OFFSET + k) → n_nodes + n_currents + k
+        k = -(idx + CHARGE_INDEX_OFFSET)
+        return ctx.n_nodes + ctx.n_currents + k
+    else
+        # Current variable: -k → n_nodes + k
+        return ctx.n_nodes - idx
+    end
 end
 
 """
@@ -412,15 +512,20 @@ q_idx = alloc_charge!(ctx, :Q_Cj_D1, a, c)
 ```
 
 See doc/voltage_dependent_capacitors.md for full formulation.
+
+Note: Returns a DEFERRED negative index representing charge variable k.
+This allows n_nodes to change (e.g., from internal node allocation by subsequent instances)
+without invalidating previously stamped indices. The negative index is translated to the
+actual index (n_nodes + n_currents + k) at assembly time by `resolve_index`.
 """
 function alloc_charge!(ctx::MNAContext, name::Symbol, p::Int, n::Int)::Int
     ctx.n_charges += 1
     push!(ctx.charge_names, name)
     push!(ctx.charge_branches, (p, n))
 
-    # Return the actual system index (not deferred like currents)
-    # Charge variables come after nodes and currents
-    return ctx.n_nodes + ctx.n_currents + ctx.n_charges
+    # Return deferred negative index: -(CHARGE_INDEX_OFFSET + k)
+    # This is resolved to n_nodes + n_currents + k at assembly time
+    return -(CHARGE_INDEX_OFFSET + ctx.n_charges)
 end
 
 alloc_charge!(ctx::MNAContext, name::String, p::Int, n::Int) = alloc_charge!(ctx, Symbol(name), p, n)
@@ -429,13 +534,14 @@ alloc_charge!(ctx::MNAContext, name::String, p::Int, n::Int) = alloc_charge!(ctx
     get_charge_idx(ctx::MNAContext, name::Symbol) -> Int
 
 Look up a charge variable index by name.
-Returns the actual system index (n_nodes + n_currents + k).
+Returns a deferred negative index (-(CHARGE_INDEX_OFFSET + k)).
+Use `resolve_index` to get the actual system index.
 Throws an error if the charge variable doesn't exist.
 """
 function get_charge_idx(ctx::MNAContext, name::Symbol)::Int
     idx = findfirst(==(name), ctx.charge_names)
     idx === nothing && error("Charge variable $name not found in MNA context")
-    return ctx.n_nodes + ctx.n_currents + idx
+    return -(CHARGE_INDEX_OFFSET + idx)  # Return deferred negative index
 end
 
 get_charge_idx(ctx::MNAContext, name::String) = get_charge_idx(ctx, Symbol(name))

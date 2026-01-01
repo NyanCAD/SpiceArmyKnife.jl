@@ -33,7 +33,7 @@ function mem_mb()
     return round(Sys.total_memory() - Sys.free_memory(); digits=0) / 1024 / 1024
 end
 
-function with_memory_tracking(name::String, f)
+function with_memory_tracking(f, name::String)
     GC.gc()
     mem_before = mem_mb()
     t0 = time()

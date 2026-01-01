@@ -1,32 +1,13 @@
 module CedarSim
 
-# Phase 0: MNA Migration - DAECompiler is disabled, parsing/codegen works
-# Set to true to enable DAECompiler (requires DAECompiler package)
-const USE_DAECOMPILER = false
-
 using DiffEqBase
 using DynamicScope
 using VectorPrisms
 
-# MNA stubs for DAECompiler primitives (Phase 0)
-include("mna/stubs.jl")
-using .DAECompilerStubs
-
-# MNA Phase 1: Core MNA engine (replaces DAECompiler for simulation)
+# MNA Phase 1: Core MNA engine
 include("mna/MNA.jl")
 using .MNA
 export MNA
-
-# Conditionally use DAECompiler or stubs
-@static if USE_DAECOMPILER
-    using DAECompiler
-    using DAECompiler: IRODESystem
-    const DScope = DAECompiler.Intrinsics.Scope
-else
-    # Use stubs - simulation will error but parsing/codegen works
-    const IRODESystem = DAECompilerStubs.IRODESystem
-    const DScope = DAECompilerStubs.Scope
-end
 
 # re-exports
 export DAEProblem
@@ -43,10 +24,59 @@ export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules
 
 include("util.jl")
 include("vasim.jl")
-include("simulate_ir.jl")
-include("simpledevices.jl")
+
+# Minimal simulation environment (previously in simulate_ir.jl)
+using Base.ScopedValues
+
+Base.@kwdef struct SimSpec
+    time::Float64=0.0
+    ϵω::Float64=0.0
+    temp::DefaultOr{Float64}=mkdefault(27.0)
+    gmin::DefaultOr{Float64}=mkdefault(1e-12)
+    scale::DefaultOr{Float64}=mkdefault(1.0)
+    rng::Union{Nothing}=nothing
+end
+
+const spec = ScopedValue{SimSpec}(SimSpec())
+const sim_mode = ScopedValue{Symbol}(:dcop)
+
+# Minimal types previously in simulate_ir.jl (used by spectre.jl)
+# These are stubs for backward compatibility - MNA uses different types
+
+# ParallelInstances for device multiplicity
+struct ParallelInstances
+    device
+    multiplier::Float64
+
+    function ParallelInstances(device, multiplier::Float64)
+        if multiplier < 0.0
+            cedarthrow(ArgumentError("Cannot construct a ParallelInstances with non-positive multiplier '$(multiplier)'"))
+        end
+        return new(device, multiplier)
+    end
+end
+ParallelInstances(device, multiplier::Number) = ParallelInstances(device, Float64(multiplier))
+ParallelInstances(device, multiplier::DefaultOr) = ParallelInstances(device, undefault(multiplier))
+
+# Base types for circuit elements and simulation (stubs)
+abstract type CircuitElement end
+abstract type AbstractSim{C} end
+
+struct UnimplementedDevice <: CircuitElement
+    name::String
+end
+UnimplementedDevice() = UnimplementedDevice("unknown")
+
+# ParamSim stub - used by spectre.jl for parameter handling
+struct ParamSim{T,S,P} <: AbstractSim{T}
+    circuit::T
+    mode::S
+    spec::SimSpec
+    params::P
+end
+ParamSim(circuit, mode, spec, params) = ParamSim{typeof(circuit), typeof(mode), typeof(params)}(circuit, mode, spec, params)
+
 include("spectre_env.jl")
-include("circuitodesystem.jl")
 include("spectre.jl")
 
 # Phase 4: New SPC SPICE codegen (used by MNA backend)
@@ -58,16 +88,12 @@ include("spc/query.jl")
 include("spc/generated.jl")
 include("va_env.jl")
 include("sweeps.jl")
-# Phase 0: dcop.jl and ac.jl require DAECompiler simulation machinery
-# They use internal OrdinaryDiffEq functions that may not be available
-@static if USE_DAECOMPILER
-    include("dcop.jl")
-    include("ac.jl")
-end
+# ac.jl requires DAECompiler which has been removed - kept for reference
+# include("ac.jl")
 include("ModelLoader.jl")
-include("aliasextract.jl")
+# aliasextract.jl requires old DAECompiler types - not needed for MNA
+# include("aliasextract.jl")
 include("netlist_utils.jl")
-include("deprecated.jl")
 include("circsummary.jl")
 
 import .ModelLoader: load_VA_model
@@ -131,7 +157,7 @@ end
 Defined the functions needed to connect a MTK based model (defined using MSL `Pin`s) to Cedar.
 As input provide the model (an `ODESystem`), and a list of pins defined using `ModelingToolkitStandardLibary.Electrical.Pin`s.
 These pins can be as direct components of the model or subcomponents other components.
-When you use this component as a subcircuit (as shown in the example) they be connected to CedarSim `AbstractNets` 
+When you use this component as a subcircuit (as shown in the example) they be connected to CedarSim `AbstractNets`
 corresponding to the SPICE nodes, in the order you list them.
 
 

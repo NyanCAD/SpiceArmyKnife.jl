@@ -6,8 +6,7 @@ using SpectreNetlistParser.SPICENetlistParser: SPICENetlistCSTParser
 using Test
 using CedarSim.SpectreEnvironment
 
-# Phase 0: Check if simulation is available
-const HAS_SIMULATION = CedarSim.USE_DAECOMPILER
+# MNA is always available - DAECompiler simulation was removed
 
 code = """
 parameters p1=23pf p2=.3 p3 = 1&2~^3 p4 = true && false || true p5 = M_1_PI * 3.0

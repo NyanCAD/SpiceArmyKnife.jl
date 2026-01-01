@@ -35,45 +35,10 @@ function build_two_resistor(params, spec, t::Real=0.0; x=Float64[])
     return ctx
 end
 
-using CedarSim: nest_param_list, flatten_param_list
+# nest_param_list and flatten_param_list were removed with circuitodesystem.jl
+# Skipping these tests - the functionality was for DAECompiler's ParamSim workflow
 @testset "nest and flatten param lists" begin
-    # Test that it works with a Dict
-    param_list_dict = Dict(
-        :R1 => 1,
-        Symbol("x1.R3") => 2,
-        Symbol("x1.x2.R1") => 3,
-        Symbol("x1.x2.R2") => 4,
-    )
-    param_list_tuple = (
-        (:R1, 1.0),
-        (Symbol("x1.R3"), 2),
-        (Symbol("x1.x2.R1"), 3),
-        (Symbol("x1.x2.R2"), 4),
-    )
-    # Named tuples seem to have their own sorting method
-    param_nested_namedtuple = (
-        R1 = 1,
-        x1 = (
-            x2 = (R2 = 4, R1 = 3),
-            R3 = 2,
-        ),
-    )
-    @test nest_param_list(param_list_dict) == param_nested_namedtuple
-    @test nest_param_list(param_list_tuple) == param_nested_namedtuple
-    @test flatten_param_list(param_nested_namedtuple) == param_list_tuple
-    @test flatten_param_list(nest_param_list(param_list_tuple)) == param_list_tuple
-
-    # Trying to assign a prefix of another value is an error
-    @test_throws CedarSim.WrappedCedarException{<:ArgumentError} CedarSim.nest_param_list((
-        (Symbol("x1"), 1),
-        (Symbol("x1.R1"), 2),
-    ))
-
-    # Double-assigning a value is an error:
-    @test_throws CedarSim.WrappedCedarException{<:ArgumentError} CedarSim.nest_param_list((
-        (Symbol("x1"), 1),
-        (Symbol("x1"), 2),
-    ))
+    @test_skip "nest_param_list removed - was part of old DAECompiler API"
 end
 
 @testset "Sweep" begin

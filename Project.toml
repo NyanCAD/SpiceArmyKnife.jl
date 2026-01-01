@@ -63,10 +63,8 @@ SpectreNetlistParser = {path = "SpectreNetlistParser.jl"}
 VerilogAParser = {path = "VerilogAParser.jl"}
 
 [extensions]
-CedarSimCSVExt = "CSV"
 CedarSimMakieExt = "Makie"
 CedarSimModelingToolkitExt = "ModelingToolkit"
-CedarSimPlotlyLightExt = "PlotlyLight"
 CedarSimReviseExt = "Revise"
 
 [compat]

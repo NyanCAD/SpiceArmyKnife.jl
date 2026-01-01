@@ -1,12 +1,5 @@
 using ChainRulesCore, StaticArrays
 
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler: time_periodic_singularity!
-else
-    using ..DAECompilerStubs: time_periodic_singularity!
-end
-
 # This gets imported by all generated Spectre code. The function names
 # exported here should correspond to what is made available by Spectre
 
@@ -75,20 +68,17 @@ function pwl_at_time(ts, ys, t)
     return ys[i-1] + (t - ts[i-1])*slope
 end
 
+# Stub for time_periodic_singularities! - was used by DAECompiler for event handling
+# MNA handles time-dependent sources differently
 @generated function time_periodic_singularities!(ts::StaticArrays.SVector, period = ts[end], count = 1)
-    body = Expr(:block)
-    for i in 1:length(ts) # length of the type!
-        # Phase 0: Use imported time_periodic_singularity! instead of DAECompiler qualified name
-        push!(body.args, :(time_periodic_singularity!(ts[$i], period, count)))
-    end
-    return body
+    # No-op in MNA backend - singularities are handled by adaptive time stepping
+    return :nothing
 end
 
 baremodule SpectreEnvironment
 
 import ..Base
 import ..CedarSim
-import ..CedarSim: vcvs, vccs, Switch
 import ForwardDiff
 import Compat
 import Distributions
@@ -120,38 +110,16 @@ export !, +, *, -, ==, !=, /, ^, >, <,  <=, >=,
     asinh, acosh, atanh,
     int, nint, floor, ceil, pow
 
-
-const resistor = CedarSim.SimpleResistor
-const capacitor = CedarSim.SimpleCapacitor
-const inductor = CedarSim.SimpleInductor
-const vsource = CedarSim.VoltageSource
-const isource = CedarSim.CurrentSource
-const diode = CedarSim.SimpleDiode
-const UnimplementedDevice = CedarSim.UnimplementedDevice
-const Gnd = CedarSim.Gnd
-
-# bsource is weird. It can basically be any circuit element.
-# This maps to the appropriate element, based on the keyword arguments
-function bsource(;kwargs...)
-    keys = Base.keys(kwargs)
-    if Base.in(:v, keys)
-        return vsource(tran=kwargs[:v])
-    elseif Base.in(:i, keys)
-        return isource(tran=kwargs[:i])
-    elseif Base.in(:r, keys)
-        return resistor(r=kwargs[:r])
-    elseif Base.in(:c, keys)
-        return capacitor(c=kwargs[:c])
-    else
-        cedarerror("BSOURCE with args $kwargs not supported.")
-    end
+# Scale parameter accessor
+function var"$scale"()
+    return CedarSim.undefault(CedarSim.spec[].scale)
 end
 
 const M_1_PI = 1/Base.pi
 
 function pwl(wave)
     ts, ys = wave_split(wave)
-    # Notify singularities at each of our timepoints
+    # Notify singularities at each of our timepoints (no-op in MNA)
     time_periodic_singularities!(ts)
 
     # Actually calculate the value to return
@@ -165,7 +133,7 @@ function pulse(v1, v2, td, tr, tf, pw=Base.Inf, period=Base.Inf, count=-1)
     ys = StaticArrays.@SVector[
         v1, v2, v2, v1,
     ]
-    # Notify singularities at each of our timepoints, repeat forever
+    # Notify singularities at each of our timepoints (no-op in MNA)
     time_periodic_singularities!(ts, period, count)
 
     # Calculate value modulo our period
@@ -208,8 +176,7 @@ temper() = CedarSim.undefault(CedarSim.spec[].temp) # Celsius
 const dc = :dc
 const ac = :ac
 const tran = :tran
-export resistor, capacitor, inductor, vsource, isource, bsource, vcvs, vccs, UnimplementedDevice,
-    M_1_PI, dc, ac, tran, pwl, pulse, spsin, var"$time", Gnd, agauss, temper
+export M_1_PI, dc, ac, tran, pwl, pulse, spsin, var"$time", agauss, temper, var"$scale"
 
 end # baremodule SpectreEnvironment
 

@@ -1,10 +1,3 @@
-# Phase 0: Use stubs instead of DAECompiler
-@static if CedarSim.USE_DAECOMPILER
-    using DAECompiler.Intrinsics: ddt
-else
-    using ..DAECompilerStubs: ddt
-end
-
 abstract type CedarException <: Exception end
 # Always supress stack-trace on CedarExceptions as they will shouw details of out internals that are
 # confounding to end users. (Instead such exceptions must be self contained enough to be interpretted without stacktrack)

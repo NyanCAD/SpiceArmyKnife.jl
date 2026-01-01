@@ -10,15 +10,6 @@ import Compat
 import NaNMath
 import ChainRules
 
-# Phase 0: Use stubs instead of DAECompiler
-if CedarSim.USE_DAECOMPILER
-    import DAECompiler
-    import DAECompiler: ddt
-else
-    import ..CedarSim.DAECompilerStubs: ddt, observed!, epsilon
-    const DAECompiler = CedarSim.DAECompilerStubs
-end
-
 import Base:
     +, *, -, ==, !=, /, >, <,  <=, >=,
     max, min, abs,
@@ -84,19 +75,17 @@ end
 
 ChainRules.@scalar_rule tan(x) 1 + Ω * Ω
 
-# Branch voltagesa
-#function V(V₊, V₋)
-#    return V₊.V - V₋.V
-#end
-#V(node) = node.V
+# ddt stub - MNA handles ddt via ForwardDiff in vasim.jl
+# This is a placeholder for codegen that doesn't go through MNA stamping
+ddt(x) = x
+
+# Noise stubs - MNA doesn't support noise analysis yet
+# Returns 0 to not affect simulation
 function white_noise(dscope, pwr, name)
-    DAECompiler.observed!(pwr, CedarSim.DScope(dscope, Symbol(name, :pwr)))
-    DAECompiler.epsilon(CedarSim.DScope(dscope, Symbol(name)))
+    0.0
 end
 function flicker_noise(dscope, pwr, exp, name)
-    DAECompiler.observed!(pwr, CedarSim.DScope(dscope, Symbol(name, :pwr)))
-    DAECompiler.observed!(exp, CedarSim.DScope(dscope, Symbol(name, :exp)))
-    DAECompiler.epsilon(CedarSim.DScope(dscope, Symbol(name)))
+    0.0
 end
 
 vaconvert(T::Type{<:Number}, x::CedarSim.Default) = CedarSim.Default(vaconvert(T, x.val))
@@ -143,6 +132,7 @@ export var"$port_connected", port_connected
 var"$port_connected"(port) = 1
 port_connected(port) = 1
 
+# Base type for VA-generated models
 abstract type VAModel <: CedarSim.CircuitElement; end
 
 end

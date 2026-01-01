@@ -825,6 +825,45 @@ function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::Int)
     return nothing
 end
 
+# Overloads accepting CurrentIndex (returned by get_current_idx)
+# These forward to the base implementation since stamp_G! handles CurrentIndex natively
+
+"""
+    stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> CurrentIndex
+
+Stamp a CCVS using an existing current variable (accepts CurrentIndex from get_current_idx).
+"""
+function stamp!(H::CCVS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
+    # Output current variable
+    I_out_idx = alloc_current!(ctx, Symbol(:I_, H.name))
+
+    # Output branch
+    stamp_G!(ctx, out_p, I_out_idx,  1.0)
+    stamp_G!(ctx, out_n, I_out_idx, -1.0)
+
+    # Voltage equation: V(out) = rm * I(in)
+    # V(out_p) - V(out_n) - rm * I_in = 0
+    stamp_G!(ctx, I_out_idx, out_p,    1.0)
+    stamp_G!(ctx, I_out_idx, out_n,   -1.0)
+    stamp_G!(ctx, I_out_idx, I_in_idx, -H.rm)
+
+    return I_out_idx
+end
+
+"""
+    stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex) -> Nothing
+
+Stamp a CCCS using an existing current variable (accepts CurrentIndex from get_current_idx).
+"""
+function stamp!(F::CCCS, ctx::MNAContext, out_p::Int, out_n::Int, I_in_idx::CurrentIndex)
+    # Output current: gain * I_in flows into out_p (out of out_n)
+    # Negative stamp means current entering the node
+    stamp_G!(ctx, out_p, I_in_idx, -F.gain)
+    stamp_G!(ctx, out_n, I_in_idx,  F.gain)
+
+    return nothing
+end
+
 #------------------------------------------------------------------------------#
 # Time-Dependent Voltage Sources
 #------------------------------------------------------------------------------#

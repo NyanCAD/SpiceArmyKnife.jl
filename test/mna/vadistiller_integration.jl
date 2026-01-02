@@ -4,6 +4,10 @@
 # These tests load large Verilog-A models from files and are separated from
 # the core vadistiller tests to reduce memory pressure during CI.
 #
+# Memory optimization: Tier 7 uses only QNDF solver to avoid JIT compilation
+# overhead from multiple ODE solvers. Tier 8 uses IDA for DAE tests with
+# voltage-dependent capacitors. See doc/vadistiller_memory_analysis.md.
+#
 # Run with: julia --project=. -e 'using Pkg; Pkg.test(test_args=["integration"])'
 # Or directly: julia --project=. test/mna/vadistiller_integration.jl
 #==============================================================================#
@@ -16,8 +20,7 @@ using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
 using ForwardDiff: Dual, value, partials
-using OrdinaryDiffEq
-using OrdinaryDiffEq: Rodas5P, QNDF
+using OrdinaryDiffEq: QNDF
 using VerilogAParser
 using Sundials: IDA
 using CedarSim: tran!, dc!
@@ -512,15 +515,11 @@ end
             circuit = MNACircuit(build_rc; V=5.0, R=1000.0, C=1e-6)
             tspan = (0.0, 5e-3)
 
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-10, reltol=1e-8)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
-
-            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-10, reltol=1e-8)
-            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-10, reltol=1e-8)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = tspan[2]
-            @test sol_rodas(T)[2] > 4.5
-            @test isapprox(sol_rodas(T)[2], sol_qndf(T)[2]; rtol=0.01)
+            @test sol(T)[2] > 4.5  # Capacitor should be nearly charged
         end
 
         @testset "Diode rectifier transient" begin
@@ -539,15 +538,11 @@ end
             circuit = MNACircuit(build_rectifier; V=1.0, R=1000.0)
             tspan = (0.0, 1e-3)
 
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
-
-            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
-            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 0.5e-3
-            @test sol_rodas(T)[2] > 0.3 && sol_rodas(T)[2] < 0.8
-            @test isapprox(sol_rodas(T)[2], sol_qndf(T)[2]; rtol=0.01)
+            @test sol(T)[2] > 0.3 && sol(T)[2] < 0.8  # Diode forward drop
         end
 
         @testset "MOSFET CS amplifier transient" begin
@@ -571,19 +566,12 @@ end
                                  Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
             tspan = (0.0, 2e-3)
 
-            sol_rodas = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-8, reltol=1e-6)
-            @test sol_rodas.retcode == SciMLBase.ReturnCode.Success
-
-            sol_qndf = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
-            @test sol_qndf.retcode == SciMLBase.ReturnCode.Success
+            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
-            vd_rodas = sol_rodas(T)[3]
-            vd_qndf = sol_qndf(T)[3]
-
-            @test vd_rodas > 0.0 && vd_rodas < 5.5
-            @test vd_qndf > 0.0 && vd_qndf < 5.5
-            @test isapprox(vd_rodas, vd_qndf; rtol=0.05)
+            vd = sol(T)[3]
+            @test vd > 0.0 && vd < 5.5  # Drain voltage in valid range
         end
 
         @testset "BJT CE amplifier transient" begin
@@ -607,7 +595,7 @@ end
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
 
-            sol = tran!(circuit, tspan; abstol=1e-8, reltol=1e-6, explicit_jacobian=false)
+            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3

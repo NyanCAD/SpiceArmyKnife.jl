@@ -1415,6 +1415,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         twonode_voltage_vars[(p_sym, n_sym)] = I_var
     end
 
+    # Generate voltage-dependent charge detection block (runs with plain Float64 values)
+    # Detection must run BEFORE dual_creation to avoid capturing JacobianTag duals
+    # Results are cached in ctx.charge_is_vdep so stamp_code only checks the cache
+    detection_block = Expr(:block)
+
     # Generate stamping code for each unique branch - UNROLL loops at codegen time
     # Now handles both terminal nodes and internal nodes
     stamp_code = Expr(:block)
@@ -1446,6 +1451,40 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         # Generate charge variable name for this branch (used if voltage-dependent)
         charge_name_suffix = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
         charge_name_expr = :(_mna_instance_ == Symbol("") ? $charge_name_suffix : Symbol(_mna_instance_, "_", $charge_name_suffix))
+
+        # Pre-computed pseudo-random voltage scales for detection
+        # Different values for each node ensure we test capacitance between all node pairs
+        # Values chosen to avoid special cases (0, 1, etc.)
+        voltage_scales = (0.0, 0.31, 0.57, 0.83, 0.19, 0.67, 0.41, 0.73, 0.29, 0.61)
+
+        # Add detection call to detection_block (runs BEFORE dual_creation with plain Float64)
+        # The detection lambda uses a let block to create fresh Float64 bindings
+        # This runs once at build time to populate the cache
+        push!(detection_block.args, quote
+            CedarSim.MNA.detect_or_cached!(
+                ctx, $charge_name_expr,
+                function (_Vpn)
+                    # Use let to create fresh Float64 bindings that shadow any outer scope
+                    # Each node gets a different voltage (scaled by _Vpn) to detect
+                    # capacitance dependencies between any pair of nodes
+                    let $([begin
+                            if sym == p_sym
+                                :($(sym) = _Vpn)
+                            elseif sym == n_sym
+                                :($(sym) = zero(_Vpn))
+                            else
+                                # Use pre-computed pseudo-random scale for this node
+                                scale = voltage_scales[mod1(i, length(voltage_scales))]
+                                :($(sym) = $(scale) * _Vpn)
+                            end
+                        end for (i, sym) in enumerate(all_node_syms)]...)
+                        $sum_expr
+                    end
+                end,
+                $(Symbol("V_", p_idx !== nothing ? p_idx : 1)),
+                $(Symbol("V_", n_idx !== nothing ? n_idx : 1))
+            )
+        end)
 
         branch_stamp = quote
             # Evaluate the branch current
@@ -1513,55 +1552,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         #
         # For linear capacitors, we use standard C matrix stamping (no extra variables).
 
-        # Build the stamping code with cached detection
-        # Detection runs BEFORE evaluating the main contribution
-        # Uses a let block to ensure proper scoping and avoid dual type conflicts
-
-        # Generate bindings for all node symbols within the detection lambda
-        # Use let block to ensure complete isolation from outer scope
-        detect_let_bindings = Expr(:block)
-        for sym in all_node_syms
-            if sym == p_sym
-                push!(detect_let_bindings.args, :($sym = _Vpn))
-            elseif sym == n_sym
-                push!(detect_let_bindings.args, :($sym = zero(_Vpn)))
-            else
-                push!(detect_let_bindings.args, :($sym = zero(_Vpn)))
-            end
-        end
-
-        # Pre-computed pseudo-random voltage scales for detection
-        # Different values for each node ensure we test capacitance between all node pairs
-        # Values chosen to avoid special cases (0, 1, etc.)
-        voltage_scales = (0.0, 0.31, 0.57, 0.83, 0.19, 0.67, 0.41, 0.73, 0.29, 0.61)
-
+        # Stamp reactive Jacobians (capacitances) into C matrix OR use charge formulation
+        # Detection was already run in detection_block (before dual_creation)
+        # Here we just fetch the cached result
         push!(branch_stamp.args, quote
             if has_reactive
-                # Check voltage dependence using cached detection (runs once at build time)
-                # Use let block to completely shadow all node symbols
-                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(
-                    ctx, $charge_name_expr,
-                    function (_Vpn)
-                        # Use let to create fresh bindings that shadow outer scope
-                        # Each node gets a different voltage (scaled by _Vpn) to detect
-                        # capacitance dependencies between any pair of nodes
-                        let $([begin
-                                if sym == p_sym
-                                    :($(sym) = _Vpn)
-                                elseif sym == n_sym
-                                    :($(sym) = zero(_Vpn))
-                                else
-                                    # Use pre-computed pseudo-random scale for this node
-                                    scale = voltage_scales[mod1(i, length(voltage_scales))]
-                                    :($(sym) = $(scale) * _Vpn)
-                                end
-                            end for (i, sym) in enumerate(all_node_syms)]...)
-                            $sum_expr
-                        end
-                    end,
-                    $(Symbol("V_", p_idx !== nothing ? p_idx : 1)),
-                    $(Symbol("V_", n_idx !== nothing ? n_idx : 1))
-                )
+                # Get cached voltage dependence result (populated by detection_block)
+                _is_voltage_dependent = get(ctx.charge_is_vdep, $charge_name_expr, false)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
@@ -1713,13 +1710,21 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(_mna_x_) || $inp > length(_mna_x_) ? 0.0 : _mna_x_[$inp])))
     end
 
+    # Generate Float64 assignment for all nodes (for detection phase)
+    # This runs BEFORE dual_creation so detection lambdas capture plain floats
+    float_node_assignment = Expr(:block)
+    for i in 1:n_all_nodes
+        node_sym = all_node_syms[i]
+        push!(float_node_assignment.args,
+            :($node_sym = $(Symbol("V_", i))))
+    end
+
     # Generate dual creation for all nodes (terminals + internal)
     # Each node gets a dual with identity partials: ∂V_i/∂V_k = δ_ik
     #
     # We use single-layer JacobianTag duals for ddx() support.
-    # Voltage-dependent capacitor detection uses detect_or_cached!() which
-    # internally uses triple-nested duals but only on first call (build time).
-    # This avoids expensive nested duals during Newton iterations (solve time).
+    # Voltage-dependent capacitor detection runs BEFORE this block with plain Float64
+    # values, so detection lambdas never capture JacobianTag duals.
     dual_creation = Expr(:block)
     for i in 1:n_all_nodes
         node_sym = all_node_syms[i]
@@ -1904,8 +1909,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Get operating point currents for named branches
             $branch_current_extraction
 
+            # Assign Float64 voltages to node symbols (for detection phase)
+            # This runs BEFORE dual_creation so detection lambdas capture plain floats
+            $float_node_assignment
+
+            # Run voltage-dependent charge detection (with plain Float64 values)
+            # Results are cached in ctx.charge_is_vdep for later use in stamp_code
+            $detection_block
+
             # Create duals with partials for each node voltage (terminals + internal)
             # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
+            # This overwrites node symbols (p, n, etc.) with JacobianTag duals
             $dual_creation
 
             # Evaluate contribution expressions with duals
@@ -1940,7 +1954,7 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
+        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs, get
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
@@ -2139,7 +2153,7 @@ function load_mna_va_modules(into::Module, file::String)
             # Create module expression
             module_expr = :(baremodule $mod_name
                 using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
+                using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs, get
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment

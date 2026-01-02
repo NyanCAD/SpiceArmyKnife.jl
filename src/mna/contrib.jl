@@ -131,20 +131,12 @@ Tag ordering rules ensure ForwardDiff.Tag{F,V} is inner to our tags.
 """
 @inline function is_voltage_dependent_charge(contrib_fn, Vp::Real, Vn::Real)::Bool
     # Extract charge from contribution - returns the reactive part
+    # NOTE: Detection runs BEFORE dual_creation (see vasim.jl detection_block)
+    # so contrib_fn receives plain Float64 values, not JacobianTag duals
     function extract_charge(Vpn)
         result = contrib_fn(Vpn)
         if result isa Dual{ContributionTag}
-            # Has ddt: get the reactive part (charge)
-            react = partials(result, 1)
-            # Strip JacobianTag if present - can leak from outer stamp! scope
-            # because the detection lambda is called during Newton iteration
-            # where node voltages are JacobianTag duals. Even with let-block
-            # shadowing, some expressions in sum_expr may reference unshadowed
-            # variables or parameters that carry JacobianTag.
-            while react isa Dual{JacobianTag}
-                react = value(react)
-            end
-            return react
+            return partials(result, 1)
         else
             # No reactive component
             return zero(Vpn)

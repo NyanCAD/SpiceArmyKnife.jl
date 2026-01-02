@@ -1738,9 +1738,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
-        # Check for valid positive index within bounds
+        # Use resolve_index to get actual system index, check if x is large enough
         push!(branch_current_extraction.args,
-            :($I_sym = isempty(_mna_x_) || $I_var < 1 || $I_var > length(_mna_x_) ? 0.0 : _mna_x_[$I_var]))
+            :(let _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
+                $I_sym = isempty(_mna_x_) || _i_idx < 1 || _i_idx > length(_mna_x_) ? 0.0 : _mna_x_[_i_idx]
+            end))
     end
 
     # Initialize branch current variables for named branches that don't have voltage contributions

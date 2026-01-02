@@ -229,6 +229,49 @@ Internal helper: check voltage dependence at a single point.
 end
 
 """
+    detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+
+Check cache for voltage-dependent charge detection result, or run detection if not cached.
+
+This is a build-time optimization: detection uses triple-nested duals (expensive) but only
+needs to run once per branch. After the first call, results are cached in the context.
+
+# Arguments
+- `ctx`: MNA context containing the detection cache
+- `name`: Unique name for this branch (used as cache key)
+- `contrib_fn`: Contribution function `V -> I` that may contain `va_ddt(Q(V))`
+- `Vp`, `Vn`: Operating point voltages
+
+# Returns
+- `true` if the contribution has voltage-dependent capacitance
+- `false` if purely resistive or constant capacitance
+
+# Example
+```julia
+# In generated stamp code:
+_is_vdep = detect_or_cached!(ctx, :Q_branch1, V -> va_ddt(C0 * V^2), Vp, Vn)
+if _is_vdep
+    # Use charge formulation
+else
+    # Use C matrix
+end
+```
+"""
+@inline function detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
+    cache = ctx.charge_is_vdep
+    cached = get(cache, name, nothing)
+    if cached !== nothing
+        return cached
+    end
+    # First time: run detection with triple-nested duals
+    result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
+    cache[name] = result
+    return result
+end
+
+export detect_or_cached!
+
+"""
     va_ddt(x)
 
 Verilog-A ddt() function (time derivative) for MNA contribution stamping.

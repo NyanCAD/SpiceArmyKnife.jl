@@ -163,6 +163,11 @@ mutable struct MNAContext
     # Branch nodes (p, n) for each charge - links charge to KCL
     charge_branches::Vector{Tuple{Int,Int}}
 
+    # Cache for voltage-dependent charge detection (build-time optimization)
+    # Maps charge_name => is_voltage_dependent
+    # This allows detection to run once at circuit construction, not every Newton iteration
+    charge_is_vdep::Dict{Symbol, Bool}
+
     # Track if system has been finalized
     finalized::Bool
 end
@@ -192,6 +197,7 @@ function MNAContext()
         Symbol[],           # charge_names
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
+        Dict{Symbol,Bool}(), # charge_is_vdep (detection cache)
         false               # finalized
     )
 end

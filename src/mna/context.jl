@@ -9,6 +9,7 @@
 
 export MNAContext, MNASystem
 export MNAIndex, NodeIndex, CurrentIndex, ChargeIndex, GroundIndex
+export ZeroVector, ZERO_VECTOR
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index
 export alloc_internal_node!, is_internal_node, n_internal_nodes
 export alloc_charge!, get_charge_idx, has_charge, n_charges
@@ -79,6 +80,30 @@ Base.iszero(::GroundIndex) = true
 Base.iszero(::NodeIndex) = false
 Base.iszero(::CurrentIndex) = false
 Base.iszero(::ChargeIndex) = false
+
+#==============================================================================#
+# ZeroVector - phantom vector for initial stamping
+#
+# During initial circuit stamping, there's no state vector yet. Instead of
+# runtime bounds checks like `isempty(x) || i > length(x) ? 0.0 : x[i]`,
+# we use a ZeroVector that returns 0.0 for any index access.
+#==============================================================================#
+
+"""
+    ZeroVector
+
+A phantom vector that returns 0.0 for any index access.
+Used as the default `_mna_x_` during initial stamping when there's no state vector yet.
+
+This eliminates runtime bounds checks in voltage/current extraction code.
+Any getindex call returns 0.0, including index 0 (ground) and out-of-bounds indices.
+"""
+struct ZeroVector <: AbstractVector{Float64} end
+
+Base.size(::ZeroVector) = (0,)
+Base.getindex(::ZeroVector, ::Integer) = 0.0
+
+const ZERO_VECTOR = ZeroVector()
 
 """
     MNAContext

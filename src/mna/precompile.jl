@@ -157,7 +157,7 @@ Create a mutable evaluation workspace for the given compiled structure.
 function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
     # Create a preallocated MNAContext for this workspace
     # We call the builder once to get a fully initialized context with correct structure
-    ctx = cs.builder(cs.params, cs.spec, 0.0; x=Float64[])
+    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
 
     # Check if builder supports ctx reuse
     ctx_reuse = supports_ctx_kwarg(cs.builder, cs.params, cs.spec)
@@ -367,7 +367,7 @@ then creates the sparse matrices and COO→CSC mappings.
 
 # Arguments
 - `builder`: Circuit builder function with signature:
-    `(params, spec, t::Real=0.0; x=Float64[]) -> MNAContext`
+    `(params, spec, t::Real=0.0; x=ZERO_VECTOR) -> MNAContext`
   Time is passed explicitly for zero-allocation iteration.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
@@ -378,7 +378,7 @@ Use `create_workspace(cs)` to create a mutable workspace for evaluation.
 """
 function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=Float64[])
+    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
     n = system_size(ctx0)
 
     if n == 0
@@ -453,7 +453,7 @@ then creates the sparse matrices and COO→CSC mappings.
 
 # Arguments
 - `builder`: Circuit builder function with signature:
-    `(params, spec, t::Real=0.0; x=Float64[]) -> MNAContext`
+    `(params, spec, t::Real=0.0; x=ZERO_VECTOR) -> MNAContext`
   Time is passed explicitly for zero-allocation iteration.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
@@ -506,7 +506,7 @@ points, consider:
 function compile_circuit(builder::F, params::P, spec::S;
                         capacity_factor::Float64=2.0) where {F,P,S}
     # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=Float64[])
+    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
     n = system_size(ctx0)
 
     # Check if builder supports ctx reuse (for zero-allocation path)
@@ -813,7 +813,7 @@ Time is passed explicitly to the builder, avoiding MNASpec allocation.
 
 # Builder API
 Builders must accept time as explicit parameter:
-    builder(params, spec, t::Real; x=Float64[]) -> MNAContext
+    builder(params, spec, t::Real; x=ZERO_VECTOR) -> MNAContext
 
 The spec contains temperature, mode, and tolerances (immutable during simulation).
 Time is passed separately since it changes every iteration.
@@ -963,7 +963,7 @@ during transient simulation.
 # Usage
 ```julia
 # Define circuit builder
-function build_rc(params, spec; x=Float64[])
+function build_rc(params, spec; x=ZERO_VECTOR)
     ctx = MNAContext()
     # ... stamp devices ...
     return ctx

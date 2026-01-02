@@ -1696,10 +1696,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # V_(n_ports+1)..V_n_all_nodes are for internal nodes
     voltage_extraction = Expr(:block)
     # Terminal nodes (from function arguments)
+    # Ground nodes (index 0) always return 0.0, others index into the solution vector
     for i in 1:n_ports
         np = node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : (isempty(_mna_x_) ? 0.0 : _mna_x_[$np])))
+            :($(Symbol("V_", i)) = $np == 0 ? 0.0 : _mna_x_[$np]))
     end
     # Internal nodes (from alloc_internal_node!)
     # Note: Internal nodes can be aliased to terminals (including ground) via short-circuit detection
@@ -1707,7 +1708,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         idx = n_ports + i
         inp = internal_node_params[i]
         push!(voltage_extraction.args,
-            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : (isempty(_mna_x_) || $inp > length(_mna_x_) ? 0.0 : _mna_x_[$inp])))
+            :($(Symbol("V_", idx)) = $inp == 0 ? 0.0 : _mna_x_[$inp]))
     end
 
     # Generate Float64 assignment for all nodes (for detection phase)
@@ -1735,13 +1736,13 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     end
 
     # Generate branch current extraction for named branches
+    # ZeroVector returns 0.0 for any index, eliminating bounds checks
     branch_current_extraction = Expr(:block)
     for (branch_name, I_var) in branch_current_vars
         I_sym = Symbol("_I_branch_", branch_name)
-        # Use resolve_index to get actual system index, check if x is large enough
         push!(branch_current_extraction.args,
             :(let _i_idx = CedarSim.MNA.resolve_index(ctx, $I_var)
-                $I_sym = isempty(_mna_x_) || _i_idx < 1 || _i_idx > length(_mna_x_) ? 0.0 : _mna_x_[_i_idx]
+                $I_sym = _mna_x_[_i_idx]
             end))
     end
 
@@ -1886,9 +1887,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     quote
         function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
                                      $([:($np::Int) for np in node_params]...);
-                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=Float64[],
+                                     _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
                                      _mna_instance_::Symbol=Symbol(""))
+            # Convert empty vectors to ZERO_VECTOR for safe indexing
+            _mna_x_ = isempty(_mna_x_) ? CedarSim.MNA.ZERO_VECTOR : _mna_x_
             $(params_to_locals...)
             $(function_defs...)
 
@@ -1960,7 +1963,7 @@ function make_mna_module(va::VANode)
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
-        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
+        using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename
@@ -2159,7 +2162,7 @@ function load_mna_va_modules(into::Module, file::String)
                 import Base
                 import ..CedarSim
                 using ..CedarSim.VerilogAEnvironment
-                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!
+                using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
                 using ForwardDiff: Dual, value, partials
                 import ForwardDiff
                 export $typename

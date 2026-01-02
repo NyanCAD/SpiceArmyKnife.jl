@@ -329,7 +329,7 @@ For nonlinear devices (diodes, MOSFETs, VA devices with V*V terms), it uses
 Newton iteration via NonlinearSolve.jl.
 
 # Arguments
-- `builder`: Circuit builder function `(params, spec; x=Float64[]) -> MNAContext`
+- `builder`: Circuit builder function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
@@ -345,7 +345,7 @@ Newton iteration via NonlinearSolve.jl.
 
 # Example
 ```julia
-function build_circuit(params, spec; x=Float64[])
+function build_circuit(params, spec; x=ZERO_VECTOR)
     ctx = MNAContext()
     vcc = get_node!(ctx, :vcc)
     out = get_node!(ctx, :out)
@@ -369,7 +369,7 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100,
                   explicit_jacobian::Bool=true) where {F,P}
     # Build at x=0, t=0 to get system size and initial structure
-    ctx0 = builder(params, spec, 0.0; x=Float64[])
+    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
     sys0 = assemble!(ctx0)
     n = system_size(sys0)
 
@@ -1009,7 +1009,7 @@ the same interface while using the MNA backend instead of DAECompiler.
     MNACircuit (System) → DAEProblem (Problem) → solve() → Solution
 
 # Architecture
-- `builder`: Function `(params, spec; x=Float64[]) -> MNAContext`
+- `builder`: Function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Base simulation spec (MNASpec)
 
@@ -1023,7 +1023,7 @@ by calling the builder with the current operating point.
 # Usage
 ```julia
 # Define circuit builder
-function build_inverter(params, spec; x=Float64[])
+function build_inverter(params, spec; x=ZERO_VECTOR)
     ctx = MNAContext()
     # ... stamp devices, passing x for nonlinear devices ...
     return ctx
@@ -1073,7 +1073,7 @@ This is the recommended constructor for circuits with parameters.
 Parameters are stored as a NamedTuple and can be modified with `alter()`.
 
 # Arguments
-- `builder`: Circuit builder function `(params, spec; x=Float64[]) -> MNAContext`
+- `builder`: Circuit builder function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
 - `spec`: Simulation specification (default: MNASpec())
 - `kwargs...`: Circuit parameters (stored as NamedTuple)
 
@@ -1140,7 +1140,7 @@ export alter
 Get the system size (number of unknowns) for the circuit.
 """
 function system_size(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
     sys0 = assemble!(ctx0)
     return system_size(sys0)
 end
@@ -1163,7 +1163,7 @@ v_out = voltage(acc, :out, 0.5e-3)
 ```
 """
 function assemble!(circuit::MNACircuit)
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
     return assemble!(ctx)
 end
 
@@ -1217,7 +1217,7 @@ Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
 """
 function detect_differential_vars(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1538,14 +1538,14 @@ end
 # Note: Unlike some SPICE simulators that force :dcop mode, we respect the circuit's
 # spec to allow mode-aware testing. Use with_mode(circuit, :dcop) explicitly if needed.
 function solve_dc(circuit::MNACircuit)
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=Float64[])
+    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
     sys = assemble!(ctx)
     return solve_dc(sys)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
     ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
-    ctx = circuit.builder(circuit.params, ac_spec, 0.0; x=Float64[])
+    ctx = circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR)
     sys = assemble!(ctx)
     return solve_ac(sys, freqs; kwargs...)
 end

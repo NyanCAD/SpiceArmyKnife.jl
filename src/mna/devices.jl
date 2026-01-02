@@ -1145,7 +1145,7 @@ The stamp! method takes `x` parameter for the current operating point.
 
 # Example
 ```julia
-function build_circuit(params, spec; x=Float64[])
+function build_circuit(params, spec; x=ZERO_VECTOR)
     ctx = MNAContext()
     vin = get_node!(ctx, :vin)
     out = get_node!(ctx, :out)

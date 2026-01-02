@@ -1173,8 +1173,9 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
 
     # Helper to get voltage from solution vector
     # (defined here to be available in generated code)
+    # Ground (node 0) always returns 0.0, empty vectors are handled by ZERO_VECTOR
     get_voltage_helper = quote
-        _get_voltage(x, node) = node == 0 ? 0.0 : (isempty(x) ? 0.0 : x[node])
+        _get_voltage(x, node) = node == 0 ? 0.0 : x[node]
     end
 
     if v_expr !== nothing
@@ -1201,9 +1202,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
                 function _v_contrib_fn(Vpn)
                     return $contrib_expr
                 end
-                # When x is empty (structure determination phase), use zeros
-                _x_eff = isempty(x) ? zeros(max($p, $n, 1)) : x
-                $(MNA).stamp_voltage_contribution!(ctx, $p, $n, _v_contrib_fn, _x_eff,
+                # ZeroVector returns 0.0 for any index, no need for isempty check
+                $(MNA).stamp_voltage_contribution!(ctx, $p, $n, _v_contrib_fn, x,
                     $(QuoteNode(Symbol(:I_, name))))
             end
         end
@@ -1236,9 +1236,8 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{SP.Behavioral})
                 function _i_contrib_fn(Vpn)
                     return $contrib_expr
                 end
-                # When x is empty (structure determination phase), use zeros
-                _x_eff = isempty(x) ? zeros(max($n, $p, 1)) : x
-                $(MNA).stamp_current_contribution!(ctx, $p, $n, _i_contrib_fn, _x_eff)
+                # ZeroVector returns 0.0 for any index, no need for isempty check
+                $(MNA).stamp_current_contribution!(ctx, $p, $n, _i_contrib_fn, x)
             end
         end
     else
@@ -2428,7 +2427,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
-        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, reset_for_restamping!
+        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
 
@@ -2440,7 +2439,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # t is simulation time (passed explicitly for zero-allocation iteration)
         # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
         function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
-                                 x::AbstractVector=Float64[],
+                                 x::AbstractVector=ZERO_VECTOR,
                                  ctx::Union{$(MNAContext), Nothing}=nothing)
             if ctx === nothing
                 ctx = $(MNAContext)()

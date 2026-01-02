@@ -1530,6 +1530,11 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             end
         end
 
+        # Pre-computed pseudo-random voltage scales for detection
+        # Different values for each node ensure we test capacitance between all node pairs
+        # Values chosen to avoid special cases (0, 1, etc.)
+        voltage_scales = (0.0, 0.31, 0.57, 0.83, 0.19, 0.67, 0.41, 0.73, 0.29, 0.61)
+
         push!(branch_stamp.args, quote
             if has_reactive
                 # Check voltage dependence using cached detection (runs once at build time)
@@ -1538,7 +1543,19 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     ctx, $charge_name_expr,
                     function (_Vpn)
                         # Use let to create fresh bindings that shadow outer scope
-                        let $([:($(sym) = $(sym == p_sym ? :_Vpn : :(zero(_Vpn)))) for sym in all_node_syms]...)
+                        # Each node gets a different voltage (scaled by _Vpn) to detect
+                        # capacitance dependencies between any pair of nodes
+                        let $([begin
+                                if sym == p_sym
+                                    :($(sym) = _Vpn)
+                                elseif sym == n_sym
+                                    :($(sym) = zero(_Vpn))
+                                else
+                                    # Use pre-computed pseudo-random scale for this node
+                                    scale = voltage_scales[mod1(i, length(voltage_scales))]
+                                    :($(sym) = $(scale) * _Vpn)
+                                end
+                            end for (i, sym) in enumerate(all_node_syms)]...)
                             $sum_expr
                         end
                     end,

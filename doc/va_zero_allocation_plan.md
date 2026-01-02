@@ -1,99 +1,96 @@
 # Zero-Allocation Verilog-A Evaluation
 
+## Current Status (January 2026)
+
+### Completed: MNAContext Reuse (~71% Memory Reduction)
+
+The first major optimization has been implemented - storing and reusing the MNAContext
+instead of allocating a new one each Newton iteration.
+
+**Benchmark Results (VACASK RC circuit):**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Memory | 60.33 MB | 17.56 MB | 71% reduction |
+| Allocations | 1,202,254 | 561,607 | 53% reduction |
+| Bytes/iteration | 6,314 | 1,838 | 71% reduction |
+| Time (median) | 56 ms | 25 ms | 55% reduction |
+
+### Changes Made
+
+1. **`src/mna/context.jl`**: Added `reset_for_restamping!(ctx)` function that empties all
+   arrays while preserving their allocated capacity.
+
+2. **`src/spc/codegen.jl`**: Modified builder function generation to accept optional `ctx`
+   parameter for context reuse:
+   ```julia
+   function circuit_name(params, spec, t=0.0; x=Float64[], ctx=nothing)
+       if ctx === nothing
+           ctx = MNAContext()
+       else
+           reset_for_restamping!(ctx)
+       end
+       # ... stamp devices ...
+       return ctx
+   end
+   ```
+
+3. **`src/mna/precompile.jl`**:
+   - Added `ctx::MNAContext` field to `PrecompiledCircuit` and `EvalWorkspace`
+   - Modified `fast_rebuild!` to pass stored context to builder
+
 ## Problem Statement
 
-The current VA integration (`vasim.jl`) allocates ~2KB per Newton iteration. For a 1-second simulation with ~2M iterations, this means ~4GB of allocations and GC pressure.
+The VA integration (`vasim.jl`) allocates memory per Newton iteration. For a 1-second
+simulation with ~2M iterations, this creates significant GC pressure.
 
-**Root cause**: `fast_rebuild!` in `precompile.jl:440-482` creates a new `MNAContext` every Newton iteration:
+**Root cause**: While `fast_rebuild!` now reuses the MNAContext, there are still allocations
+from:
+1. Hash table operations in `node_to_idx` dictionary (~500-1000 bytes/iter)
+2. Dynamic array resizing when rebuilding structure
 
-```julia
-function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
-    spec_t = MNASpec(temp=pc.spec.temp, mode=:tran, time=real_time(t))
-    ctx = pc.builder(pc.params, spec_t; x=u)  # <-- ALLOCATES ~2KB!
-    # ... copies values from ctx to pc
-end
-```
+## Remaining Work
 
-## Key Insight: Duals Inline to Arithmetic
+### Phase 2: Dictionary Elimination
 
-ForwardDiff Duals with compile-time known sizes **inline to simple scalar operations**:
+The `node_to_idx` dictionary allocates when looking up/adding nodes. Replace with:
 
 ```julia
-# This Dual code:
-V = Dual{Tag}(1.0, (1.0, 0.0))
-I = V / R
+# Currently (allocates):
+idx = get!(ctx.node_to_idx, name, length(ctx.node_to_idx) + 1)
 
-# Compiles to equivalent of:
-I_val = V_val / R
-I_partial_1 = V_partial_1 / R  # = 1/R
-I_partial_2 = V_partial_2 / R  # = 0
+# Target (zero-allocation):
+# At compile time, generate a lookup table with known node indices
+const NODE_INDICES = Dict(:vdd => 1, :gnd => 0, :out => 2, ...)
+# At runtime, just use the constant lookup
 ```
 
-No heap allocation needed - just scalar arithmetic on the stack. The allocations come from:
-1. Creating MNAContext every iteration (main cause)
-2. Runtime type dispatch (`if x isa Dual{Tag}`)
-3. Dynamic tuple sizes for partials
+**Estimated improvement**: Reduce to <100 bytes/iter
 
-With proper specialization, all of these can be eliminated.
+### Phase 3: True Zero-Allocation Value-Only Mode
 
-## Target Architectures
+The ultimate goal is to separate structure discovery from value evaluation:
 
-| Use Case | Array Type | Formulation | Allocation Target |
-|----------|------------|-------------|-------------------|
-| CPU standard | `Vector{T}`, `SparseMatrixCSC` | In-place `f!(resid, du, u, p, t)` | 0 bytes/iter |
-| GPU single | `CuArray{T}`, `CuSparseMatrixCSC` | In-place `f!(resid, du, u, p, t)` | 0 bytes/iter |
-| GPU ensemble | `SVector{N,T}`, `SMatrix{N,N,T}` | Out-of-place `f(u, p, t) -> SVector` | 0 bytes/iter |
-
-## Implementation Plan
-
-### Phase 1: Separate Structure from Values
-
-The OSDI pattern from OpenVAF/VACASK: discover sparsity structure once, then evaluate values in-place.
-
-**Current flow (allocating):**
-```
-Newton iteration → builder(params, spec; x=u) → new MNAContext → stamp! → copy to matrices
-                   ↑ ALLOCATES
-```
-
-**Target flow (zero-allocation):**
 ```
 Setup: builder(params, spec) → discover pattern → store COO indices + value pointers
 
 Newton: evaluate_values!(pointers, params, x, t) → write directly through pointers
-        ↑ NO ALLOCATION
+        ↑ NO ALLOCATION (true zero)
 ```
 
-**Changes to precompile.jl:**
+This requires:
+1. Caching COO indices from initial build
+2. Generating a value-only evaluation function that writes directly to cached slots
+3. Skipping all structure-building code (get_node!, alloc_current!, etc.)
 
-```julia
-struct PrecompiledCircuit{T}
-    # Existing fields...
+**Estimated improvement**: 0 bytes/iter
 
-    # NEW: Pre-allocated evaluation workspace
-    eval_ctx::EvalContext{T}  # Reusable, stores G/C/b value pointers
-end
-
-# Called once during setup
-function compile_circuit(builder, params, spec)
-    ctx = builder(params, spec)  # Structure discovery
-    pattern = extract_pattern(ctx)
-    eval_ctx = EvalContext(pattern)  # Pre-allocate workspace
-    return PrecompiledCircuit(..., eval_ctx)
-end
-
-# Called every Newton iteration - ZERO ALLOCATION
-function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
-    evaluate_values!(pc.eval_ctx, pc.params, u, t)  # Write through pointers
-end
-```
-
-### Phase 2: Fix Dual Sizes at Compile Time
+### Phase 4: Compile-Time Dual Specialization
 
 The generated `stamp!` method creates Duals with inferrable but not explicit sizes:
 
 ```julia
-# Current (vasim.jl:1588) - size known but not propagated:
+# Current - size known but not propagated:
 partials_tuple = Expr(:tuple, [k == i ? 1.0 : 0.0 for k in 1:n_all_nodes]...)
 $node_sym = Dual{JacobianTag}($(Symbol("V_", i)), $partials_tuple...)
 
@@ -101,68 +98,6 @@ $node_sym = Dual{JacobianTag}($(Symbol("V_", i)), $partials_tuple...)
 $node_sym = Dual{JacobianTag,Float64,$n_all_nodes}(
     $(Symbol("V_", i)),
     Partials{$n_all_nodes,Float64}($partials_tuple))
-```
-
-### Phase 3: Aggressive Inlining for Constant Folding
-
-The current code uses runtime `isa` checks that can be constant-folded:
-
-```julia
-# Current - runtime dispatch (vasim.jl:1434-1461):
-if I_branch isa ForwardDiff.Dual{ContributionTag}
-    # has ddt
-elseif I_branch isa ForwardDiff.Dual
-    # pure resistive
-else
-    # scalar
-end
-```
-
-**With aggressive inlining, these branches constant-fold** because the type of `I_branch` is known at compile time from the contribution expression.
-
-**Fix 1**: Add `@inline` to all VA evaluation functions:
-```julia
-@inline function va_ddt(x::Real)
-    Dual{ContributionTag}(zero(x), x)
-end
-```
-
-**Fix 2**: Mark generated stamp! for forced inlining:
-```julia
-@inline function stamp!(dev::$symname, ctx, nodes...; x, t, spec)
-    # With @inline, the entire evaluation chain inlines
-    # Type inference propagates through, branches constant-fold
-end
-```
-
-### Phase 4: Value-Only Stamping Mode
-
-Add a mode where `stamp!` writes only values to pre-discovered locations:
-
-```julia
-struct VADevice{P}
-    params::P
-    # COO indices discovered at setup
-    G_indices::Vector{Tuple{Int,Int,Int}}  # (row, col, value_slot)
-    C_indices::Vector{Tuple{Int,Int,Int}}
-    b_indices::Vector{Tuple{Int,Int}}
-end
-
-# Structure discovery (called once)
-function discover_pattern!(dev::VADevice, ctx, nodes...; x, t, spec)
-    # Normal stamp! call - fills ctx COO arrays
-    stamp!(dev, ctx, nodes...; x, t, spec)
-    # Extract indices from ctx
-    dev.G_indices = extract_indices(ctx.G)
-    dev.C_indices = extract_indices(ctx.C)
-    dev.b_indices = extract_indices(ctx.b)
-end
-
-# Value evaluation (called every iteration) - ZERO ALLOCATION
-@inline function evaluate_values!(dev::VADevice, G_vals, C_vals, b_vals, x, t, spec)
-    # Generate Duals, evaluate, write to pre-indexed slots
-    # No MNAContext created!
-end
 ```
 
 ### Phase 5: GPU Ensemble Support (StaticArrays)
@@ -180,47 +115,35 @@ end
     G, C, b = vc.eval_fn(u, t, vc.params)
     return G, C, b  # All stack-allocated
 end
-
-# Residual for SciML out-of-place ODE
-function residual(u::SVector{N,T}, p::StaticVACircuit{N,T}, t) where {N,T}
-    G, C, b = evaluate(p, u, t)
-    return G * u - b  # Returns SVector (stack-allocated)
-end
 ```
 
-**Key**: `@generated` function to create Jacobian Duals backed by StaticArrays:
+## Target Architectures
 
-```julia
-@generated function create_jacobian_duals(u::SVector{N,T}) where {N,T}
-    exprs = [:(Dual{JacobianTag,T,N}(u[$i],
-               Partials{N,T}(ntuple(j -> j == $i ? one(T) : zero(T), Val($N)))))
-             for i in 1:N]
-    :(SVector{$N}($(exprs...)))
-end
-```
+| Use Case | Array Type | Formulation | Current | Target |
+|----------|------------|-------------|---------|--------|
+| CPU standard | `Vector{T}`, `SparseMatrixCSC` | In-place `f!(resid, du, u, p, t)` | 1838 B/iter | 0 B/iter |
+| GPU single | `CuArray{T}`, `CuSparseMatrixCSC` | In-place `f!(resid, du, u, p, t)` | N/A | 0 B/iter |
+| GPU ensemble | `SVector{N,T}`, `SMatrix{N,N,T}` | Out-of-place `f(u, p, t) -> SVector` | N/A | 0 B/iter |
 
-## Files to Modify
+## Files Modified/To Modify
 
-| File | Changes |
-|------|---------|
-| `src/mna/precompile.jl` | Add `EvalContext`, modify `fast_rebuild!` for value-only mode |
-| `src/vasim.jl` | Add `@inline`, explicit Dual sizes, value-only `evaluate!` |
-| `src/mna/contrib.jl` | Add `@inline` to `va_ddt()` and contribution helpers |
-
-## Expected Results
-
-| Metric | Current | After Implementation |
-|--------|---------|---------------------|
-| Bytes/iteration (simple VA) | ~2000 | 0 |
-| Bytes/iteration (BSIM4) | ~5000 | 0 |
-| GPU ensemble support | No | Yes |
+| File | Status | Changes |
+|------|--------|---------|
+| `src/mna/context.jl` | Done | Added `reset_for_restamping!()` |
+| `src/spc/codegen.jl` | Done | Builder accepts optional `ctx` parameter |
+| `src/mna/precompile.jl` | Done | Store and reuse MNAContext in PrecompiledCircuit and EvalWorkspace |
+| `src/vasim.jl` | Future | Add `@inline`, explicit Dual sizes, value-only `evaluate!` |
+| `src/mna/contrib.jl` | Future | Add `@inline` to `va_ddt()` and contribution helpers |
 
 ## Open Questions
 
-1. **Conditional contributions**: VA `if` blocks that add/remove contributions change sparsity pattern. May need worst-case pattern with zeros.
+1. **Conditional contributions**: VA `if` blocks that add/remove contributions change sparsity
+   pattern. May need worst-case pattern with zeros.
 
 2. **ddx()**: The VA `ddx()` function computes partial derivatives - may need special handling.
 
-3. **Time-dependent sources**: PWL, SIN sources change `b` vector values but not structure - fits the value-only pattern.
+3. **Time-dependent sources**: PWL, SIN sources change `b` vector values but not structure -
+   fits the value-only pattern.
 
-4. **Internal node aliasing**: Short-circuit detection currently modifies structure at runtime - needs to be part of pattern discovery.
+4. **Internal node aliasing**: Short-circuit detection currently modifies structure at runtime -
+   needs to be part of pattern discovery.

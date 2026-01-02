@@ -688,6 +688,67 @@ function reset_values!(ctx::MNAContext)
 end
 
 """
+    reset_for_restamping!(ctx::MNAContext)
+
+Reset the context for restamping at a new operating point.
+
+This is used for reduced-allocation Newton iteration. The context is fully reset
+but its internal arrays retain their allocated capacity, avoiding reallocation.
+
+The builder will recreate the node/current structure (which is fixed) and
+restamp all devices. Since the internal vectors have capacity from the previous
+build, push! operations won't allocate new memory.
+
+# Usage
+```julia
+# In PrecompiledCircuit
+ctx = pc.ctx  # stored context from initial build
+reset_for_restamping!(ctx)
+pc.builder(pc.params, pc.spec, t; x=u, ctx=ctx)  # restamps into same ctx
+```
+"""
+function reset_for_restamping!(ctx::MNAContext)
+    # Empty all arrays but preserve capacity (empty! keeps allocated memory)
+
+    # Node structure
+    empty!(ctx.node_names)
+    empty!(ctx.node_to_idx)
+    ctx.n_nodes = 0
+    empty!(ctx.internal_node_flags)
+
+    # Current variables
+    empty!(ctx.current_names)
+    ctx.n_currents = 0
+
+    # COO arrays
+    empty!(ctx.G_I)
+    empty!(ctx.G_J)
+    empty!(ctx.G_V)
+    empty!(ctx.C_I)
+    empty!(ctx.C_J)
+    empty!(ctx.C_V)
+
+    # Reset b vector to zeros (keep the allocation but resize to 0 and regrow)
+    # Note: We empty! here because the size depends on n_nodes + n_currents + n_charges
+    # which will be rebuilt
+    empty!(ctx.b)
+
+    # Deferred b stamps
+    empty!(ctx.b_I)
+    empty!(ctx.b_V)
+
+    # Charge state variables
+    empty!(ctx.charge_names)
+    ctx.n_charges = 0
+    empty!(ctx.charge_branches)
+
+    ctx.finalized = false
+    return nothing
+end
+
+export reset_for_restamping!
+
+"""
     clear!(ctx::MNAContext)
 
 Completely clear the context, removing all nodes and stamps.

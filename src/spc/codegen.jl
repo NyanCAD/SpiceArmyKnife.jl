@@ -2428,7 +2428,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
-        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!
+        using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, reset_for_restamping!
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
 
@@ -2438,8 +2438,16 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Main circuit builder
         # x is the current solution vector for nonlinear Newton iteration
         # t is simulation time (passed explicitly for zero-allocation iteration)
-        function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0; x::AbstractVector=Float64[])
-            ctx = $(MNAContext)()
+        # ctx is optional: if provided, it will be reset and reused (zero-allocation path)
+        function $(circuit_name)(params, spec::$(MNASpec), t::Real=0.0;
+                                 x::AbstractVector=Float64[],
+                                 ctx::Union{$(MNAContext), Nothing}=nothing)
+            if ctx === nothing
+                ctx = $(MNAContext)()
+            else
+                # Reuse existing context - reset for restamping while preserving structure
+                $(reset_for_restamping!)(ctx)
+            end
             $body
             return ctx
         end

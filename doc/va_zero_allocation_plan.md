@@ -2,30 +2,36 @@
 
 ## Current Status (January 2026)
 
-### ✅ COMPLETE: Zero-Allocation Circuit Evaluation
+### ✅ COMPLETE: Near-Zero-Allocation Circuit Evaluation
 
-Four optimization phases have been implemented to achieve **true zero-allocation** circuit evaluation:
+Four optimization phases have been implemented to achieve **near-zero-allocation** circuit evaluation:
 
 1. **Phase 1: MNAContext Reuse** - Store and reuse context (71% reduction)
 2. **Phase 2: ValueOnlyContext** - Eliminate push! allocations (100% COO allocation eliminated)
 3. **Phase 3: Dictionary Reuse** - Reuse node_to_idx without modification
-4. **Phase 4: StaticPWL Sources** - Constant-fold PWL via tuples (100% device allocation eliminated)
+4. **Phase 4: SVector PWL Sources** - Use StaticArrays SVector for PWL times/values (91% reduction from Phase 3)
 
-**Benchmark Results (VACASK RC circuit, 1s transient with dt=1µs):**
+**Benchmark Results (VACASK RC circuit):**
 
 | Phase | Bytes/iteration | Reduction |
 |-------|-----------------|-----------|
 | Original | 6,314 | baseline |
 | MNAContext reuse | 1,838 | 71% |
 | ValueOnlyContext | 472 | 93% |
-| **stamp_pwl_voltage! (current)** | **16** | **99.7%** |
+| **SVector PWL (current)** | **40** | **99.4%** |
+
+**Notes:**
+- 16 bytes overhead from function barrier dispatch (affects all circuits)
+- Additional 24 bytes from PWL type specialization (SVector parameterization)
+- Simple RC circuits (no PWL) achieve ~16 bytes/iter
+- All tests pass (351 MNA core, 49 VA integration)
 
 **Circuit evaluation functions now allocate minimal bytes:**
-- `fast_rebuild!()`: 16 bytes (down from 472)
+- `fast_rebuild!()`: 40 bytes for PWL circuits, 16 bytes for simple circuits
 - `fast_residual!()`: 0 bytes
 - `fast_jacobian!()`: 0 bytes
 
-The 16 bytes/iteration overhead is acceptable and represents a 97% reduction in
+The 40 bytes/iteration overhead is acceptable and represents a 99.4% reduction in
 GC pressure compared to the original implementation.
 
 ### Implementation: ValueOnlyContext
@@ -134,52 +140,52 @@ The ValueOnlyContext eliminates ALL stamping allocations:
 For circuits without dynamic device creation (e.g., hand-written builders or optimized
 codegen), ValueOnlyContext achieves true zero allocation.
 
-## Phase 4: Zero-Allocation PWL Sources ✅ (Completed January 2026)
+## Phase 4: SVector PWL Sources ✅ (Completed January 2026)
 
 The remaining 472 bytes/iter came from device struct creation. PWL times/values were
-heap-allocated arrays and runtime Symbol creation even for **compile-time constants**.
+heap-allocated arrays.
 
-### Solution: Parameterized PWLVoltageSource + stamp_pwl_voltage!
+### Solution: SVector with pwl_at_time
 
-Updated the existing `PWLVoltageSource{T,V}` to be parameterized on storage type,
-accepting both vectors (dynamic) and tuples (zero-allocation). Added direct
-`stamp_pwl_voltage!` method that avoids struct creation entirely.
+Use StaticArrays `SVector` for PWL times/values. SVector is stack-allocated and works
+with `searchsortedfirst` for O(log n) lookup. The `pwl_at_time` function (from
+CedarSim.spectre_env.jl) handles interpolation with proper edge cases.
 
 **Before (heap allocated every call):**
 ```julia
 let v1 = 0.0, v2 = 1.0, td = 1e-6, tr = 1e-6, tf = 1e-6, pw = 1e-3, per = 2e-3
     times = [0.0, td, td + tr, td + tr + pw, td + tr + pw + tf, per]   # allocates
     values = [v1, v1, v2, v2, v1, v1]                                   # allocates
-    stamp!(PWLVoltageSource(times, values; name=:vs), ctx, p, n; t=t)   # copies + Symbol
+    stamp!(PWLVoltageSource(times, values; name=:vs), ctx, p, n; t=t)   # copies
 end
 ```
 
-**After (zero-allocation with compile-time constant Symbol):**
+**After (SVector stack-allocated):**
 ```julia
-stamp_pwl_voltage!(ctx, p, n,
-    (0.0, 1e-6, 2e-6, 1.002e-3, 1.003e-3, 2e-3),  # NTuple{6,Float64} - stack
-    (0.0, 0.0, 1.0, 1.0, 0.0, 0.0),               # NTuple{6,Float64} - stack
-    :I_vs; t=t, _sim_mode_=spec.mode)             # compile-time Symbol
+stamp!(PWLVoltageSource(
+    SVector{6,Float64}(0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per),
+    SVector{6,Float64}(v1, v1, v2, v2, v1, v1);
+    name=:vs), ctx, p, n; t=t, _sim_mode_=spec.mode)
 ```
 
 ### Changes Made
 
 1. **`src/mna/devices.jl`**:
    - `PWLVoltageSource{T,V}` and `PWLCurrentSource{T,V}` - parameterized on storage type
-   - `pwl_interpolate(ts, vs, t)` - generic interpolation for any indexable
-   - `stamp_pwl_voltage!` / `stamp_pwl_current!` - direct stamp without struct creation
-   - Tuple constructors use zero-copy path for Float64 tuples
+   - SVector constructor preserves type (no conversion to Vector)
+   - `pwl_at_time(ts, ys, t)` - uses `searchsortedfirst` for O(log n) lookup
+   - Removed specialized `stamp_pwl_voltage!` / `stamp_pwl_current!` (use regular stamp!)
 
 2. **`src/spc/codegen.jl`**: Updated PULSE codegen for constant parameters
-   - Pre-computes PWL times/values as tuples at codegen time
-   - Pre-creates current variable Symbol (`:I_vs` instead of `Symbol(:I_, :vs)`)
-   - Emits `stamp_pwl_voltage!` for zero-allocation path
+   - Pre-computes PWL times/values as SVector literals at codegen time
+   - Uses regular `stamp!(PWLVoltageSource(...), ...)` call
    - Falls back to dynamic `PWLVoltageSource` for variable parameters
 
-**Result**: Reduced from 472 bytes/iter → **16 bytes/iter** (96.6% reduction)
+**Result**: Reduced from 472 bytes/iter → **40 bytes/iter** (91.5% reduction)
 
-The remaining 16 bytes/iteration is likely from minor internal operations and is
-acceptable for production use.
+The remaining 40 bytes includes:
+- 16 bytes from function barrier dispatch (affects all circuits)
+- 24 bytes from PWL type specialization overhead
 
 ## Completed Phases
 

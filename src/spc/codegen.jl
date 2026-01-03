@@ -1970,25 +1970,23 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             all_constant = all(x -> x isa Number, [v1_expr, v2_expr, td_expr, tr_expr, tf_expr, pw_expr, per_expr])
 
             if all_constant
-                # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use tuples
+                # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
                 v1, v2 = Float64(v1_expr), Float64(v2_expr)
                 td, tr, tf, pw, per = Float64(td_expr), Float64(tr_expr), Float64(tf_expr), Float64(pw_expr), Float64(per_expr)
 
-                # PWL times and values as compile-time tuples
-                times_tuple = (0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per)
-                values_tuple = (v1, v1, v2, v2, v1, v1)
-                # Pre-create current variable name (avoids runtime Symbol creation)
-                current_name = Symbol(:I_, name)
+                # PWL times and values as compile-time SVector (stack-allocated)
+                times_sv = SVector{6,Float64}(0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per)
+                values_sv = SVector{6,Float64}(v1, v1, v2, v2, v1, v1)
 
                 if is_voltage
                     return quote
-                        stamp_pwl_voltage!(ctx, $p, $n, $times_tuple, $values_tuple,
-                                           $(QuoteNode(current_name)); t=t, _sim_mode_=spec.mode)
+                        stamp!(PWLVoltageSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 else
                     return quote
-                        stamp_pwl_current!(ctx, $p, $n, $times_tuple, $values_tuple;
-                                           t=t, _sim_mode_=spec.mode)
+                        stamp!(PWLCurrentSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             else
@@ -2454,10 +2452,10 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
-        using CedarSim.MNA: stamp_pwl_voltage!, stamp_pwl_current!
         using CedarSim.MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
+        using StaticArrays
 
         # Subcircuit builders
         $(subckt_defs...)

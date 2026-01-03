@@ -14,16 +14,22 @@ concurrency:
 
 jobs:
   benchmark:
-    name: VACASK Benchmarks
+    name: VACASK Benchmarks - Julia ${{ matrix.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.11'
+          - '1.12'
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.11'
+          version: ${{ matrix.version }}
 
       - uses: julia-actions/cache@v2
 
@@ -45,6 +51,6 @@ jobs:
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
+          name: benchmark-results-julia-${{ matrix.version }}
           path: benchmark_results.md
           retention-days: 30

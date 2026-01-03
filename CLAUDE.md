@@ -13,6 +13,14 @@
 
 ## Development Guidelines
 
+### Code Modification Philosophy
+
+- **ALWAYS update existing code** - refactor and modify in place
+- **NEVER add compatibility layers** - no deprecation wrappers, no duplicate APIs
+- **NEVER create parallel implementations** - one clean API, not old + new
+- We are at early stage development where breaking changes are expected
+- If you need to change behavior, change it directly - don't preserve the old way
+
 ### MNA Backend Migration
 
 - **DO NOT maintain backward compatibility with DAECompiler**

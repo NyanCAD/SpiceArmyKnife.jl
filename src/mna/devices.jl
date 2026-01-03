@@ -140,27 +140,115 @@ end
 
 export get_source_value
 
+#==============================================================================#
+# PWL Interpolation (shared by all PWL sources)
+#==============================================================================#
+
 """
-    PWLVoltageSource
+    pwl_interpolate(ts, vs, t) -> Float64
+
+Evaluate piecewise-linear function at time t.
+Works with any indexable collection (Vector, Tuple, SVector, etc.)
+
+For small collections (typical PULSE sources have 6 points), linear scan
+is as fast as binary search due to cache locality. For larger collections,
+use searchsortedfirst for O(log n) lookup.
+
+Handles edge cases: before first point, after last point, flat segments,
+and infinitely steep segments (same time, different values).
+"""
+@inline function pwl_interpolate(ts, vs, t::Real)
+    n = length(ts)
+    n == 0 && return 0.0
+
+    # Before first point - hold first value
+    @inbounds if t <= ts[1]
+        return Float64(vs[1])
+    end
+
+    # After last point - hold last value
+    @inbounds if t >= ts[n]
+        return Float64(vs[n])
+    end
+
+    # Find interval containing t (linear scan, unrolled for small N)
+    @inbounds for i in 2:n
+        if t <= ts[i]
+            t_prev, t_curr = ts[i-1], ts[i]
+            v_prev, v_curr = vs[i-1], vs[i]
+
+            # Flat segment (same values)
+            if v_prev == v_curr
+                return Float64(v_curr)
+            end
+
+            # Infinitely steep (same time, different values) - use midpoint
+            if t_prev == t_curr
+                return Float64((v_prev + v_curr) / 2)
+            end
+
+            # Linear interpolation
+            slope = (v_curr - v_prev) / (t_curr - t_prev)
+            return Float64(v_prev + (t - t_prev) * slope)
+        end
+    end
+
+    # Fallback (shouldn't reach here if times are sorted)
+    return Float64(vs[n])
+end
+
+export pwl_interpolate
+
+#==============================================================================#
+# PWL Voltage Source
+#==============================================================================#
+
+"""
+    PWLVoltageSource{T,V}
 
 Piecewise-linear voltage source defined by time-value pairs.
 
-# Example
+Parameterized on storage type to support both heap-allocated vectors and
+stack-allocated tuples for zero-allocation operation.
+
+# Type Parameters
+- `T`: Storage type for times (e.g., Vector{Float64}, NTuple{N,Float64})
+- `V`: Storage type for values
+
+# Examples
 ```julia
-# Ramp from 0V to 5V over 1ms
+# Vector-based (for dynamic PWL data)
 pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vramp)
+
+# Tuple-based (zero allocation, for constant PWL data)
+pwl = PWLVoltageSource((0.0, 1e-3), (0.0, 5.0); name=:Vramp)
 ```
 """
-struct PWLVoltageSource
-    times::Vector{Float64}
-    values::Vector{Float64}
+struct PWLVoltageSource{T,V}
+    times::T
+    values::V
     name::Symbol
+end
 
-    function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
-        @assert length(times) == length(values) "times and values must have same length"
-        @assert issorted(times) "times must be sorted"
-        new(Float64.(times), Float64.(values), name)
-    end
+# Constructor for AbstractVector (copies to Vector{Float64})
+function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLVoltageSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
+end
+
+# Constructor for Float64 tuples (zero-copy, stack-allocated)
+@inline function PWLVoltageSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:V) where N
+    PWLVoltageSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
+end
+
+# Constructor for other Real tuples (converts to Float64)
+function PWLVoltageSource(times::NTuple{N,T1}, values::NTuple{N,T2}; name::Symbol=:V) where {N, T1<:Real, T2<:Real}
+    PWLVoltageSource{NTuple{N,Float64},NTuple{N,Float64}}(
+        ntuple(i -> Float64(times[i]), Val(N)),
+        ntuple(i -> Float64(values[i]), Val(N)),
+        name
+    )
 end
 
 export PWLVoltageSource
@@ -168,99 +256,76 @@ export PWLVoltageSource
 """
     pwl_value(src::PWLVoltageSource, t::Real) -> Float64
 
-Evaluate PWL source at time t using linear interpolation.
+Evaluate PWL voltage source at time t.
 """
-function pwl_value(src::PWLVoltageSource, t::Real)
-    ts, vs = src.times, src.values
-    n = length(ts)
+@inline pwl_value(src::PWLVoltageSource, t::Real) = pwl_interpolate(src.times, src.values, t)
 
-    # Before first point
-    if t <= ts[1]
-        return vs[1]
-    end
-
-    # After last point
-    if t >= ts[end]
-        return vs[end]
-    end
-
-    # Find interval and interpolate
-    for i in 1:(n-1)
-        if ts[i] <= t <= ts[i+1]
-            # Linear interpolation
-            dt = ts[i+1] - ts[i]
-            dv = vs[i+1] - vs[i]
-            return vs[i] + dv * (t - ts[i]) / dt
-        end
-    end
-
-    return vs[end]
-end
-
-function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        # DC: use value at t=0
-        return pwl_value(src, 0.0)
-    else
-        return pwl_value(src, t)
-    end
+@inline function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
+    mode === :dcop && return pwl_value(src, 0.0)
+    return pwl_value(src, t)
 end
 
 export pwl_value
 
+#==============================================================================#
+# PWL Current Source
+#==============================================================================#
+
 """
-    PWLCurrentSource
+    PWLCurrentSource{T,V}
 
 Piecewise-linear current source defined by time-value pairs.
 
-# Example
+Parameterized on storage type - see PWLVoltageSource for details.
+
+# Examples
 ```julia
-# Ramp from 0A to 1mA over 1ms
+# Vector-based
 pwl = PWLCurrentSource([0.0, 1e-3], [0.0, 1e-3]; name=:Iramp)
+
+# Tuple-based (zero allocation)
+pwl = PWLCurrentSource((0.0, 1e-3), (0.0, 1e-3); name=:Iramp)
 ```
 """
-struct PWLCurrentSource
-    times::Vector{Float64}
-    values::Vector{Float64}
+struct PWLCurrentSource{T,V}
+    times::T
+    values::V
     name::Symbol
+end
 
-    function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
-        @assert length(times) == length(values) "times and values must have same length"
-        @assert issorted(times) "times must be sorted"
-        new(Float64.(times), Float64.(values), name)
-    end
+# Constructor for AbstractVector
+function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLCurrentSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
+end
+
+# Constructor for Float64 tuples (zero-copy, stack-allocated)
+@inline function PWLCurrentSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:I) where N
+    PWLCurrentSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
+end
+
+# Constructor for other Real tuples (converts to Float64)
+function PWLCurrentSource(times::NTuple{N,T1}, values::NTuple{N,T2}; name::Symbol=:I) where {N, T1<:Real, T2<:Real}
+    PWLCurrentSource{NTuple{N,Float64},NTuple{N,Float64}}(
+        ntuple(i -> Float64(times[i]), Val(N)),
+        ntuple(i -> Float64(values[i]), Val(N)),
+        name
+    )
 end
 
 export PWLCurrentSource
 
-function pwl_value(src::PWLCurrentSource, t::Real)
-    ts, vs = src.times, src.values
-    n = length(ts)
+@inline pwl_value(src::PWLCurrentSource, t::Real) = pwl_interpolate(src.times, src.values, t)
 
-    if t <= ts[1]
-        return vs[1]
-    end
-    if t >= ts[end]
-        return vs[end]
-    end
-
-    for i in 1:(n-1)
-        if ts[i] <= t <= ts[i+1]
-            dt = ts[i+1] - ts[i]
-            dv = vs[i+1] - vs[i]
-            return vs[i] + dv * (t - ts[i]) / dt
-        end
-    end
-    return vs[end]
+@inline function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
+    mode === :dcop && return pwl_value(src, 0.0)
+    return pwl_value(src, t)
 end
 
-function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        return pwl_value(src, 0.0)
-    else
-        return pwl_value(src, t)
-    end
-end
+#==============================================================================#
+# Sinusoidal Sources
+#==============================================================================#
 
 """
     SinVoltageSource
@@ -907,6 +972,49 @@ function stamp!(V::PWLVoltageSource, ctx::AnyMNAContext, p::Int, n::Int;
 
     return I_idx
 end
+
+"""
+    stamp_pwl_voltage!(ctx, p::Int, n::Int, times, values, current_name::Symbol; t=0.0, _sim_mode_=:dcop)
+
+Zero-allocation PWL voltage source stamp. Takes tuples directly, no struct creation.
+The current_name must be a compile-time constant Symbol (not dynamically created).
+
+This is the preferred method for constant PULSE sources in generated code.
+"""
+@inline function stamp_pwl_voltage!(ctx::AnyMNAContext, p::Int, n::Int,
+                                     times::NTuple{N,Float64}, values::NTuple{N,Float64},
+                                     current_name::Symbol;
+                                     t::Real=0.0, _sim_mode_::Symbol=:dcop) where N
+    I_idx = alloc_current!(ctx, current_name)
+
+    stamp_G!(ctx, p, I_idx,  1.0)
+    stamp_G!(ctx, n, I_idx, -1.0)
+    stamp_G!(ctx, I_idx, p,  1.0)
+    stamp_G!(ctx, I_idx, n, -1.0)
+
+    v = _sim_mode_ === :dcop ? pwl_interpolate(times, values, 0.0) : pwl_interpolate(times, values, t)
+    stamp_b!(ctx, I_idx, v)
+
+    return I_idx
+end
+
+export stamp_pwl_voltage!
+
+"""
+    stamp_pwl_current!(ctx, p::Int, n::Int, times, values; t=0.0, _sim_mode_=:dcop)
+
+Zero-allocation PWL current source stamp. Takes tuples directly, no struct creation.
+"""
+@inline function stamp_pwl_current!(ctx::AnyMNAContext, p::Int, n::Int,
+                                     times::NTuple{N,Float64}, values::NTuple{N,Float64};
+                                     t::Real=0.0, _sim_mode_::Symbol=:dcop) where N
+    i = _sim_mode_ === :dcop ? pwl_interpolate(times, values, 0.0) : pwl_interpolate(times, values, t)
+    stamp_b!(ctx, p,  i)
+    stamp_b!(ctx, n, -i)
+    return nothing
+end
+
+export stamp_pwl_current!
 
 """
     stamp!(V::SinVoltageSource, ctx::AnyMNAContext, p::Int, n::Int; t::Real=0.0, _sim_mode_::Symbol=:dcop)

@@ -193,6 +193,10 @@ mutable struct MNAContext
     # This allows detection to run once at circuit construction, not every Newton iteration
     charge_is_vdep::Dict{Symbol, Bool}
 
+    # Order of charge detection calls (for ValueOnlyContext counter-based access)
+    # Populated by detect_or_cached! in the order calls are made
+    charge_is_vdep_order::Vector{Symbol}
+
     # Track if system has been finalized
     finalized::Bool
 end
@@ -223,6 +227,7 @@ function MNAContext()
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
         Dict{Symbol,Bool}(), # charge_is_vdep (detection cache)
+        Symbol[],           # charge_is_vdep_order (insertion order for value-only mode)
         false               # finalized
     )
 end
@@ -803,6 +808,8 @@ function clear!(ctx::MNAContext)
     empty!(ctx.charge_names)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
+    empty!(ctx.charge_is_vdep)
+    empty!(ctx.charge_is_vdep_order)
     ctx.finalized = false
     return nothing
 end

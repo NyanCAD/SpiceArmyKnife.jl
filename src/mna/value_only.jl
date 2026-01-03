@@ -66,10 +66,19 @@ mutable struct ValueOnlyContext{T}
     # Current index counter (for alloc_current!)
     current_pos::Int
 
+    # Charge index counter (for alloc_charge!)
+    charge_pos::Int
+
     # Expected sizes for assertions
     n_G::Int
     n_C::Int
     n_b_deferred::Int
+
+    # Charge detection cache (for VA devices with voltage-dependent capacitance)
+    # Baked from MNAContext.charge_is_vdep Dict at create_value_only_context time
+    # Uses counter-based access to maintain execution order consistency
+    charge_is_vdep::Vector{Bool}
+    charge_detection_pos::Int
 end
 
 """
@@ -79,12 +88,23 @@ Create a ValueOnlyContext from a completed MNAContext.
 
 The original context's structure is captured, and value arrays are
 sized appropriately for subsequent value-only rebuilds.
+
+Charge detection results from the MNAContext's Dict are copied to a Vector
+in the order they were inserted (tracked by charge_is_vdep_order).
+This ensures counter-based access during value-only rebuilds matches
+the original detection order.
 """
 function create_value_only_context(ctx::MNAContext)
     n_G = length(ctx.G_V)
     n_C = length(ctx.C_V)
     n_b = length(ctx.b)
     n_b_deferred = length(ctx.b_V)
+
+    # Copy charge detection results from Dict to Vector in insertion order
+    # The order is tracked by charge_is_vdep_order during the first build.
+    # During value-only rebuilds, we access by position counter which matches
+    # the execution order of detect_or_cached! calls.
+    charge_is_vdep_vec = Bool[ctx.charge_is_vdep[name] for name in ctx.charge_is_vdep_order]
 
     ValueOnlyContext{Float64}(
         ctx.node_to_idx,
@@ -94,9 +114,12 @@ function create_value_only_context(ctx::MNAContext)
         Vector{Float64}(undef, n_C),     # C_V
         zeros(Float64, n_b),             # b (needs zeros for accumulation)
         Vector{Float64}(undef, n_b_deferred), # b_V
-        1, 1, 1,                         # positions
+        1, 1, 1,                         # positions (G_pos, C_pos, b_deferred_pos)
         1,                               # current_pos
-        n_G, n_C, n_b_deferred
+        1,                               # charge_pos
+        n_G, n_C, n_b_deferred,
+        charge_is_vdep_vec,              # charge detection cache (in insertion order)
+        1                                # charge_detection_pos
     )
 end
 
@@ -114,6 +137,8 @@ Zero allocation operation.
     vctx.C_pos = 1
     vctx.b_deferred_pos = 1
     vctx.current_pos = 1
+    vctx.charge_pos = 1
+    vctx.charge_detection_pos = 1
 
     # Zero b vector for accumulation
     fill!(vctx.b, zero(T))
@@ -145,6 +170,19 @@ end
 @inline get_node!(vctx::ValueOnlyContext, idx::Int) = idx
 
 """
+    alloc_internal_node!(vctx::ValueOnlyContext, name::Symbol) -> Int
+
+Return the index of an internal node in value-only mode.
+The node must already exist from the first build.
+"""
+@inline function alloc_internal_node!(vctx::ValueOnlyContext, name::Symbol)::Int
+    # Internal nodes should already be in node_to_idx from first build
+    @inbounds return vctx.node_to_idx[name]
+end
+
+@inline alloc_internal_node!(vctx::ValueOnlyContext, name::String) = alloc_internal_node!(vctx, Symbol(name))
+
+"""
     alloc_current!(vctx::ValueOnlyContext, name::Symbol) -> CurrentIndex
 
 Return the next current index in value-only mode.
@@ -157,6 +195,21 @@ No actual allocation - just returns sequential indices.
 end
 
 @inline alloc_current!(vctx::ValueOnlyContext, name::String) = alloc_current!(vctx, Symbol(name))
+
+"""
+    alloc_charge!(vctx::ValueOnlyContext, name::Symbol, p::Int, n::Int) -> ChargeIndex
+
+Return the next charge index in value-only mode.
+No actual allocation - just returns sequential indices.
+The charge structure is fixed from the first build.
+"""
+@inline function alloc_charge!(vctx::ValueOnlyContext, name::Symbol, p::Int, n::Int)::ChargeIndex
+    pos = vctx.charge_pos
+    vctx.charge_pos = pos + 1
+    return ChargeIndex(pos)
+end
+
+@inline alloc_charge!(vctx::ValueOnlyContext, name::String, p::Int, n::Int) = alloc_charge!(vctx, Symbol(name), p, n)
 
 """
     stamp_G!(vctx::ValueOnlyContext, i, j, val)

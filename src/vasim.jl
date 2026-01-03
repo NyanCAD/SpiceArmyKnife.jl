@@ -1558,7 +1558,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         push!(branch_stamp.args, quote
             if has_reactive
                 # Get cached voltage dependence result (populated by detection_block)
-                _is_voltage_dependent = Base.get(ctx.charge_is_vdep, $charge_name_expr, false)
+                # Uses get_is_vdep helper which works for both MNAContext and ValueOnlyContext
+                _is_voltage_dependent = CedarSim.MNA.get_is_vdep(ctx, $charge_name_expr)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)
@@ -1887,8 +1888,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # Terminal nodes come from function parameters; internal nodes are allocated dynamically
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
+    # NOTE: ctx accepts AnyMNAContext (MNAContext or ValueOnlyContext) for zero-allocation mode
     quote
-        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
+        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
                                      $([:($np::Int) for np in node_params]...);
                                      _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
@@ -1924,6 +1926,9 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Run voltage-dependent charge detection (with plain Float64 values)
             # Results are cached in ctx.charge_is_vdep for later use in stamp_code
             $detection_block
+
+            # Reset detection counter for stamp_code phase (ValueOnlyContext uses counter-based access)
+            CedarSim.MNA.reset_detection_counter!(ctx)
 
             # Create duals with partials for each node voltage (terminals + internal)
             # dual[i] = Dual(V_i, (k==1 ? 1 : 0), (k==2 ? 1 : 0), ...)
@@ -1967,6 +1972,7 @@ function make_mna_module(va::VANode)
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
         using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+        using ..CedarSim.MNA: AnyMNAContext, get_is_vdep, reset_detection_counter!  # For ValueOnlyContext support
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename

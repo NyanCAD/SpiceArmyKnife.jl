@@ -203,10 +203,62 @@ end
     # First time: run detection via finite-difference (comparing C at two voltages)
     result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
     cache[name] = result
+    # Track insertion order for ValueOnlyContext counter-based access
+    push!(ctx.charge_is_vdep_order, name)
     return result
 end
 
+"""
+    detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+
+Counter-based lookup of cached charge detection result for value-only mode.
+
+In value-only mode, detection results were already computed during the first build
+and copied to a Vector. This method simply returns the cached result using counter-based
+access to maintain execution order consistency.
+
+The `name`, `contrib_fn`, `Vp`, and `Vn` parameters are ignored - they're kept for API
+compatibility with the MNAContext version.
+"""
+@inline function detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
+    pos = vctx.charge_detection_pos
+    vctx.charge_detection_pos = pos + 1
+    # Return cached result (detection was done during first build)
+    return @inbounds vctx.charge_is_vdep[pos]
+end
+
 export detect_or_cached!
+
+"""
+    get_is_vdep(ctx::MNAContext, name::Symbol) -> Bool
+
+Get cached voltage-dependent charge detection result by name.
+Used in generated stamp code to check if a branch has voltage-dependent capacitance.
+"""
+@inline get_is_vdep(ctx::MNAContext, name::Symbol)::Bool = get(ctx.charge_is_vdep, name, false)
+
+"""
+    get_is_vdep(vctx::ValueOnlyContext, name::Symbol) -> Bool
+
+Counter-based lookup of cached charge detection result for value-only mode.
+The name parameter is ignored - uses position counter for O(1) access.
+"""
+@inline function get_is_vdep(vctx::ValueOnlyContext, name::Symbol)::Bool
+    pos = vctx.charge_detection_pos
+    vctx.charge_detection_pos = pos + 1
+    return @inbounds vctx.charge_is_vdep[pos]
+end
+
+"""
+    reset_detection_counter!(ctx)
+
+Reset the charge detection counter for the stamping phase.
+Called between detection_block and stamp_code in generated VA stamp methods.
+"""
+@inline reset_detection_counter!(::MNAContext) = nothing  # No-op for MNAContext (uses Dict)
+@inline reset_detection_counter!(vctx::ValueOnlyContext) = (vctx.charge_detection_pos = 1; nothing)
+
+export get_is_vdep, reset_detection_counter!
 
 """
     va_ddt(x)

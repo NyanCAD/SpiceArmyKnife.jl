@@ -51,6 +51,7 @@ mutable struct ValueOnlyContext{T}
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
     n_currents::Int
+    n_charges::Int  # Number of charge state variables
 
     # Pre-sized value arrays
     G_V::Vector{T}
@@ -66,10 +67,18 @@ mutable struct ValueOnlyContext{T}
     # Current index counter (for alloc_current!)
     current_pos::Int
 
+    # Charge index counter (for alloc_charge!)
+    charge_pos::Int
+
     # Expected sizes for assertions
     n_G::Int
     n_C::Int
     n_b_deferred::Int
+
+    # Charge detection results (baked from MNAContext during compilation)
+    # This Dict is populated once and never modified, enabling zero-allocation
+    # lookups during value-only stamping. Uses the same Symbol keys as MNAContext.
+    charge_is_vdep::Dict{Symbol,Bool}
 end
 
 """
@@ -86,17 +95,25 @@ function create_value_only_context(ctx::MNAContext)
     n_b = length(ctx.b)
     n_b_deferred = length(ctx.b_V)
 
+    # Copy the charge detection results from MNAContext
+    # This Dict is populated during the first build and never modified,
+    # so subsequent lookups don't allocate.
+    charge_is_vdep_copy = copy(ctx.charge_is_vdep)
+
     ValueOnlyContext{Float64}(
         ctx.node_to_idx,
         ctx.n_nodes,
         ctx.n_currents,
+        ctx.n_charges,                   # n_charges
         Vector{Float64}(undef, n_G),     # G_V
         Vector{Float64}(undef, n_C),     # C_V
         zeros(Float64, n_b),             # b (needs zeros for accumulation)
         Vector{Float64}(undef, n_b_deferred), # b_V
         1, 1, 1,                         # positions
         1,                               # current_pos
-        n_G, n_C, n_b_deferred
+        1,                               # charge_pos
+        n_G, n_C, n_b_deferred,
+        charge_is_vdep_copy              # baked charge detection results
     )
 end
 
@@ -114,6 +131,7 @@ Zero allocation operation.
     vctx.C_pos = 1
     vctx.b_deferred_pos = 1
     vctx.current_pos = 1
+    vctx.charge_pos = 1
 
     # Zero b vector for accumulation
     fill!(vctx.b, zero(T))
@@ -157,6 +175,35 @@ No actual allocation - just returns sequential indices.
 end
 
 @inline alloc_current!(vctx::ValueOnlyContext, name::String) = alloc_current!(vctx, Symbol(name))
+
+"""
+    alloc_internal_node!(vctx::ValueOnlyContext, name::Symbol) -> Int
+
+Fast internal node lookup in value-only mode.
+Internal nodes must already exist from the first build.
+"""
+@inline function alloc_internal_node!(vctx::ValueOnlyContext, name::Symbol)::Int
+    # Ground check
+    (name === :gnd || name === Symbol("0") || name === Symbol("gnd!")) && return 0
+    # Direct lookup - node must exist from first build
+    @inbounds return vctx.node_to_idx[name]
+end
+
+@inline alloc_internal_node!(vctx::ValueOnlyContext, name::String) = alloc_internal_node!(vctx, Symbol(name))
+
+"""
+    alloc_charge!(vctx::ValueOnlyContext, name::Symbol, p::Int, n::Int) -> ChargeIndex
+
+Return the next charge index in value-only mode.
+No actual allocation - just returns sequential indices.
+"""
+@inline function alloc_charge!(vctx::ValueOnlyContext, name::Symbol, p::Int, n::Int)::ChargeIndex
+    pos = vctx.charge_pos
+    vctx.charge_pos = pos + 1
+    return ChargeIndex(pos)
+end
+
+@inline alloc_charge!(vctx::ValueOnlyContext, name::String, p::Int, n::Int) = alloc_charge!(vctx, Symbol(name), p, n)
 
 """
     stamp_G!(vctx::ValueOnlyContext, i, j, val)

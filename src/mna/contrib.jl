@@ -206,6 +206,20 @@ end
     return result
 end
 
+"""
+    detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+
+Value-only mode: lookup cached result from baked Dict (no detection).
+
+In value-only mode, the charge detection results were already computed during
+the first build and are stored in the ValueOnlyContext. This method simply
+looks up the cached result without running the actual detection.
+"""
+@inline function detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
+    # Just lookup the cached result - detection already happened in first build
+    return get(vctx.charge_is_vdep, name, false)
+end
+
 export detect_or_cached!
 
 """

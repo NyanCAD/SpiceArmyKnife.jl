@@ -1888,7 +1888,7 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # NOTE: Using _mna_*_ prefixes to avoid conflicts with VA parameter/variable names
     # (e.g., PSP103 has 'x', some models have 't', 'mode' is a common parameter name)
     quote
-        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.MNAContext,
+        function CedarSim.MNA.stamp!(dev::$symname, ctx::CedarSim.MNA.AnyMNAContext,
                                      $([:($np::Int) for np in node_params]...);
                                      _mna_t_::Real=0.0, _mna_mode_::Symbol=:dcop, _mna_x_::AbstractVector=CedarSim.MNA.ZERO_VECTOR,
                                      _mna_spec_::CedarSim.MNA.MNASpec=CedarSim.MNA.MNASpec(),
@@ -1962,11 +1962,12 @@ function make_mna_module(va::VANode)
 
     Expr(:toplevel, :(baremodule $s
         using Base: AbstractVector, Real, Symbol, Float64, Int, String, isempty, max, zeros, zero, length
-        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs
+        using Base: hasproperty, getproperty, getfield, error, !==, iszero, abs, get
         import Base  # For getproperty override in aliasparam
         import ..CedarSim
         using ..CedarSim.VerilogAEnvironment
         using ..CedarSim.MNA: va_ddt, stamp_current_contribution!, MNAContext, MNASpec, alloc_internal_node!, alloc_current!, ZERO_VECTOR
+        using ..CedarSim.MNA: AnyMNAContext, ValueOnlyContext, detect_or_cached!
         using ForwardDiff: Dual, value, partials
         import ForwardDiff
         export $typename

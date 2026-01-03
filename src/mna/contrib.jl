@@ -266,6 +266,19 @@ end
 export decompose_branch, decompose_voltage_contrib, get_partial, extract_scalar
 
 """
+    extract_scalar(x) -> Float64
+
+Extract the underlying scalar Float64 value from a potentially nested Dual.
+Recursively unwraps all dual layers.
+
+This is similar to the existing `extract_value` but with clearer semantics
+for the contribution extraction use case.
+"""
+@inline extract_scalar(x::Float64) = x
+@inline extract_scalar(x::T) where {T<:Real} = Float64(x)
+@inline extract_scalar(x::Dual) = extract_scalar(value(x))
+
+"""
     decompose_branch(x) -> (I_val, I_resist, q_val, I_react, has_reactive)
 
 Decompose a branch current value into its components using method dispatch.
@@ -304,7 +317,8 @@ end
 @inline function decompose_branch(x::Dual{JacobianTag,T,N}) where {T,N}
     # Pure resistive: JacobianTag dual only (no ddt)
     # I_resist is the dual itself for partial extraction
-    (Float64(value(x)), x, 0.0, 0.0, false)
+    # Use extract_scalar to handle nested duals (e.g., from OrdinaryDiffEq's autodiff)
+    (extract_scalar(value(x)), x, 0.0, 0.0, false)
 end
 
 @inline function decompose_branch(x::Dual{ContributionTag,Dual{JacobianTag,T,N},1}) where {T,N}
@@ -312,19 +326,20 @@ end
     # This is the nested dual case: Dual{ContributionTag}(I_resist_dual, q_dual)
     I_resist = value(x)::Dual{JacobianTag,T,N}
     I_react = partials(x, 1)::Dual{JacobianTag,T,N}
-    (Float64(value(I_resist)), I_resist, Float64(value(I_react)), I_react, true)
+    # Use extract_scalar to handle nested duals
+    (extract_scalar(value(I_resist)), I_resist, extract_scalar(value(I_react)), I_react, true)
 end
 
 @inline function decompose_branch(x::Dual{ContributionTag,T,1}) where {T<:Real}
     # Has ddt with scalar inner value (no Jacobian tracking)
     q = partials(x, 1)
-    (Float64(value(x)), value(x), Float64(q), q, true)
+    (extract_scalar(value(x)), value(x), extract_scalar(q), q, true)
 end
 
 # Catch-all for other Dual types (e.g., external sensitivity tags)
 @inline function decompose_branch(x::Dual{Tag,T,N}) where {Tag,T,N}
     # Unknown tag - treat as pure resistive and extract value recursively
-    (Float64(value(x)), x, 0.0, 0.0, false)
+    (extract_scalar(value(x)), x, 0.0, 0.0, false)
 end
 
 """
@@ -350,24 +365,26 @@ end
 
 @inline function decompose_voltage_contrib(x::Dual{JacobianTag,T,N}) where {T,N}
     # Pure resistive voltage dual
-    (Float64(value(x)), x, 0.0, false)
+    # Use extract_scalar to handle nested duals
+    (extract_scalar(value(x)), x, 0.0, false)
 end
 
 @inline function decompose_voltage_contrib(x::Dual{ContributionTag,Dual{JacobianTag,T,N},1}) where {T,N}
     # Has ddt: nested dual
     V_resist = value(x)::Dual{JacobianTag,T,N}
     V_react = partials(x, 1)::Dual{JacobianTag,T,N}
-    (Float64(value(V_resist)), V_resist, Float64(value(V_react)), true)
+    # Use extract_scalar to handle nested duals
+    (extract_scalar(value(V_resist)), V_resist, extract_scalar(value(V_react)), true)
 end
 
 @inline function decompose_voltage_contrib(x::Dual{ContributionTag,T,1}) where {T<:Real}
     # Has ddt with scalar inner
-    (Float64(value(x)), value(x), Float64(partials(x, 1)), true)
+    (extract_scalar(value(x)), value(x), extract_scalar(partials(x, 1)), true)
 end
 
 @inline function decompose_voltage_contrib(x::Dual{Tag,T,N}) where {Tag,T,N}
     # Unknown tag - extract value
-    (Float64(value(x)), x, 0.0, false)
+    (extract_scalar(value(x)), x, 0.0, false)
 end
 
 """
@@ -383,25 +400,13 @@ dI_dVk = I_resist isa ForwardDiff.Dual ? ForwardDiff.partials(I_resist, k) : 0.0
 """
 @inline get_partial(::Float64, ::Val{K}) where {K} = 0.0
 @inline get_partial(x::T, ::Val{K}) where {T<:Real,K} = 0.0
-@inline get_partial(x::Dual{Tag,T,N}, ::Val{K}) where {Tag,T,N,K} = Float64(partials(x, K))
+# Use extract_scalar to handle nested duals (e.g., from OrdinaryDiffEq's autodiff)
+@inline get_partial(x::Dual{Tag,T,N}, ::Val{K}) where {Tag,T,N,K} = extract_scalar(partials(x, K))
 
 # Non-Val version for dynamic indices (still type-stable via the dual type)
 @inline get_partial(::Float64, ::Int) = 0.0
 @inline get_partial(x::T, ::Int) where {T<:Real} = 0.0
-@inline get_partial(x::Dual{Tag,T,N}, k::Int) where {Tag,T,N} = Float64(partials(x, k))
-
-"""
-    extract_scalar(x) -> Float64
-
-Extract the underlying scalar Float64 value from a potentially nested Dual.
-Recursively unwraps all dual layers.
-
-This is similar to the existing `extract_value` but with clearer semantics
-for the contribution extraction use case.
-"""
-@inline extract_scalar(x::Float64) = x
-@inline extract_scalar(x::T) where {T<:Real} = Float64(x)
-@inline extract_scalar(x::Dual) = extract_scalar(value(x))
+@inline get_partial(x::Dual{Tag,T,N}, k::Int) where {Tag,T,N} = extract_scalar(partials(x, k))
 
 #==============================================================================#
 # Contribution Evaluation and Stamping

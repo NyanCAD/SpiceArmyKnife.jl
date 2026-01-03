@@ -593,3 +593,81 @@ detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp, Vn)
 ```
 
 This maintains API compatibility while allowing zero-allocation operation
+
+---
+
+## VA ValueOnlyContext Implementation (January 2026)
+
+### ✅ COMPLETE: VA Devices Now Support ValueOnlyContext
+
+Changes made to enable ValueOnlyContext for VA-generated stamp! methods:
+
+1. **`src/vasim.jl`**:
+   - Updated stamp! method signature: `ctx::MNAContext` → `ctx::AnyMNAContext`
+   - Added `AnyMNAContext, ValueOnlyContext, detect_or_cached!` imports to generated module
+   - Added `contains_va_ddt(expr)` helper for future compile-time detection
+
+2. **`src/mna/value_only.jl`**:
+   - Added `charge_is_vdep::Dict{Symbol,Bool}` for baked charge detection results
+   - Added `n_charges::Int` and `charge_pos::Int` counter for charge allocation
+   - Added `alloc_internal_node!` and `alloc_charge!` methods for ValueOnlyContext
+
+3. **`src/mna/contrib.jl`**:
+   - Added `detect_or_cached!(vctx::ValueOnlyContext, ...)` method that looks up cached results
+
+### Benchmark Results
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| supports_value_only_mode | false | true | ✅ Enabled |
+| fast_rebuild! bytes | 12,730 | 8,960 | 30% reduction |
+| fast_rebuild! allocs | 598 | 341 | 43% reduction |
+
+### Remaining Allocation Sources
+
+Profiling with `Profile.Allocs` shows remaining allocations from:
+
+1. **ForwardDiff Dual arithmetic** (~70% of remaining allocations)
+   - `value()`, `partials()` extraction
+   - `+`, `-`, `*` operations on nested Duals
+
+2. **Runtime type checks** cause type instability
+   ```julia
+   if I_branch isa ForwardDiff.Dual{ContributionTag}  # Type unknown → boxing
+       I_resist = value(I_branch)  # Box allocated for result
+   ```
+
+3. **Symbol construction** for dynamic node names
+
+### Why Compile-Time ddt Detection Doesn't Work
+
+The `contains_va_ddt(expr)` helper checks if an AST contains `va_ddt` calls. However,
+this is insufficient because ddt results can flow through variables:
+
+```verilog
+// Verilog-A source:
+DIOcapCurrent = ddt(DIOcapCharge);  // Creates Dual{ContributionTag}
+load_cd = load_cd + DIOcapCurrent;   // Propagates dual through variable
+cdeq = load_cd;                      // Variable binding
+I(a_int) <+ ... + cdeq;              // Contribution uses derived value
+```
+
+The contribution expression `... + cdeq` doesn't syntactically contain `va_ddt`,
+but semantically it does because `cdeq` derives from a ddt result.
+
+Proper detection would require data-flow analysis tracking which variables contain
+dual values from ddt. This is beyond simple AST analysis.
+
+### Path to True Zero-Allocation
+
+To eliminate the remaining ~9KB/iteration allocations, we would need:
+
+1. **Type-specialized stamp! methods**: Generate separate methods for:
+   - Pure resistive devices (no ddt anywhere) → `Dual{JacobianTag}`
+   - Reactive devices (has ddt) → `Dual{ContributionTag, Dual{JacobianTag}}`
+
+2. **Data-flow tracking**: During VA translation, track which variables are
+   "tainted" by ddt results, then use that to select the appropriate stamp! method.
+
+3. **Generated functions for builder inlining**: As described in Phase 5 of this document,
+   use `@generated function` to inline the entire builder, eliminating dynamic dispatch

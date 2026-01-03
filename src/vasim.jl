@@ -1266,6 +1266,32 @@ For n-terminal devices with internal nodes, we use a vector-valued dual approach
 - `to_julia`: MNAScope for code translation
 - `short_circuits`: Dict mapping internal_node => (external, condition) for node aliasing
 """
+
+"""
+    contains_va_ddt(expr) -> Bool
+
+Check if an expression contains a `va_ddt` call (compile-time analysis).
+
+This allows generating specialized code paths at codegen time based on whether
+a contribution has reactive (ddt) components, avoiding runtime type checks
+that cause type instability and allocations.
+"""
+function contains_va_ddt(expr)
+    if expr isa Expr
+        if expr.head == :call && length(expr.args) >= 1
+            # Check if this is a va_ddt call
+            f = expr.args[1]
+            if f === :va_ddt || (f isa Expr && f.head == :. &&
+                length(f.args) >= 2 && f.args[end] == QuoteNode(:va_ddt))
+                return true
+            end
+        end
+        # Recursively check all arguments
+        return any(contains_va_ddt, expr.args)
+    end
+    return false
+end
+
 function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes, params_to_locals,
                                           local_var_decls, function_defs, contributions,
                                           to_julia, short_circuits=Dict{Symbol, NamedTuple}())
@@ -1486,6 +1512,10 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             )
         end)
 
+        # Generate stamping code with runtime type checks
+        # Note: Compile-time detection of ddt is insufficient because ddt results can
+        # flow through variables (e.g., cdeq = load_cd where load_cd derives from ddt).
+        # Runtime isa checks are necessary to handle this data flow.
         branch_stamp = quote
             # Evaluate the branch current
             I_branch = $sum_expr

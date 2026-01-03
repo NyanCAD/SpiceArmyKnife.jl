@@ -444,39 +444,53 @@ and a Dict doesn't fit the value-only paradigm anyway (dynamic allocation, hash 
 
 ### Proper Fix: Index-Based Charge Detection
 
-Instead of `Dict{Symbol,Bool}`, use a statically-sized tuple or vector indexed by
-branch number. During codegen, each branch with `ddt()` gets a unique index.
+Keep the mutable Dict in MNAContext for first-build detection, then bake results into
+a static tuple for ValueOnlyContext. Use the **same index** for both stamping and
+charge detection lookup.
 
-**Codegen change (vasim.jl):**
+**Key insight:** The branch index used for COO stamping (1, 2, 3, ...) can also index
+into the charge detection results. No need for Symbol-based lookup.
+
+**First build (MNAContext):**
 ```julia
-# Instead of:
-_is_vdep = detect_or_cached!(ctx, :Q_branch1, contrib_fn, Vp, Vn)
-
-# Generate:
-_is_vdep = is_charge_vdep(ctx, 1)  # Branch index 1
+# Detection runs with Dict (flexible, mutable)
+_is_vdep = detect_or_cached!(ctx, branch_idx, contrib_fn, Vp, Vn)
+# Stores: ctx.charge_is_vdep[branch_idx] = result
 ```
 
-**Context storage:**
+**Compilation (create ValueOnlyContext):**
 ```julia
-# In CompiledStructure (immutable, computed once):
-charge_is_vdep::NTuple{N,Bool}  # or SVector{N,Bool}
+# Convert Dict to static tuple, ordered by branch index
+charge_tuple = ntuple(i -> get(ctx.charge_is_vdep, i, false), n_branches)
 
-# In ValueOnlyContext (reference to compiled structure):
-charge_is_vdep::NTuple{N,Bool}  # Copy or reference
+# ValueOnlyContext stores the baked tuple
+vctx = ValueOnlyContext{Float64, typeof(charge_tuple)}(
+    ...,
+    charge_tuple,  # NTuple{N,Bool} - statically sized
+)
+```
 
-# Lookup is trivial:
-@inline is_charge_vdep(ctx, i::Int) = ctx.charge_is_vdep[i]
+**Value-only builds:**
+```julia
+# stamp! method specialized on ValueOnlyContext{T, NTuple{N,Bool}}
+# Compiler can inline the tuple lookup
+@inline is_charge_vdep(vctx::ValueOnlyContext, i::Int) = vctx.charge_is_vdep[i]
+
+# Generated stamp code uses same index for both:
+_is_vdep = is_charge_vdep(ctx, branch_idx)  # O(1) indexed lookup
+# ... stamp at position branch_idx ...
 ```
 
 **Implementation steps:**
 
-1. **Codegen (vasim.jl):** Assign each branch a unique index during stamp method generation
-2. **First build (MNAContext):** Run detection, store results in indexed structure
-3. **Compilation:** Copy detection results to `CompiledStructure.charge_is_vdep`
-4. **Value-only builds:** `ValueOnlyContext` holds reference, indexed lookup is O(1)
+1. **Codegen (vasim.jl):** Assign each branch a sequential index (1, 2, 3, ...)
+2. **MNAContext:** Keep Dict for detection, but key by index not Symbol
+3. **create_value_only_context():** Convert Dict → NTuple, parameterize ValueOnlyContext
+4. **stamp! methods:** Use `is_charge_vdep(ctx, idx)` that dispatches on context type
 5. **Update VA stamp! signature** to accept `AnyMNAContext`
 
 This approach:
-- Eliminates Dict allocation and hash lookup
-- Is GPU-friendly (no dynamic allocation)
-- Maintains consistent stamp structure between first build and value-only rebuilds
+- MNAContext keeps Dict for flexible first-build detection
+- ValueOnlyContext gets baked NTuple - zero allocation, O(1) lookup
+- Same index for stamping and detection - no Symbol overhead
+- Tuple is a type parameter → compiler can specialize and inline

@@ -568,9 +568,8 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             probe = Symbol(item.args[1].item)
             # Use node_order for partial index (duals indexed by port position)
             id_idx = findfirst(==(probe), to_julia.node_order)
-            # Use get_partial for inlined method dispatch instead of runtime isa check
             return :(let x = $(to_julia(stmt.args[1].item))
-                CedarSim.MNA.get_partial(x, $id_idx)
+                isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id_idx)) : 0.0
             end)
         else
             probe1 = Symbol(item.args[1].item)
@@ -580,10 +579,9 @@ function (to_julia::MNAScope)(stmt::VANode{FunctionCall})
             # ∂expr/∂V(a,b) = (∂expr/∂V_a - ∂expr/∂V_b) / 2
             # This works because V(a,b) = V_a - V_b, so:
             # ∂expr/∂V_a = ∂expr/∂V(a,b) and ∂expr/∂V_b = -∂expr/∂V(a,b)
-            # Use get_partial for inlined method dispatch instead of runtime isa checks
             return :(let x = $(to_julia(stmt.args[1].item)),
-                        dx1 = CedarSim.MNA.get_partial(x, $id1_idx),
-                        dx2 = CedarSim.MNA.get_partial(x, $id2_idx)
+                        dx1 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id1_idx)) : 0.0,
+                        dx2 = isa(x, Dual) ? @inbounds(ForwardDiff.partials(x, $id2_idx)) : 0.0
                 (dx1 - dx2) / 2
             end)
         end
@@ -883,8 +881,7 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
                 # Allocate branch current (idempotent - returns existing index if already allocated)
                 let I_var = CedarSim.MNA.alloc_current!(ctx, Symbol(_mna_instance_, "_", $I_alloc_name_suffix))
                     v_contrib_raw = $expr
-                    # Use extract_scalar for inlined method dispatch instead of runtime isa check
-                    v_val = CedarSim.MNA.extract_scalar(v_contrib_raw)
+                    v_val = v_contrib_raw isa ForwardDiff.Dual ? ForwardDiff.value(v_contrib_raw) : Float64(v_contrib_raw)
 
                     # Stamp proper MNA voltage source:
                     # - KCL at p: current I flows out → G[p, I] = 1
@@ -914,11 +911,10 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
 
     # Build the Jacobian extraction code - extract from the INNER JacobianTag Dual
     # When I_branch is Dual{ContributionTag, Dual{JacobianTag}}, we need value(I_branch) first
-    # Use get_partial for inlined method dispatch instead of runtime isa checks
     jac_extract_code = Any[]
     for k in 1:n_nonground
         dI_dVk = Symbol("dI_dV", k)
-        push!(jac_extract_code, :($dI_dVk = CedarSim.MNA.get_partial(I_resist, $k)))
+        push!(jac_extract_code, :($dI_dVk = I_resist isa ForwardDiff.Dual ? ForwardDiff.partials(I_resist, $k) : 0.0))
     end
 
     # Build Jacobian stamping code
@@ -948,13 +944,25 @@ function (to_julia::MNAScope)(cs::VANode{ContributionStatement})
 
     # For contributions inside conditionals, we evaluate and stamp inline with full Jacobian
     # Handle nested Duals: ContributionTag wraps JacobianTag when ddt() is used
-    # Use decompose_branch for inlined method dispatch instead of runtime isa checks
     return quote
         # Contribution I($p_sym, $n_sym) <+ ...
         let I_branch = $expr
             # Extract value and the resistive Dual (for Jacobian extraction)
-            # Uses method dispatch instead of runtime isa checks
-            (I_val, I_resist, _q_val, _I_react, _has_reactive) = CedarSim.MNA.decompose_branch(I_branch)
+            # ContributionTag wraps the JacobianTag Dual - we need to unwrap it
+            local I_resist
+            if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                # Has ddt: ContributionTag outer, JacobianTag inner
+                I_resist = ForwardDiff.value(I_branch)  # Inner Dual{JacobianTag}
+                I_val = ForwardDiff.value(I_resist)
+            elseif I_branch isa ForwardDiff.Dual
+                # Pure resistive: just voltage dual (JacobianTag)
+                I_resist = I_branch
+                I_val = ForwardDiff.value(I_branch)
+            else
+                # Scalar result
+                I_resist = I_branch
+                I_val = Float64(I_branch)
+            end
 
             # Extract Jacobian partials from the resistive Dual (JacobianTag)
             $(jac_extract_code...)
@@ -1482,16 +1490,37 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             # Evaluate the branch current
             I_branch = $sum_expr
 
-            # Decompose using method dispatch instead of runtime isa checks
-            # This allows the compiler to inline the correct method based on type
-            # Returns: (I_val, I_resist, q_val, I_react, has_reactive)
-            (I_val, I_resist, q_val, I_react, has_reactive) = CedarSim.MNA.decompose_branch(I_branch)
+            if I_branch isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                # Has ddt: ContributionTag wraps JacobianTag duals
+                I_resist = ForwardDiff.value(I_branch)       # Dual{JacobianTag} for I and ∂I/∂V
+                I_react = ForwardDiff.partials(I_branch, 1)  # Dual{JacobianTag} for q and ∂q/∂V
 
-            # Extract resistive Jacobian partials using get_partial (inlined method dispatch)
-            $([:($(Symbol("dI_dV", k)) = CedarSim.MNA.get_partial(I_resist, $k)) for k in 1:n_all_nodes]...)
+                # Extract resistive values (JacobianTag partials are plain floats)
+                I_val = ForwardDiff.value(I_resist)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_resist, $k)) for k in 1:n_all_nodes]...)
 
-            # Extract charge Jacobian partials using get_partial on the reactive dual
-            $([:($(Symbol("dq_dV", k)) = CedarSim.MNA.get_partial(I_react, $k)) for k in 1:n_all_nodes]...)
+                # Extract charge value and capacitances
+                q_val = ForwardDiff.value(I_react)
+                $([:($(Symbol("dq_dV", k)) = ForwardDiff.partials(I_react, $k)) for k in 1:n_all_nodes]...)
+
+                has_reactive = true
+
+            elseif I_branch isa ForwardDiff.Dual
+                # Pure resistive: just JacobianTag dual, no ContributionTag
+                I_val = ForwardDiff.value(I_branch)
+                $([:($(Symbol("dI_dV", k)) = ForwardDiff.partials(I_branch, $k)) for k in 1:n_all_nodes]...)
+                q_val = 0.0
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                has_reactive = false
+
+            else
+                # Scalar result (constant contribution)
+                I_val = Float64(I_branch)
+                $([:($(Symbol("dI_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                q_val = 0.0
+                $([:($(Symbol("dq_dV", k)) = 0.0) for k in 1:n_all_nodes]...)
+                has_reactive = false
+            end
         end
 
         # Stamp resistive Jacobians into G matrix
@@ -1772,18 +1801,29 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
             CedarSim.MNA.stamp_G!(ctx, $I_var, $p_node, 1.0)
             CedarSim.MNA.stamp_G!(ctx, $I_var, $n_node, -1.0)
 
-            # Handle reactive (ddt) contributions using method dispatch
-            # decompose_voltage_contrib returns (V_val, V_resist, V_react, has_reactive)
-            (V_resist_val, _V_resist, V_react_val, has_reactive) = CedarSim.MNA.decompose_voltage_contrib(V_contrib)
+            # Handle reactive (ddt) contributions
+            if V_contrib isa ForwardDiff.Dual{CedarSim.MNA.ContributionTag}
+                # Contains ddt() terms
+                V_resist = ForwardDiff.value(V_contrib)
+                V_react = ForwardDiff.partials(V_contrib, 1)
 
-            # Stamp RHS with resistive voltage
-            CedarSim.MNA.stamp_b!(ctx, $I_var, V_resist_val)
+                # V_resist is the resistive voltage part (e.g., R*I)
+                # V_react is the reactive coefficient (e.g., L from L*ddt(I) = L*s*I)
+                V_resist_val = V_resist isa ForwardDiff.Dual ? ForwardDiff.value(V_resist) : Float64(V_resist)
+                V_react_val = V_react isa ForwardDiff.Dual ? ForwardDiff.value(V_react) : Float64(V_react)
 
-            # Stamp C matrix for reactive part if present: V = L*dI/dt
-            # Voltage equation: V_p - V_n - L*dI/dt = 0
-            # This stamps -L into C[I_var, I_var]
-            if has_reactive
+                # Stamp RHS with resistive voltage
+                CedarSim.MNA.stamp_b!(ctx, $I_var, V_resist_val)
+
+                # Stamp C matrix for reactive part: V = L*dI/dt
+                # Voltage equation: V_p - V_n - L*dI/dt = 0
+                # This stamps -L into C[I_var, I_var]
+                # Always stamp - we're inside ContributionTag branch so device has ddt()
                 CedarSim.MNA.stamp_C!(ctx, $I_var, $I_var, -V_react_val)
+            else
+                # Pure resistive voltage
+                V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
+                CedarSim.MNA.stamp_b!(ctx, $I_var, V_val)
             end
         end
 
@@ -1818,8 +1858,8 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                 # Evaluate voltage contribution
                 V_contrib = $sum_expr
 
-                # Extract scalar value using method dispatch instead of runtime isa check
-                V_val = CedarSim.MNA.extract_scalar(V_contrib)
+                # Extract scalar value from dual if needed
+                V_val = V_contrib isa ForwardDiff.Dual ? ForwardDiff.value(V_contrib) : Float64(V_contrib)
 
                 # Stamp KCL: current I flows from p to n
                 if $p_node != 0

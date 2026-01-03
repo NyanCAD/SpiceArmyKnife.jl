@@ -555,7 +555,7 @@ end
 
                 stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
-                       ctx, vgate, 0; t=t, _sim_mode_=spec.mode)
+                       ctx, vgate, 0, t, spec.mode)
                 stamp!(sp_resistor(; r=params.Rd), ctx, vdd, vdrain; _mna_spec_=spec, _mna_x_=x)
                 stamp!(sp_mos1(; vto=1.0, kp=1e-4),
                        ctx, vdrain, vgate, 0, 0; _mna_x_=x, _mna_spec_=spec)
@@ -584,7 +584,7 @@ end
 
                 stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vb),
-                       ctx, vbase, 0; t=t, _sim_mode_=spec.mode)
+                       ctx, vbase, 0, t, spec.mode)
                 stamp!(sp_resistor(; r=params.Rc), ctx, vcc, vcollector; _mna_spec_=spec, _mna_x_=x)
                 stamp!(sp_bjt(; bf=100.0),
                        ctx, vcollector, vbase, 0, 0; _mna_x_=x, _mna_spec_=spec)
@@ -628,7 +628,7 @@ end
                 vout = get_node!(ctx, :vout)
 
                 stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
-                       ctx, vin, 0; t=t, _sim_mode_=spec.mode)
+                       ctx, vin, 0, t, spec.mode)
                 stamp!(sp_diode(; is=1e-14, cjo=10e-12, m=0.5, vj=0.7),
                        ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
                 stamp!(Resistor(params.R), ctx, vout, 0)
@@ -678,7 +678,7 @@ end
 
                 stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
                 stamp!(SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vg),
-                       ctx, vgate, 0; t=t, _sim_mode_=spec.mode)
+                       ctx, vgate, 0, t, spec.mode)
                 stamp!(Resistor(params.Rd), ctx, vdd, vdrain)
                 stamp!(sp_mos1(; l=1e-6, w=10e-6, vto=0.7, kp=1e-4,
                                cgso=1e-12, cgdo=0.5e-12),
@@ -724,7 +724,7 @@ end
                 vout = get_node!(ctx, :vout)
 
                 stamp!(SinVoltageSource(0.0, params.Vamp, params.freq; name=:Vin),
-                       ctx, vin, 0; t=t, _sim_mode_=spec.mode)
+                       ctx, vin, 0, t, spec.mode)
                 stamp!(sp_diode(; is=1e-14, cjo=5e-12, m=0.5),
                        ctx, vin, vout; _mna_x_=x, _mna_spec_=spec)
                 stamp!(Capacitor(params.C), ctx, vout, 0)

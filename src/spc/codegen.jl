@@ -1954,7 +1954,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
         elseif fname == :pulse
             # PULSE source: pulse(v1 v2 td tr tf pw period)
-            # For now, implement as PWL approximation
+            # Implement as PWL approximation
             vals = [cg_expr!(state, v) for v in tran_source.values]
             n_vals = length(vals)
 
@@ -1966,26 +1966,51 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             pw_expr = n_vals >= 6 ? vals[6] : 1e-3
             per_expr = n_vals >= 7 ? vals[7] : 2e-3
 
-            if is_voltage
-                # Generate pulse as PWL for one period
-                return quote
-                    let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
-                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
-                        # PWL approximation of pulse for first period
-                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
-                        values = [v1, v1, v2, v2, v1, v1]
-                        stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+            # Check if all parameters are numeric constants (for zero-allocation StaticPWL)
+            all_constant = all(x -> x isa Number, [v1_expr, v2_expr, td_expr, tr_expr, tf_expr, pw_expr, per_expr])
+
+            if all_constant
+                # ZERO-ALLOCATION PATH: Compute PWL points at compile time, use SVector
+                v1, v2 = Float64(v1_expr), Float64(v2_expr)
+                td, tr, tf, pw, per = Float64(td_expr), Float64(tr_expr), Float64(tf_expr), Float64(pw_expr), Float64(per_expr)
+
+                # PWL times and values as compile-time SVector (stack-allocated)
+                times_sv = SVector{6,Float64}(0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per)
+                values_sv = SVector{6,Float64}(v1, v1, v2, v2, v1, v1)
+
+                if is_voltage
+                    return quote
+                        stamp!(PWLVoltageSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                    end
+                else
+                    return quote
+                        stamp!(PWLCurrentSource($times_sv, $values_sv; name=$(QuoteNode(Symbol(name)))),
+                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
                     end
                 end
             else
-                return quote
-                    let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
-                        tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
-                        times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
-                        values = [i1, i1, i2, i2, i1, i1]
-                        stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                if is_voltage
+                    return quote
+                        let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            # PWL approximation of pulse for first period
+                            times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                            values = [v1, v1, v2, v2, v1, v1]
+                            stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                        end
+                    end
+                else
+                    return quote
+                        let i1 = $v1_expr, i2 = $v2_expr, td = $td_expr,
+                            tr = $tr_expr, tf = $tf_expr, pw = $pw_expr, per = $per_expr
+                            times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
+                            values = [i1, i1, i2, i2, i1, i1]
+                            stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
+                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                        end
                     end
                 end
             end
@@ -2430,6 +2455,7 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         using CedarSim.MNA: MNAContext, MNASpec, ValueOnlyContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
+        using StaticArrays
 
         # Subcircuit builders
         $(subckt_defs...)

@@ -14,6 +14,62 @@
 # - VCVS, VCCS: voltage-controlled sources
 #==============================================================================#
 
+using StaticArrays: SVector
+
+#==============================================================================#
+# PWL Interpolation (from CedarSim.spectre_env.jl)
+# Included here because MNA is loaded before spectre_env.jl
+#==============================================================================#
+
+"""
+    find_t_in_ts(ts, t) -> Int
+
+Find the index in sorted array `ts` where `t` would be inserted.
+Uses searchsortedfirst for O(log n) lookup on SVector.
+"""
+@inline function find_t_in_ts(ts, t)
+    idx = Base.searchsortedfirst(ts, t)
+    if idx <= length(ts) && ts[idx] == t
+        return idx + 1
+    end
+    return idx
+end
+
+"""
+    pwl_at_time(ts, ys, t) -> value
+
+Evaluate piecewise-linear function at time t.
+Works with SVector (uses searchsortedfirst for O(log n) lookup).
+
+Handles edge cases: before first point, after last point, flat segments,
+and infinitely steep segments (same time, different values).
+"""
+@inline function pwl_at_time(ts, ys, t)
+    i = find_t_in_ts(ts, t)
+    type_stable_time = 0.0 * t  # Preserves type (e.g., ForwardDiff.Dual)
+    if i <= 1
+        # Signal is before the first timepoint, hold the first value.
+        @inbounds return ys[1] + type_stable_time
+    end
+    if i > length(ts)
+        # Signal is beyond the final timepoint, hold the final value.
+        @inbounds return ys[end] + type_stable_time
+    end
+    @inbounds begin
+        if ys[i-1] == ys[i]
+            # signal is constant/flat (singularity in y)
+            return ys[i] + type_stable_time
+        end
+        if ts[i] == ts[i-1]
+            # signal is infinitely steep (singularity in t)
+            return (ys[i-1] + ys[i])/2 + type_stable_time
+        end
+        # The general case: linear interpolation
+        slope = (ys[i] - ys[i-1])/(ts[i] - ts[i-1])
+        return ys[i-1] + (t - ts[i-1])*slope
+    end
+end
+
 export stamp!
 export Resistor, Capacitor, Inductor
 export VoltageSource, CurrentSource
@@ -140,27 +196,59 @@ end
 
 export get_source_value
 
+#==============================================================================#
+# PWL Voltage Source
+#==============================================================================#
+
 """
-    PWLVoltageSource
+    PWLVoltageSource{T,V}
 
 Piecewise-linear voltage source defined by time-value pairs.
 
-# Example
+Parameterized on storage type to support both heap-allocated vectors and
+stack-allocated tuples for zero-allocation operation.
+
+# Type Parameters
+- `T`: Storage type for times (e.g., Vector{Float64}, NTuple{N,Float64})
+- `V`: Storage type for values
+
+# Examples
 ```julia
-# Ramp from 0V to 5V over 1ms
+# Vector-based (for dynamic PWL data)
 pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vramp)
+
+# Tuple-based (zero allocation, for constant PWL data)
+pwl = PWLVoltageSource((0.0, 1e-3), (0.0, 5.0); name=:Vramp)
 ```
 """
-struct PWLVoltageSource
-    times::Vector{Float64}
-    values::Vector{Float64}
+struct PWLVoltageSource{T,V}
+    times::T
+    values::V
     name::Symbol
+end
 
-    function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
-        @assert length(times) == length(values) "times and values must have same length"
-        @assert issorted(times) "times must be sorted"
-        new(Float64.(times), Float64.(values), name)
-    end
+# Constructor for regular vectors (copies to Vector{Float64})
+function PWLVoltageSource(times::Vector, values::Vector; name::Symbol=:V)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLVoltageSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
+end
+
+# Constructor for SVector (zero-copy, preserves type for zero-allocation)
+@inline function PWLVoltageSource(times::SVector{N,Float64}, values::SVector{N,Float64}; name::Symbol=:V) where N
+    PWLVoltageSource{SVector{N,Float64},SVector{N,Float64}}(times, values, name)
+end
+
+# Constructor for Float64 tuples (zero-copy, stack-allocated)
+@inline function PWLVoltageSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:V) where N
+    PWLVoltageSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
+end
+
+# Fallback for other AbstractVector (converts to Vector{Float64})
+function PWLVoltageSource(times::AbstractVector, values::AbstractVector; name::Symbol=:V)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLVoltageSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
 end
 
 export PWLVoltageSource
@@ -168,99 +256,81 @@ export PWLVoltageSource
 """
     pwl_value(src::PWLVoltageSource, t::Real) -> Float64
 
-Evaluate PWL source at time t using linear interpolation.
+Evaluate PWL voltage source at time t.
 """
-function pwl_value(src::PWLVoltageSource, t::Real)
-    ts, vs = src.times, src.values
-    n = length(ts)
-
-    # Before first point
-    if t <= ts[1]
-        return vs[1]
-    end
-
-    # After last point
-    if t >= ts[end]
-        return vs[end]
-    end
-
-    # Find interval and interpolate
-    for i in 1:(n-1)
-        if ts[i] <= t <= ts[i+1]
-            # Linear interpolation
-            dt = ts[i+1] - ts[i]
-            dv = vs[i+1] - vs[i]
-            return vs[i] + dv * (t - ts[i]) / dt
-        end
-    end
-
-    return vs[end]
+@inline function pwl_value(src::PWLVoltageSource, t::Real)
+    pwl_at_time(src.times, src.values, t)
 end
 
-function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        # DC: use value at t=0
-        return pwl_value(src, 0.0)
-    else
-        return pwl_value(src, t)
-    end
+@inline function get_source_value(src::PWLVoltageSource, t::Real, mode::Symbol)
+    mode === :dcop && return pwl_value(src, 0.0)
+    return pwl_value(src, t)
 end
 
 export pwl_value
 
+#==============================================================================#
+# PWL Current Source
+#==============================================================================#
+
 """
-    PWLCurrentSource
+    PWLCurrentSource{T,V}
 
 Piecewise-linear current source defined by time-value pairs.
 
-# Example
+Parameterized on storage type - see PWLVoltageSource for details.
+
+# Examples
 ```julia
-# Ramp from 0A to 1mA over 1ms
+# Vector-based
 pwl = PWLCurrentSource([0.0, 1e-3], [0.0, 1e-3]; name=:Iramp)
+
+# Tuple-based (zero allocation)
+pwl = PWLCurrentSource((0.0, 1e-3), (0.0, 1e-3); name=:Iramp)
 ```
 """
-struct PWLCurrentSource
-    times::Vector{Float64}
-    values::Vector{Float64}
+struct PWLCurrentSource{T,V}
+    times::T
+    values::V
     name::Symbol
+end
 
-    function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
-        @assert length(times) == length(values) "times and values must have same length"
-        @assert issorted(times) "times must be sorted"
-        new(Float64.(times), Float64.(values), name)
-    end
+# Constructor for regular vectors (copies to Vector{Float64})
+function PWLCurrentSource(times::Vector, values::Vector; name::Symbol=:I)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLCurrentSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
+end
+
+# Constructor for SVector (zero-copy, preserves type for zero-allocation)
+@inline function PWLCurrentSource(times::SVector{N,Float64}, values::SVector{N,Float64}; name::Symbol=:I) where N
+    PWLCurrentSource{SVector{N,Float64},SVector{N,Float64}}(times, values, name)
+end
+
+# Constructor for Float64 tuples (zero-copy, stack-allocated)
+@inline function PWLCurrentSource(times::NTuple{N,Float64}, values::NTuple{N,Float64}; name::Symbol=:I) where N
+    PWLCurrentSource{NTuple{N,Float64},NTuple{N,Float64}}(times, values, name)
+end
+
+# Fallback for other AbstractVector (converts to Vector{Float64})
+function PWLCurrentSource(times::AbstractVector, values::AbstractVector; name::Symbol=:I)
+    @assert length(times) == length(values) "times and values must have same length"
+    @assert issorted(times) "times must be sorted"
+    PWLCurrentSource{Vector{Float64},Vector{Float64}}(Float64.(times), Float64.(values), name)
 end
 
 export PWLCurrentSource
 
-function pwl_value(src::PWLCurrentSource, t::Real)
-    ts, vs = src.times, src.values
-    n = length(ts)
+@inline pwl_value(src::PWLCurrentSource, t::Real) = pwl_at_time(src.times, src.values, t)
 
-    if t <= ts[1]
-        return vs[1]
-    end
-    if t >= ts[end]
-        return vs[end]
-    end
-
-    for i in 1:(n-1)
-        if ts[i] <= t <= ts[i+1]
-            dt = ts[i+1] - ts[i]
-            dv = vs[i+1] - vs[i]
-            return vs[i] + dv * (t - ts[i]) / dt
-        end
-    end
-    return vs[end]
+@inline function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
+    mode === :dcop && return pwl_value(src, 0.0)
+    return pwl_value(src, t)
 end
 
-function get_source_value(src::PWLCurrentSource, t::Real, mode::Symbol)
-    if mode == :dcop
-        return pwl_value(src, 0.0)
-    else
-        return pwl_value(src, t)
-    end
-end
+#==============================================================================#
+# Sinusoidal Sources
+#==============================================================================#
 
 """
     SinVoltageSource

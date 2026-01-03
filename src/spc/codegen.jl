@@ -1911,13 +1911,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                 times_exprs = [:($(t)) for t in times_vals]
                 values_exprs = [:($(v)) for v in value_vals]
 
+                # Use positional arguments for zero-allocation
                 if is_voltage
                     return quote
                         stamp!(PWLVoltageSource(
                             $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
                             name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                            ctx, $p, $n, t, spec.mode)
                     end
                 else
                     return quote
@@ -1925,11 +1926,12 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             $(StaticArrays).SVector{$n_points,Float64}($(times_exprs...)),
                             $(StaticArrays).SVector{$n_points,Float64}($(values_exprs...));
                             name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                            ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                # Still use positional arguments to minimize overhead
                 if is_voltage
                     return quote
                         let vals = [$(vals...)]
@@ -1937,7 +1939,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
@@ -1947,7 +1949,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = vals[1:2:end]
                             values = vals[2:2:end]
                             stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 end
@@ -1966,13 +1968,14 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
             theta_expr = n_vals >= 5 ? vals[5] : 0.0
             phase_expr = n_vals >= 6 ? vals[6] : 0.0
 
+            # Use positional arguments for zero-allocation
             if is_voltage
                 return quote
                     let vo = $vo_expr, va = $va_expr, freq = $freq_expr,
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinVoltageSource(vo, va, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
@@ -1981,7 +1984,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                         td = $td_expr, theta = $theta_expr, phase = $phase_expr
                         stamp!(SinCurrentSource(io, ia, freq; td=td, theta=theta, phase=phase,
                                                 name=$(QuoteNode(Symbol(name)))),
-                               ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                               ctx, $p, $n, t, spec.mode)
                     end
                 end
             end
@@ -2014,24 +2017,27 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
 
                 if is_voltage
                     # Build SVector expression inside quote to avoid serialization issues
+                    # Use positional arguments for zero-allocation
                     return quote
                         stamp!(PWLVoltageSource(
                             $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
                             $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
                             name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                            ctx, $p, $n, t, spec.mode)
                     end
                 else
+                    # Use positional arguments for zero-allocation
                     return quote
                         stamp!(PWLCurrentSource(
                             $(StaticArrays).SVector{6,Float64}($t0, $t1, $t2, $t3, $t4, $t5),
                             $(StaticArrays).SVector{6,Float64}($v_1, $v_2, $v_3, $v_4, $v_5, $v_6);
                             name=$(QuoteNode(Symbol(name)))),
-                            ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                            ctx, $p, $n, t, spec.mode)
                     end
                 end
             else
                 # FALLBACK PATH: Dynamic arrays (allocates per iteration)
+                # Still use positional arguments to minimize overhead
                 if is_voltage
                     return quote
                         let v1 = $v1_expr, v2 = $v2_expr, td = $td_expr,
@@ -2040,7 +2046,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [v1, v1, v2, v2, v1, v1]
                             stamp!(PWLVoltageSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 else
@@ -2050,7 +2056,7 @@ function cg_mna_instance!(state::CodegenState, instance::SNode{<:Union{SP.Voltag
                             times = [0.0, td, td+tr, td+tr+pw, td+tr+pw+tf, per]
                             values = [i1, i1, i2, i2, i1, i1]
                             stamp!(PWLCurrentSource(times, values; name=$(QuoteNode(Symbol(name)))),
-                                   ctx, $p, $n; t=t, _sim_mode_=spec.mode)
+                                   ctx, $p, $n, t, spec.mode)
                         end
                     end
                 end

@@ -79,7 +79,7 @@ const r_val_pwl = 2
         # PWL: 0->0 at 1ms, 0->i_max at 9ms
         times = [1e-3, 9e-3]
         values = [0.0, Float64(i_max)]
-        stamp!(PWLCurrentSource(times, values; name=:I), ctx, vout, 0; t=t, _sim_mode_=spec.mode)
+        stamp!(PWLCurrentSource(times, values; name=:I), ctx, vout, 0, t, spec.mode)
         stamp!(Resistor(Float64(r_val_pwl); name=:R), ctx, vout, 0)
         return ctx
     end
@@ -195,7 +195,7 @@ const ω_val = 1
         vout = get_node!(ctx, :vout)
 
         # SIN source: V(t) = sin(ω*t)
-        stamp!(SinVoltageSource(0.0, 1.0, ω_val/2π; name=:V), ctx, vin, 0; t=t, _sim_mode_=spec.mode)
+        stamp!(SinVoltageSource(0.0, 1.0, ω_val/2π; name=:V), ctx, vin, 0, t, spec.mode)
         stamp!(Inductor(L1_val; name=:L1), ctx, vin, n1)
         stamp!(Capacitor(C2_val; name=:C2), ctx, n1, 0)
         stamp!(Inductor(L3_val; name=:L3), ctx, n1, vout)

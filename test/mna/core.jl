@@ -1858,7 +1858,7 @@ using VerilogAParser
         vcc = get_node!(ctx, :vcc)
 
         pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
-        stamp!(pwl, ctx, vcc, 0; t=0.5e-3, _sim_mode_=:tran)
+        stamp!(pwl, ctx, vcc, 0, 0.5e-3, :tran)
 
         sys = assemble!(ctx)
         sol = solve_dc(sys)
@@ -1872,7 +1872,7 @@ using VerilogAParser
 
         sin_src = SinVoltageSource(0.0, 5.0, 1000.0; name=:Vsin)
         # At t=0.25ms, sin = 5*sin(90°) = 5
-        stamp!(sin_src, ctx2, vcc2, 0; t=0.25e-3, _sim_mode_=:tran)
+        stamp!(sin_src, ctx2, vcc2, 0, 0.25e-3, :tran)
 
         sys2 = assemble!(ctx2)
         sol2 = solve_dc(sys2)
@@ -1894,7 +1894,7 @@ using VerilogAParser
                 [0.0, params.Vmax];
                 name=:Vpwl
             )
-            stamp!(pwl, ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
+            stamp!(pwl, ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
@@ -1934,7 +1934,7 @@ using VerilogAParser
                 params.vo, params.va, params.freq;
                 name=:Vsin
             )
-            stamp!(sin_src, ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
+            stamp!(sin_src, ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 
@@ -1987,7 +1987,7 @@ using VerilogAParser
 
             # SIN source: DC offset + AC amplitude at given frequency
             stamp!(SinVoltageSource(params.vo, params.va, params.freq; name=:Vin),
-                   ctx, vcc, 0; t=t, _sim_mode_=spec.mode)
+                   ctx, vcc, 0, t, spec.mode)
             stamp!(Resistor(params.R), ctx, vcc, out)
             stamp!(Capacitor(params.C), ctx, out, 0)
 

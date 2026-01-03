@@ -494,3 +494,102 @@ This approach:
 - ValueOnlyContext gets baked NTuple - zero allocation, O(1) lookup
 - Same index for stamping and detection - no Symbol overhead
 - Tuple is a type parameter → compiler can specialize and inline
+
+### Internal Node Indexing Investigation (January 2026)
+
+The user raised a concern: "we have to be a bit careful because we defer branch indices
+because internal nodes can create new ones and invalidate them, so we need to make sure
+we use the index as compiled rather than the reference."
+
+**Investigation findings:**
+
+1. **Current charge name approach uses Symbols, not indices:**
+   ```julia
+   # vasim.jl:1452-1453
+   charge_name_suffix = QuoteNode(Symbol(symname, "_Q_", p_sym, "_", n_sym))
+   charge_name_expr = :(_mna_instance_ == Symbol("") ? $charge_name_suffix : ...)
+   ```
+   The charge name is built from port SYMBOLS (p_sym, n_sym) and module name - these are
+   STABLE because they come from VA module definition, not runtime node indices.
+
+2. **Internal node indices are allocated at runtime:**
+   ```julia
+   # vasim.jl:1677
+   $int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
+   ```
+   The index returned depends on allocation ORDER. Different execution orders would
+   yield different indices.
+
+3. **Counter-based approach is safe:**
+   The `ValueOnlyContext` already uses counter-based access for:
+   - `alloc_current!`: Returns sequential CurrentIndex(pos++)
+   - `stamp_G!`: Writes to G_V[G_pos++]
+   - `stamp_C!`: Writes to C_V[C_pos++]
+
+   These work because **execution order is deterministic** - the same builder function
+   always executes stamps in the same sequence.
+
+**Key insight:** We don't need to map Symbol → index. We use the same counter-based
+approach as `alloc_current!`:
+
+```julia
+# MNAContext: detection stores results sequentially
+mutable struct MNAContext
+    charge_is_vdep::Vector{Bool}  # Results in detection order
+    charge_detection_pos::Int     # Counter (advanced by each detect_or_cached!)
+end
+
+# ValueOnlyContext: lookup by same position counter
+mutable struct ValueOnlyContext{T,N}
+    charge_is_vdep::NTuple{N,Bool}  # Baked from Vector
+    charge_detection_pos::Int        # Counter (reset each rebuild)
+end
+
+# Unified interface - works for both:
+@inline function detect_or_cached!(ctx::MNAContext, contrib_fn, Vp, Vn)::Bool
+    pos = ctx.charge_detection_pos
+    ctx.charge_detection_pos = pos + 1
+    # Check if already detected
+    if pos <= length(ctx.charge_is_vdep)
+        return ctx.charge_is_vdep[pos]
+    end
+    # First time: run detection
+    result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
+    push!(ctx.charge_is_vdep, result)
+    return result
+end
+
+@inline function detect_or_cached!(vctx::ValueOnlyContext{T,N}, contrib_fn, Vp, Vn)::Bool where {T,N}
+    pos = vctx.charge_detection_pos
+    vctx.charge_detection_pos = pos + 1
+    return @inbounds vctx.charge_is_vdep[pos]  # Just lookup, no detection
+end
+```
+
+**Why this is safe:**
+1. Detection calls happen in DETERMINISTIC order (same builder = same order)
+2. The counter tracks position, not a Symbol→index mapping
+3. Internal node indices don't affect the counter (it counts detection calls, not nodes)
+4. The baked NTuple preserves the same order as the Vector
+
+**What changes from current design:**
+1. Remove `charge_name_expr` argument from `detect_or_cached!` (not needed)
+2. Use `Vector{Bool}` instead of `Dict{Symbol,Bool}` in MNAContext
+3. Add position counter field to both context types
+4. Generated code calls `detect_or_cached!(ctx, contrib_fn, Vp, Vn)` without name
+
+**Alternative: Keep Symbol names, resolve at stamping time**
+
+If we need to preserve Symbol-based identification for debugging:
+```julia
+# Keep Symbol for MNAContext (debugging, error messages)
+detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp, Vn)
+
+# ValueOnlyContext ignores name, uses counter
+detect_or_cached!(vctx::ValueOnlyContext, name::Symbol, contrib_fn, Vp, Vn)
+    # name parameter ignored - just for API compatibility
+    pos = vctx.charge_detection_pos
+    ...
+```
+
+This maintains API compatibility while allowing zero-allocation operation

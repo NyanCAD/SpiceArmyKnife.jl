@@ -2435,7 +2435,7 @@ function codegen_mna_subcircuit(sema::SemaResult, subckt_name::Symbol,
     builder_name = Symbol(subckt_name, "_mna_builder")
 
     return quote
-        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::$(MNAContext), $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
+        function $(builder_name)(lens, spec::$(MNASpec), t::Real, ctx::Union{$(MNAContext), $(DirectStampContext)}, $(port_args...), parent_params, x, _mna_prefix_::Symbol=Symbol(""); $(param_kwargs...))
             # Map ports to internal names
             $(port_mappings...)
             # Make parent_params available for default expression evaluation

@@ -6,8 +6,9 @@
 #
 # Benchmark target: High complexity digital circuit
 #
-# Note: Uses Sundials IDA (variable-order BDF) with dtmax to enforce fixed
-# timesteps. IDA uses our explicit Jacobian for optimal performance.
+# Note: Uses Sundials IDA (variable-order BDF) with adaptive stepping.
+# IDA uses our explicit Jacobian for optimal performance. reltol is tuned
+# to match VACASK's tran_lteratio=1.5 for ~1000 timepoints.
 #==============================================================================#
 
 using CedarSim
@@ -46,32 +47,31 @@ eval(circuit_code)
     setup_simulation()
 
 Create and return a fully-prepared MNACircuit ready for transient analysis.
-This separates problem setup from solve time for accurate benchmarking.
 """
 function setup_simulation()
     circuit = MNACircuit(c6288_circuit)
-    # Perform DC operating point to initialize the circuit
     MNA.assemble!(circuit)
     return circuit
 end
 
-function run_benchmark(; dtmax=2e-12)
+function run_benchmark(; reltol=1e-3)
     tspan = (0.0, 2e-9)  # 2ns simulation (same as ngspice)
 
-    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
+    # Use Sundials IDA (variable-order BDF) with adaptive stepping.
     # IDA uses our explicit Jacobian for optimal performance.
+    # reltol is tuned to match VACASK's tran_lteratio=1.5 (~1000 timepoints)
     solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with IDA (dtmax=$dtmax)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with IDA (reltol=$reltol)...")
+    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver)
+    sol = tran!(circuit, tspan; solver=solver, reltol=reltol)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))

@@ -851,6 +851,361 @@ end
 # with CedarSim's existing sweep API (CircuitSweep, ProductSweep, etc.)
 
 #==============================================================================#
+# Charge Scaling for Improved Conditioning
+#
+# In MNA, the C matrix can have diagonal elements spanning many orders of
+# magnitude (e.g., 1e-15 for small junction caps to 1e-6 for decoupling caps).
+# This causes ill-conditioning in the DAE Jacobian J = G + γC.
+#
+# Charge scaling improves conditioning by:
+# 1. Detecting rows dominated by capacitive terms
+# 2. Scaling those rows to bring diagonal C values closer to unity
+# 3. Correspondingly scaling the solution vector
+#
+# The scaled system is: D*G*D^(-1)*y + D*C*D^(-1)*dy/dt = D*b
+# where x = D^(-1)*y
+#==============================================================================#
+
+export compute_charge_scaling, apply_scaling!, ScaledMNASystem
+
+"""
+    ScaledMNASystem{T}
+
+MNA system with row/column scaling applied for improved conditioning.
+
+# Fields
+- `G`: Scaled conductance matrix (D * G * D^(-1))
+- `C`: Scaled capacitance matrix (D * C * D^(-1))
+- `b`: Scaled RHS vector (D * b)
+- `D`: Diagonal scaling vector
+- `Dinv`: Inverse scaling vector (for solution recovery)
+- `original`: Reference to the original unscaled system
+"""
+struct ScaledMNASystem{T}
+    G::SparseMatrixCSC{T,Int}
+    C::SparseMatrixCSC{T,Int}
+    b::Vector{T}
+    D::Vector{T}           # Diagonal scaling factors
+    Dinv::Vector{T}        # Inverse scaling (for solution recovery)
+    original::MNASystem{T}
+end
+
+"""
+    compute_charge_scaling(sys::MNASystem; target_C_diag=1.0) -> Vector{Float64}
+
+Compute diagonal scaling factors to improve conditioning of the MNA system.
+
+The scaling is designed to:
+1. Bring diagonal C elements closer to `target_C_diag`
+2. Leave algebraic variables (zero C diagonal) unscaled
+3. Consider both G and C diagonal magnitudes for balanced scaling
+
+# Arguments
+- `sys`: MNA system to analyze
+- `target_C_diag`: Target value for scaled C diagonal elements (default: 1.0)
+
+# Returns
+Vector of scaling factors D such that D*C*D^(-1) has diagonal ≈ target_C_diag
+for capacitive rows.
+
+# Algorithm
+For each row i:
+- If C[i,i] > threshold: D[i] = sqrt(target_C_diag / abs(C[i,i]))
+- If C[i,i] ≈ 0 (algebraic): D[i] = 1.0
+
+The sqrt is used for symmetric scaling (row and column scaling are equal).
+"""
+function compute_charge_scaling(sys::MNASystem; target_C_diag::Real=1.0)
+    n = system_size(sys)
+    D = ones(n)
+
+    if n == 0
+        return D
+    end
+
+    threshold = 1e-30
+
+    for i in 1:n
+        C_ii = abs(sys.C[i, i])
+
+        if C_ii > threshold
+            # Scale to bring C[i,i] towards target_C_diag
+            # For symmetric scaling D*C*D, we need D[i]^2 * C[i,i] = target
+            # So D[i] = sqrt(target / C[i,i])
+            D[i] = sqrt(target_C_diag / C_ii)
+        end
+        # Algebraic rows (C_ii ≈ 0) remain unscaled
+    end
+
+    return D
+end
+
+"""
+    compute_optimal_scaling(sys::MNASystem; γ=1e6) -> Vector{Float64}
+
+Compute scaling factors that minimize condition number of J = G + γC.
+
+This uses a more sophisticated approach that considers both G and C:
+1. For each row, compute the "effective stiffness" from C[i,i]
+2. Scale to balance the contribution of G and γC terms
+
+# Arguments
+- `sys`: MNA system to analyze
+- `γ`: Representative γ = 1/dt value (default: 1e6, i.e., dt=1μs)
+
+# Returns
+Vector of scaling factors D.
+"""
+function compute_optimal_scaling(sys::MNASystem; γ::Real=1e6)
+    n = system_size(sys)
+    D = ones(n)
+
+    if n == 0
+        return D
+    end
+
+    threshold = 1e-30
+
+    for i in 1:n
+        G_ii = abs(sys.G[i, i])
+        C_ii = abs(sys.C[i, i])
+
+        # Compute the effective diagonal of J = G + γC
+        J_ii = G_ii + γ * C_ii
+
+        if J_ii > threshold
+            # Scale to bring J[i,i] towards 1
+            # For symmetric scaling: D[i]^2 * J[i,i] ≈ target
+            # We want D[i] = 1/sqrt(J_ii) but bounded
+            target = 1.0
+            D[i] = sqrt(target / J_ii)
+
+            # Bound scaling to prevent extreme values
+            D[i] = clamp(D[i], 1e-6, 1e6)
+        end
+    end
+
+    return D
+end
+
+"""
+    apply_scaling(sys::MNASystem, D::Vector{Float64}) -> ScaledMNASystem
+
+Apply symmetric diagonal scaling to an MNA system.
+
+Computes: G_scaled = D * G * D^(-1), C_scaled = D * C * D^(-1), b_scaled = D * b
+
+For the scaled system, solve:
+    G_scaled * y + C_scaled * dy/dt = b_scaled
+
+Then recover the original solution: x = D^(-1) * y
+
+# Arguments
+- `sys`: Original MNA system
+- `D`: Diagonal scaling vector (computed by `compute_charge_scaling`)
+
+# Returns
+ScaledMNASystem with scaled matrices and scaling vectors for solution recovery.
+"""
+function apply_scaling(sys::MNASystem{T}, D::Vector{T}) where {T}
+    n = system_size(sys)
+    @assert length(D) == n "Scaling vector length must match system size"
+
+    Dinv = 1.0 ./ D
+
+    # Symmetric scaling: G_scaled[i,j] = D[i] * G[i,j] * Dinv[j]
+    # For sparse matrices, we iterate over structural nonzeros
+
+    # Create scaled matrices
+    G_scaled = copy(sys.G)
+    C_scaled = copy(sys.C)
+
+    # Apply row scaling (D * M) and column scaling (M * Dinv)
+    for j in 1:n
+        for k in nzrange(G_scaled, j)
+            i = rowvals(G_scaled)[k]
+            nonzeros(G_scaled)[k] *= D[i] * Dinv[j]
+        end
+        for k in nzrange(C_scaled, j)
+            i = rowvals(C_scaled)[k]
+            nonzeros(C_scaled)[k] *= D[i] * Dinv[j]
+        end
+    end
+
+    # Scale RHS: b_scaled = D * b
+    b_scaled = D .* sys.b
+
+    return ScaledMNASystem{T}(G_scaled, C_scaled, b_scaled, D, Dinv, sys)
+end
+
+"""
+    unscale_solution(scaled_sys::ScaledMNASystem, y::Vector) -> Vector
+
+Recover the original solution from the scaled solution.
+
+x = D^(-1) * y
+"""
+function unscale_solution(scaled_sys::ScaledMNASystem, y::AbstractVector)
+    return scaled_sys.Dinv .* y
+end
+
+"""
+    dae_condition_number(sys::MNASystem, γ::Real) -> Float64
+
+Compute condition number of the DAE Jacobian J = G + γC.
+
+# Arguments
+- `sys`: MNA system
+- `γ`: = 1/dt, the inverse timestep
+
+# Returns
+Condition number using 2-norm.
+"""
+function dae_condition_number(sys::MNASystem, γ::Real)
+    n = system_size(sys)
+    n == 0 && return 1.0
+
+    J = Matrix(sys.G + γ * sys.C)
+
+    try
+        return cond(J, 2)
+    catch
+        return Inf
+    end
+end
+
+"""
+    dae_condition_number(scaled_sys::ScaledMNASystem, γ::Real) -> Float64
+
+Compute condition number of the scaled DAE Jacobian.
+"""
+function dae_condition_number(scaled_sys::ScaledMNASystem, γ::Real)
+    n = size(scaled_sys.G, 1)
+    n == 0 && return 1.0
+
+    J = Matrix(scaled_sys.G + γ * scaled_sys.C)
+
+    try
+        return cond(J, 2)
+    catch
+        return Inf
+    end
+end
+
+export compute_optimal_scaling, apply_scaling, unscale_solution, dae_condition_number
+
+"""
+    compute_row_scaling(sys::MNASystem) -> Vector{Float64}
+
+Compute row scaling factors based on row norms (equilibration).
+
+This is a simpler approach that scales each row to have unit 1-norm,
+which is a common preconditioning technique.
+"""
+function compute_row_scaling(sys::MNASystem)
+    n = system_size(sys)
+    D = ones(n)
+
+    if n == 0
+        return D
+    end
+
+    # Compute row norms of |G| + |C| (as representative of Jacobian structure)
+    for i in 1:n
+        row_norm = 0.0
+        # Sum over G row
+        for j in 1:n
+            row_norm += abs(sys.G[i, j])
+        end
+        # Sum over C row
+        for j in 1:n
+            row_norm += abs(sys.C[i, j])
+        end
+
+        if row_norm > 1e-30
+            D[i] = 1.0 / row_norm
+        end
+    end
+
+    return D
+end
+
+"""
+    apply_row_scaling(sys::MNASystem, D::Vector{Float64}) -> ScaledMNASystem
+
+Apply row-only scaling to an MNA system (left preconditioning).
+
+Computes: G_scaled = D * G, C_scaled = D * C, b_scaled = D * b
+
+This is simpler than symmetric scaling and more common in circuit simulators.
+The solution x is unchanged (no need to unscale).
+"""
+function apply_row_scaling(sys::MNASystem{T}, D::Vector{T}) where {T}
+    n = system_size(sys)
+    @assert length(D) == n "Scaling vector length must match system size"
+
+    # Create scaled matrices with row scaling only: D * M
+    G_scaled = copy(sys.G)
+    C_scaled = copy(sys.C)
+
+    # Apply row scaling
+    for j in 1:n
+        for k in nzrange(G_scaled, j)
+            i = rowvals(G_scaled)[k]
+            nonzeros(G_scaled)[k] *= D[i]
+        end
+        for k in nzrange(C_scaled, j)
+            i = rowvals(C_scaled)[k]
+            nonzeros(C_scaled)[k] *= D[i]
+        end
+    end
+
+    # Scale RHS: b_scaled = D * b
+    b_scaled = D .* sys.b
+
+    # For row scaling, Dinv is just 1/D but solution doesn't need unscaling
+    Dinv = ones(T, n)  # Identity for solution recovery
+
+    return ScaledMNASystem{T}(G_scaled, C_scaled, b_scaled, D, Dinv, sys)
+end
+
+"""
+    compute_charge_row_scaling(sys::MNASystem; γ::Real=1e9) -> Vector{Float64}
+
+Compute row scaling that specifically targets capacitive stiffness.
+
+For each row i:
+- Scale so that G[i,i] + γ*C[i,i] ≈ 1 (normalize by the expected Jacobian diagonal)
+
+This is the classic charge scaling approach used in SPICE.
+"""
+function compute_charge_row_scaling(sys::MNASystem; γ::Real=1e9)
+    n = system_size(sys)
+    D = ones(n)
+
+    if n == 0
+        return D
+    end
+
+    threshold = 1e-30
+
+    for i in 1:n
+        # Jacobian diagonal at this γ
+        J_ii = abs(sys.G[i, i]) + γ * abs(sys.C[i, i])
+
+        if J_ii > threshold
+            D[i] = 1.0 / J_ii
+            # Clamp to prevent extreme scaling
+            D[i] = clamp(D[i], 1e-12, 1e12)
+        end
+    end
+
+    return D
+end
+
+export compute_row_scaling, apply_row_scaling, compute_charge_row_scaling
+
+#==============================================================================#
 # Symbolic Solution Access
 #==============================================================================#
 

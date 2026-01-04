@@ -4,10 +4,14 @@
 #
 # 9-stage ring oscillator using PSP103 MOSFET model.
 #
-# Benchmark target: ~1 million timepoints
+# Benchmark target: ~20,000-30,000 timepoints (approximately matching VACASK)
+# VACASK reference: 26,066 timepoints, 81,875 iterations, 1.18s (trapezoidal)
+# Ngspice reference: 20,556 timepoints, 80,018 iterations, 1.60s
 #
-# Note: Uses Sundials IDA (variable-order BDF) with dtmax to enforce fixed
-# timesteps. IDA uses our explicit Jacobian for optimal performance.
+# Note: Uses Sundials IDA (variable-order BDF) with dtmax=0.05ns to enforce
+# timestep constraint. Tolerances reltol=1e-3, abstol=1e-9 provide stable
+# simulation with step counts comparable to VACASK/Ngspice.
+# IDA uses our explicit Jacobian for optimal performance.
 #==============================================================================#
 
 using CedarSim
@@ -58,11 +62,14 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; dtmax=0.05e-9)
-    tspan = (0.0, 1e-6)  # 1us simulation (same as ngspice)
+function run_benchmark(; dtmax=0.05e-9, reltol=1e-3, abstol=1e-9)
+    tspan = (0.0, 1e-6)  # 1us simulation (same as ngspice/VACASK)
 
     # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
     # IDA uses our explicit Jacobian for optimal performance.
+    # Tolerances tuned to provide stable simulation with step counts comparable to VACASK.
+    # - reltol=1e-3 allows reasonable step sizes while maintaining accuracy
+    # - abstol=1e-9 is tight enough to avoid convergence issues
     solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
@@ -74,16 +81,21 @@ function run_benchmark(; dtmax=0.05e-9)
     init = BrownFullBasicInit(abstol=1e-3)
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with IDA (dtmax=$dtmax)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver, initializealg=$init) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with IDA...")
+    println("  dtmax=$dtmax, reltol=$reltol, abstol=$abstol")
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, reltol=$reltol, abstol=$abstol,
+                             solver=$solver, initializealg=$init) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver, initializealg=init)
+    sol = tran!(circuit, tspan; dtmax=dtmax, reltol=reltol, abstol=abstol,
+                solver=solver, initializealg=init)
 
+    # VACASK reference: 26,066 timepoints, 81,875 iterations
+    # Ngspice reference: 20,556 timepoints, 80,018 iterations
     println("\n=== Results ===")
-    @printf("Timepoints: %d\n", length(sol.t))
-    @printf("NR iters:   %d\n", sol.stats.nnonliniter)
+    @printf("Timepoints: %d (VACASK: 26,066, Ngspice: 20,556)\n", length(sol.t))
+    @printf("NR iters:   %d (VACASK: 81,875, Ngspice: 80,018)\n", sol.stats.nnonliniter)
     @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
     println()

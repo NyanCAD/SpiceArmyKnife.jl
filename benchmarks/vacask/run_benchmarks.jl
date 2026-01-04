@@ -119,7 +119,7 @@ function run_rc_benchmark()
     println("Running RC Circuit benchmark...")
     try
         include(joinpath(BENCHMARK_DIR, "rc", "cedarsim", "runme.jl"))
-        bench, sol = Base.invokelatest(run_benchmark; warmup=true)
+        bench, sol = Base.invokelatest(run_benchmark)
         if bench === nothing || sol === nothing
             return BenchmarkResult("RC Circuit", :failed, "Benchmark returned nothing")
         end
@@ -137,7 +137,7 @@ function run_graetz_benchmark()
     println("Running Graetz Bridge benchmark...")
     try
         include(joinpath(BENCHMARK_DIR, "graetz", "cedarsim", "runme.jl"))
-        bench, sol = Base.invokelatest(run_benchmark; warmup=true)
+        bench, sol = Base.invokelatest(run_benchmark)
         if bench === nothing || sol === nothing
             return BenchmarkResult("Graetz Bridge", :failed, "Benchmark returned nothing")
         end
@@ -155,7 +155,7 @@ function run_mul_benchmark()
     println("Running Voltage Multiplier benchmark...")
     try
         include(joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl"))
-        bench, sol = Base.invokelatest(run_benchmark; warmup=true)
+        bench, sol = Base.invokelatest(run_benchmark)
         if bench === nothing || sol === nothing
             return BenchmarkResult("Voltage Multiplier", :failed, "Benchmark returned nothing")
         end
@@ -173,7 +173,7 @@ function run_ring_benchmark()
     println("Running Ring Oscillator benchmark...")
     try
         include(joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl"))
-        bench, sol = Base.invokelatest(run_benchmark; warmup=true)
+        bench, sol = Base.invokelatest(run_benchmark)
         if bench === nothing || sol === nothing
             return BenchmarkResult("Ring Oscillator", :failed, "Benchmark returned nothing")
         end
@@ -191,7 +191,7 @@ function run_c6288_benchmark()
     println("Running C6288 Multiplier benchmark...")
     try
         include(joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl"))
-        bench, sol = Base.invokelatest(run_benchmark; warmup=true)
+        bench, sol = Base.invokelatest(run_benchmark)
         if bench === nothing || sol === nothing
             return BenchmarkResult("C6288 Multiplier", :failed, "Benchmark returned nothing")
         end

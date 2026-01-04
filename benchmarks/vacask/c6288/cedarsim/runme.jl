@@ -6,14 +6,14 @@
 #
 # Benchmark target: High complexity digital circuit
 #
-# Note: Uses ImplicitEuler solver since the small timestep (2ps) is artificially
-# enforced rather than physics-driven. First-order methods are more efficient
-# when the timestep is forced small.
+# Note: Uses Sundials IDA (variable-order BDF) with adaptive stepping.
+# IDA uses our explicit Jacobian for optimal performance. reltol is tuned
+# to match VACASK's tran_lteratio=1.5 for ~1000 timepoints.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using OrdinaryDiffEq
+using Sundials
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -44,52 +44,39 @@ const circuit_code = parse_spice_file_to_mna(spice_file; circuit_name=:c6288_cir
 eval(circuit_code)
 
 """
-    setup_simulation(; dtmax=2e-12)
+    setup_simulation()
 
 Create and return a fully-prepared MNACircuit ready for transient analysis.
-This separates problem setup from solve time for accurate benchmarking.
 """
-function setup_simulation(; dtmax=2e-12)
+function setup_simulation()
     circuit = MNACircuit(c6288_circuit)
-    # Perform DC operating point to initialize the circuit
     MNA.assemble!(circuit)
     return circuit
 end
 
-function run_benchmark(; warmup=true, dtmax=2e-12)
+function run_benchmark(; reltol=1e-3)
     tspan = (0.0, 2e-9)  # 2ns simulation (same as ngspice)
 
-    # Use ImplicitEuler for forced small timesteps - first-order is more efficient
-    # when the timestep is artificially constrained rather than physics-driven
-    solver = ImplicitEuler()
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        try
-            circuit = setup_simulation(; dtmax=dtmax)
-            tran!(circuit, (0.0, 10e-12); dtmax=dtmax, solver=solver)
-            println("Warmup completed")
-        catch e
-            println("Warmup failed: ", e)
-            showerror(stdout, e, catch_backtrace())
-            return nothing, nothing
-        end
-    end
+    # Use Sundials IDA (variable-order BDF) with adaptive stepping.
+    # IDA uses our explicit Jacobian for optimal performance.
+    # reltol is tuned to match VACASK's tran_lteratio=1.5 (~1000 timepoints)
+    solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
-    circuit = setup_simulation(; dtmax=dtmax)
+    circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with ImplicitEuler...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with IDA (reltol=$reltol)...")
+    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
-    circuit = setup_simulation(; dtmax=dtmax)
-    sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver)
+    circuit = setup_simulation()
+    sol = tran!(circuit, tspan; solver=solver, reltol=reltol)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))
+    @printf("NR iters:   %d\n", sol.stats.nnonliniter)
+    @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
     println()
 

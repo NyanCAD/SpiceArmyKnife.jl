@@ -7,8 +7,10 @@
 #
 # Benchmark target: ~500k timepoints, ~500k-1M NR iterations
 #
-# Note: Uses DABDF2 (BDF2) solver with fixed timesteps (adaptive=false) to match
-# ngspice's "method=gear maxord=2" (Gear2) setting used in VACASK benchmarks.
+# Note: Uses Sundials IDA (variable-order BDF, orders 1-5) with dtmax to enforce
+# fixed timesteps. IDA is comparable to ngspice's Gear method and uses our
+# explicit Jacobian for 5x memory reduction vs DABDF2 autodiff.
+#
 # The sin source uses phase=90 to start at peak voltage (dV/dt=0), avoiding
 # Newton convergence issues at t=0 with the cascaded diode topology.
 #
@@ -22,7 +24,7 @@
 
 using CedarSim
 using CedarSim.MNA
-using OrdinaryDiffEq
+using Sundials
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -64,37 +66,25 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dt=1e-9)
+function run_benchmark(; dt=1e-9)
     tspan = (0.0, 0.5e-3)  # 0.5ms simulation (~500k timepoints with dt=1ns)
 
-    # Use DABDF2 (BDF2/Gear2) with fixed timesteps to match ngspice
-    # adaptive=false forces the solver to use the specified dt
-    # Loose tolerances (1e-3) and high max_iter ensure Newton converges at each step
-    solver = DABDF2(nlsolve=NLNewton(max_iter=100))
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        try
-            circuit = setup_simulation()
-            tran!(circuit, (0.0, 1e-5); dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
-        catch e
-            println("Warmup failed: ", e)
-            showerror(stdout, e, catch_backtrace())
-            return nothing, nothing
-        end
-    end
+    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
+    # IDA uses our explicit Jacobian (5x less memory than DABDF2 autodiff).
+    # - max_nonlinear_iters=100: High limit ensures Newton converges at each step
+    # - max_error_test_failures=20: More retries for difficult transient points
+    solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with DABDF2 (fixed dt=$dt)...")
-    bench = @benchmark tran!($circuit, $tspan; dt=$dt, adaptive=false, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with IDA (dtmax=$dt)...")
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dt=dt, adaptive=false, solver=solver, abstol=1e-3, reltol=1e-3)
+    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3)
 
     println("\n=== Results ===")
     @printf("Timepoints:  %d\n", length(sol.t))

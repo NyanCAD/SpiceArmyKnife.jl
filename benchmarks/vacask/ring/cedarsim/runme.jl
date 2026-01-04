@@ -6,14 +6,13 @@
 #
 # Benchmark target: ~1 million timepoints
 #
-# Note: Uses ImplicitEuler solver since the small timestep (50ps) is artificially
-# enforced rather than physics-driven. First-order methods are more efficient
-# when the timestep is forced small.
+# Note: Uses Sundials IDA (variable-order BDF) with dtmax to enforce fixed
+# timesteps. IDA uses our explicit Jacobian for optimal performance.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using OrdinaryDiffEq
+using Sundials
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -46,52 +45,40 @@ const circuit_code = parse_spice_to_mna(spice_code; circuit_name=:ring_circuit,
 eval(circuit_code)
 
 """
-    setup_simulation(; dtmax=0.05e-9)
+    setup_simulation()
 
 Create and return a fully-prepared MNACircuit ready for transient analysis.
 This separates problem setup from solve time for accurate benchmarking.
 """
-function setup_simulation(; dtmax=0.05e-9)
+function setup_simulation()
     circuit = MNACircuit(ring_circuit)
     # Perform DC operating point to initialize the circuit
     MNA.assemble!(circuit)
     return circuit
 end
 
-function run_benchmark(; warmup=true, dtmax=0.05e-9)
+function run_benchmark(; dtmax=0.05e-9)
     tspan = (0.0, 1e-6)  # 1us simulation (same as ngspice)
 
-    # Use ImplicitEuler for forced small timesteps - first-order is more efficient
-    # when the timestep is artificially constrained rather than physics-driven
-    solver = ImplicitEuler()
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        try
-            circuit = setup_simulation(; dtmax=dtmax)
-            tran!(circuit, (0.0, 1e-9); dtmax=dtmax, solver=solver)
-            println("Warmup completed")
-        catch e
-            println("Warmup failed: ", e)
-            showerror(stdout, e, catch_backtrace())
-            return nothing, nothing
-        end
-    end
+    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
+    # IDA uses our explicit Jacobian for optimal performance.
+    solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
-    circuit = setup_simulation(; dtmax=dtmax)
+    circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with ImplicitEuler...")
+    println("\nBenchmarking transient analysis with IDA (dtmax=$dtmax)...")
     bench = @benchmark tran!($circuit, $tspan; dtmax=$dtmax, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
-    circuit = setup_simulation(; dtmax=dtmax)
+    circuit = setup_simulation()
     sol = tran!(circuit, tspan; dtmax=dtmax, solver=solver)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))
+    @printf("NR iters:   %d\n", sol.stats.nnonliniter)
+    @printf("Iter/step:  %.2f\n", sol.stats.nnonliniter / length(sol.t))
     display(bench)
     println()
 

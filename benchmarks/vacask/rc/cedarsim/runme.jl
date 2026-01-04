@@ -7,13 +7,14 @@
 #
 # Benchmark target: ~1 million timepoints, ~2 million iterations
 #
-# Note: Uses DABDF2 (BDF2) solver with fixed timesteps (adaptive=false) to match
-# ngspice's "method=gear maxord=2" setting used in VACASK benchmarks.
+# Note: Uses Sundials IDA (variable-order BDF, orders 1-5) with dtmax to enforce
+# fixed timesteps. IDA is comparable to ngspice's Gear method and uses our
+# explicit Jacobian for optimal performance.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using OrdinaryDiffEq
+using Sundials
 using BenchmarkTools
 using Printf
 
@@ -38,30 +39,23 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dt=1e-6)
+function run_benchmark(; dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
-    # Use DABDF2 (BDF2/Gear2) with fixed timesteps to match ngspice
-    # adaptive=false forces the solver to use the specified dt
-    solver = DABDF2()
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        circuit = setup_simulation()
-        tran!(circuit, (0.0, 0.001); dt=dt, adaptive=false, solver=solver)
-    end
+    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
+    # IDA uses our explicit Jacobian for optimal performance.
+    solver = IDA(max_error_test_failures=20)
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with DABDF2 (fixed dt=$dt)...")
-    bench = @benchmark tran!($circuit, $tspan; dt=$dt, adaptive=false, solver=$solver) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with IDA (dtmax=$dt)...")
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dt=dt, adaptive=false, solver=solver)
+    sol = tran!(circuit, tspan; dtmax=dt, solver=solver)
 
     println("\n=== Results ===")
     @printf("Timepoints:  %d\n", length(sol.t))

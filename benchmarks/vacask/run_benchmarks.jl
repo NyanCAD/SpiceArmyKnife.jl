@@ -219,13 +219,8 @@ function main()
     push!(results, run_rc_benchmark())
     push!(results, run_graetz_benchmark())
     push!(results, run_mul_benchmark())
-
-    # PSP103-based benchmarks are disabled until PSP103 model initialization is fixed
-    # See benchmarks/vacask/cedarsim/STATUS.md for details
-    # push!(results, run_ring_benchmark())
-    # push!(results, run_c6288_benchmark())
-    push!(results, BenchmarkResult("Ring Oscillator", :skipped, "PSP103 model initialization not yet supported"))
-    push!(results, BenchmarkResult("C6288 Multiplier", :skipped, "PSP103 model initialization not yet supported"))
+    push!(results, run_ring_benchmark())
+    push!(results, run_c6288_benchmark())
 
     println()
     println("=" ^ 60)

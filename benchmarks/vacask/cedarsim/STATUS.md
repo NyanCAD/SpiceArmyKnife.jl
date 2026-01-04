@@ -15,17 +15,17 @@ All benchmarks use vadistiller-ported SPICE models equivalent to ngspice's built
 | `rc` | None (R, C) | ✅ Working | ~1M timepoints in ~12s |
 | `graetz` | `sp_diode` | ✅ Working | ~1M timepoints in ~24s |
 | `mul` | `sp_diode` | ✅ Working | ~500k timepoints in ~11s |
-| `ring` | `PSP103VA` | ⚠️ Fails | PSP103 branch current issue (`_I_branch_NOII`) |
-| `c6288` | `PSP103VA` | ⚠️ Fails | PSP103 branch current issue (`_I_branch_NOII`) |
+| `ring` | `PSP103VA` | ✅ Working | 9-stage ring oscillator with PSP103 MOSFETs |
+| `c6288` | `PSP103VA` | ✅ Working | C6288 multiplier circuit with PSP103 MOSFETs |
 
 ## Models Used
 
 - **Diode** (`test/vadistiller/models/diode.va`): Used by graetz and mul benchmarks
 - **PSP103** (`test/vadistiller/models/psp103v4/psp103.va`): Used by ring and c6288 benchmarks
 
-## PSP103 Issue
+## Fixed Issues
 
-### Fixed: Parameter Name Collision (BoundsError)
+### 1. Parameter Name Collision (BoundsError)
 
 The original error (`BoundsError(0.0, 2)`) was caused by PSP103 having a local variable `x = 0.0` (line 833) that shadowed the MNA framework's `x` parameter (solution vector). When voltage extraction tried `x[node_idx]`, it was doing `0.0[2]`.
 
@@ -35,31 +35,24 @@ The original error (`BoundsError(0.0, 2)`) was caused by PSP103 having a local v
 - `_sim_mode_` → `_mna_mode_` (simulation mode)
 - `spec` → `_mna_spec_` (MNA spec)
 
-### Current Issue: Branch Current Handling (`_I_branch_NOII`)
+### 2. Nested Variable Declarations (UndefVarError: Igdov)
 
-After fixing the parameter collision, PSP103 now fails with:
-```
-UndefVarError: `_I_branch_NOII` not defined in `Main.PSP103VA_module`
-```
+PSP103 uses Verilog-A named blocks (`begin : evaluateblock`) with local variable declarations inside them. These nested declarations were not being extracted during code generation, causing `UndefVarError` for variables like `Igdov` when they were referenced in detection closures.
 
-This is a different issue related to how PSP103 uses named branches for internal currents. The model uses `I(<branch_name>)` syntax for branches like `NOII` (no-impact ionization?), but the vasim code generator isn't properly defining these branch current variables.
-
-**Investigation needed:**
-1. PSP103 uses named branches: `branch (DI, DG) NOII;` (or similar)
-2. The VA-to-Julia translation needs to define `_I_branch_NOII` for `I(NOII)` access
-3. Check vasim.jl branch handling code to ensure named branches are properly translated
+**Fix:** Added `collect_nested_var_decls!` function in `src/vasim.jl` that walks the analog block AST to find `IntRealDeclaration` nodes inside named `AnalogSeqBlock` nodes and adds them to `var_types` for proper initialization.
 
 ## Running Benchmarks
 
 ```bash
-# Working benchmarks
+# All benchmarks are now working
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/rc/cedarsim/runme.jl
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/graetz/cedarsim/runme.jl
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/mul/cedarsim/runme.jl
-
-# Failing benchmarks (PSP103 issue)
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/ring/cedarsim/runme.jl
 ~/.juliaup/bin/julia --project=. benchmarks/vacask/c6288/cedarsim/runme.jl
+
+# Or run all benchmarks with the CI script
+~/.juliaup/bin/julia --project=. benchmarks/vacask/run_benchmarks.jl
 ```
 
 ## Code Changes Made
@@ -72,3 +65,4 @@ This is a different issue related to how PSP103 uses named branches for internal
 6. **Preserve parameter case for VA modules** (`src/spc/codegen.jl`) - VA modules may use uppercase params
 7. **Pass `x` to subcircuit builders** (`src/spc/codegen.jl`) - For nonlinear devices that need solution vector
 8. **Rename MNA parameters to avoid VA variable collision** (`src/vasim.jl`, `src/spc/codegen.jl`) - Use `_mna_x_`, `_mna_t_`, `_mna_mode_`, `_mna_spec_` to avoid collision with VA model local variables like `x = 0.0` in PSP103
+9. **Extract nested variable declarations** (`src/vasim.jl`) - Added `collect_nested_var_decls!` to find and initialize variables declared inside named analog blocks

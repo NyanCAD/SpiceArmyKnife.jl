@@ -292,6 +292,12 @@ function make_mna_device(vm::VANode{VerilogModule})
         end
     end
 
+    # Collect variable declarations from inside analog blocks (named blocks like "begin : evaluateblock")
+    # These are not at the module's top level but need to be initialized in local_var_init
+    if analog_block_ast !== nothing
+        collect_nested_var_decls!(var_types, var_inits, analog_block_ast)
+    end
+
     # Detect short circuits (V(internal, external) <+ 0) for node aliasing
     short_circuits = if analog_block_ast !== nothing && !isempty(internal_nodes)
         detect_short_circuits(analog_block_ast, to_julia_mna, internal_nodes)
@@ -1097,6 +1103,106 @@ function mna_collect_contributions!(contributions, to_julia::MNAScope, stmt)
         # Procedural assignments in analog block (e.g., cdrain = R*V(g,s)**2;)
         push!(contributions, (kind=:assignment, expr=to_julia(stmt)))
     end
+end
+
+"""
+Collect variable declarations from nested analog blocks.
+
+Verilog-A allows variable declarations inside named blocks (e.g., `begin : evaluateblock`).
+These declarations are not at the module's top level, so we need to walk the AST to find them.
+This ensures all local variables are initialized in local_var_init before they're used.
+"""
+function collect_nested_var_decls!(var_types::Dict{Symbol, Union{Type{Int}, Type{Float64}, Type{String}}},
+                                    var_inits::Dict{Symbol, Any}, stmt; depth=0)
+    form = formof(stmt)
+
+    if form == IntRealDeclaration
+        # Found a variable declaration - add to var_types
+        T = kw_to_T(stmt.kw.kw)
+        for ident in stmt.idents
+            vardecl = ident.item
+            name = Symbol(assemble_id_string(vardecl.id))
+            # Only add if not already present (top-level declarations take precedence)
+            if !haskey(var_types, name)
+                var_types[name] = T
+                if vardecl.init !== nothing
+                    var_inits[name] = to_julia_defaults(vardecl.init)
+                end
+            end
+        end
+    elseif form == AnalogSeqBlock
+        # Named or unnamed sequential block - check for variable declarations
+        # For named blocks (begin : blockname), declarations are in decl.decls
+        if hasproperty(stmt, :decl) && stmt.decl !== nothing
+            block_decl = stmt.decl
+            if hasproperty(block_decl, :decls)
+                for decl_item in block_decl.decls
+                    # Each decl_item is an AnalogDeclarationItem with an .item field
+                    inner_decl = hasproperty(decl_item, :item) ? decl_item.item : decl_item
+                    if formof(inner_decl) == IntRealDeclaration
+                        # Found a variable declaration - add to var_types
+                        T = kw_to_T(inner_decl.kw.kw)
+                        for ident in inner_decl.idents
+                            vardecl = ident.item
+                            name = Symbol(assemble_id_string(vardecl.id))
+                            # Only add if not already present (top-level declarations take precedence)
+                            if !haskey(var_types, name)
+                                var_types[name] = T
+                                if vardecl.init !== nothing
+                                    var_inits[name] = to_julia_defaults(vardecl.init)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        # Also recurse into statements (they may contain nested blocks)
+        if hasproperty(stmt, :stmts)
+            for s in stmt.stmts
+                # s might be a node wrapper or the actual statement
+                inner = hasproperty(s, :item) ? s.item : s
+                collect_nested_var_decls!(var_types, var_inits, inner; depth=depth+1)
+            end
+        end
+    elseif form == AnalogStatement
+        collect_nested_var_decls!(var_types, var_inits, stmt.stmt; depth=depth+1)
+    elseif form == AnalogIf
+        # Single if statement - recurse into body
+        if hasproperty(stmt, :stmt)
+            collect_nested_var_decls!(var_types, var_inits, stmt.stmt; depth=depth+1)
+        end
+    elseif form == AnalogConditionalBlock
+        # Recurse into if/else branches
+        # AnalogConditionalBlock has aif (the if) and elsecases (list of ElseCase)
+        aif = stmt.aif
+        if hasproperty(aif, :stmt)
+            collect_nested_var_decls!(var_types, var_inits, aif.stmt; depth=depth+1)
+        end
+        if hasproperty(stmt, :elsecases)
+            for elsecase in stmt.elsecases
+                if hasproperty(elsecase, :stmt)
+                    collect_nested_var_decls!(var_types, var_inits, elsecase.stmt; depth=depth+1)
+                end
+            end
+        end
+    elseif form == AnalogFor || form == AnalogWhile || form == AnalogRepeat
+        # Recurse into loop bodies - all these use .stmt for the body
+        if hasproperty(stmt, :stmt)
+            collect_nested_var_decls!(var_types, var_inits, stmt.stmt; depth=depth+1)
+        end
+    elseif form == CaseStatement
+        # Recurse into case items
+        if hasproperty(stmt, :items)
+            for item in stmt.items
+                inner = hasproperty(item, :item) ? item.item : item
+                if hasproperty(inner, :stmt)
+                    collect_nested_var_decls!(var_types, var_inits, inner.stmt; depth=depth+1)
+                end
+            end
+        end
+    end
+    # Other statement types don't contain variable declarations
 end
 
 """

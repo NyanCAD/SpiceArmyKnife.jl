@@ -17,6 +17,7 @@ using Sundials
 using BenchmarkTools
 using Printf
 using VerilogAParser
+using DiffEqBase: BrownFullBasicInit
 
 # Load the PSP103 model
 const psp103_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "psp103v4", "psp103.va")
@@ -65,13 +66,16 @@ function run_benchmark(; reltol=1e-3)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
+    # Use BrownFullBasicInit with relaxed tolerance for DAE initialization
+    init = BrownFullBasicInit(abstol=1e-3)
+
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with IDA (reltol=$reltol)...")
-    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol) samples=6 evals=1 seconds=600
+    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, initializealg=$init) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; solver=solver, reltol=reltol)
+    sol = tran!(circuit, tspan; solver=solver, reltol=reltol, initializealg=init)
 
     println("\n=== Results ===")
     @printf("Timepoints: %d\n", length(sol.t))

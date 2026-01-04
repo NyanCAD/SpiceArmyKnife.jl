@@ -1449,3 +1449,150 @@ end
     system_size(ws::SpecializedWorkspace) -> Int
 """
 system_size(ws::SpecializedWorkspace) = system_size(ws.structure)
+
+#==============================================================================#
+# DirectWorkspace: Zero-Copy Stamping for Large Circuits
+#
+# Uses DirectStampContext which stamps directly to sparse matrix nzval,
+# eliminating ALL intermediate arrays. This is optimal for large circuits
+# where SVector optimization doesn't apply.
+#
+# Data flow:
+#   builder stamps → DirectStampContext → G.nzval/C.nzval (single write)
+#
+# No vctx.G_V, no ws.G_V, no copying between arrays.
+#==============================================================================#
+
+export DirectWorkspace, create_direct_workspace
+
+"""
+    DirectWorkspace{T,CS}
+
+Workspace for large circuits using zero-copy DirectStampContext.
+
+Stamps go directly to sparse matrix nzval arrays - no intermediate storage.
+This is the fastest path for large circuits where SVector optimization
+would cause excessive compile time.
+
+# Fields
+- `structure::CS`: Compiled circuit structure
+- `dctx::DirectStampContext`: Direct stamping context with sparse refs
+- `resid_tmp::Vector{T}`: Working storage for residual computation
+"""
+struct DirectWorkspace{T,CS<:CompiledStructure}
+    structure::CS
+    dctx::DirectStampContext
+    resid_tmp::Vector{T}
+end
+
+"""
+    create_direct_workspace(cs::CompiledStructure) -> DirectWorkspace
+
+Create a workspace that stamps directly to sparse matrices.
+
+This is optimal for large circuits:
+- No intermediate G_V, C_V arrays
+- Stamps go straight to sparse nzval
+- Deferred b stamps resolved using precomputed mapping
+"""
+function create_direct_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
+    # Get initial context for structure info
+    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
+
+    # Create b vector
+    b = zeros(Float64, cs.n)
+
+    # Create DirectStampContext with references to sparse nzval
+    dctx = create_direct_stamp_context(
+        ctx,
+        nonzeros(cs.G),
+        nonzeros(cs.C),
+        b,
+        cs.G_coo_to_nz,
+        cs.C_coo_to_nz,
+        cs.b_deferred_resolved
+    )
+
+    DirectWorkspace{Float64,typeof(cs)}(
+        cs,
+        dctx,
+        zeros(Float64, cs.n)
+    )
+end
+
+"""
+    fast_rebuild!(ws::DirectWorkspace, u::AbstractVector, t::Real)
+
+Zero-copy rebuild using DirectStampContext.
+
+Stamps go directly to sparse matrix nzval - no intermediate arrays.
+"""
+function fast_rebuild!(ws::DirectWorkspace, u::AbstractVector, t::Real)
+    cs = ws.structure
+    dctx = ws.dctx
+
+    # Reset counters and zero matrices
+    reset_direct_stamp!(dctx)
+
+    # Builder stamps directly to sparse via DirectStampContext
+    cs.builder(cs.params, cs.spec, real_time(t); x=u, ctx=dctx)
+
+    # Apply deferred b stamps
+    n_deferred = cs.n_b_deferred
+    @inbounds for k in 1:n_deferred
+        idx = dctx.b_resolved[k]
+        if idx > 0
+            dctx.b[idx] += dctx.b_V[k]
+        end
+    end
+
+    return nothing
+end
+
+"""
+    fast_residual!(resid, du, u, ws::DirectWorkspace, t)
+
+Fast DAE residual evaluation using direct stamping.
+"""
+function fast_residual!(resid::AbstractVector, du::AbstractVector,
+                        u::AbstractVector, ws::DirectWorkspace, t::Real)
+    fast_rebuild!(ws, u, t)
+    cs = ws.structure
+
+    # F(du, u) = C*du + G*u - b = 0
+    mul!(resid, cs.C, du)
+    mul!(resid, cs.G, u, 1.0, 1.0)
+    resid .-= ws.dctx.b
+
+    return nothing
+end
+
+"""
+    fast_jacobian!(J, du, u, ws::DirectWorkspace, gamma, t)
+
+Fast DAE Jacobian computation using direct stamping: J = G + gamma*C
+"""
+function fast_jacobian!(J::AbstractMatrix, du::AbstractVector,
+                        u::AbstractVector, ws::DirectWorkspace,
+                        gamma::Real, t::Real)
+    fast_rebuild!(ws, u, t)
+    cs = ws.structure
+
+    # J = G + gamma*C
+    copyto!(J, cs.G)
+    J .+= gamma .* cs.C
+
+    return nothing
+end
+
+"""
+    system_size(ws::DirectWorkspace) -> Int
+"""
+system_size(ws::DirectWorkspace) = system_size(ws.structure)
+
+"""
+    b_vector(ws::DirectWorkspace) -> Vector{Float64}
+
+Get the b vector from a DirectWorkspace.
+"""
+b_vector(ws::DirectWorkspace) = ws.dctx.b

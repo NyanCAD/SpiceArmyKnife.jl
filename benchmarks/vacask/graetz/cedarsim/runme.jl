@@ -56,7 +56,7 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dt=1e-6)
+function run_benchmark(; dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation (~1M timepoints with dt=1us)
 
     # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
@@ -64,19 +64,6 @@ function run_benchmark(; warmup=true, dt=1e-6)
     # - max_nonlinear_iters=100: High limit ensures Newton converges at each step
     # - max_error_test_failures=20: More retries for difficult transient points
     solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        try
-            circuit = setup_simulation()
-            tran!(circuit, (0.0, 0.001); dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3)
-        catch e
-            println("Warmup failed: ", e)
-            showerror(stdout, e, catch_backtrace())
-            return nothing, nothing
-        end
-    end
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()

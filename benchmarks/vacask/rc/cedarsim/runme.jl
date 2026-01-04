@@ -39,19 +39,12 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; warmup=true, dt=1e-6)
+function run_benchmark(; dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
     # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
     # IDA uses our explicit Jacobian for optimal performance.
     solver = IDA(max_error_test_failures=20)
-
-    # Warmup run (compiles everything)
-    if warmup
-        println("Warmup run...")
-        circuit = setup_simulation()
-        tran!(circuit, (0.0, 0.001); dtmax=dt, solver=solver)
-    end
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()

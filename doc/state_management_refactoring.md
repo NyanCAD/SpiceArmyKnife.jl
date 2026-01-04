@@ -1,5 +1,15 @@
 # State Management Refactoring for Constant Folding and SROA Optimization
 
+## Implementation Status
+
+**COMPLETED** - The following optimizations have been implemented:
+
+1. ✅ **EvalWorkspace is now an immutable struct** - Vectors inside are still mutable, but the struct itself is immutable (no field reassignment). Removed `time` field (passed explicitly) and eliminated `G_V`, `C_V` intermediate arrays.
+
+2. ✅ **Direct stamping from vctx to sparse matrices** - Eliminated the intermediate copy: `vctx.G_V → ws.G_V → sparse` is now `vctx.G_V → sparse`.
+
+3. ✅ **SpecializedWorkspace with SVector-based structure capture** - For small circuits (n_G, n_C ≤ 64), COO-to-CSC mappings are stored as SVectors in a closure, enabling SROA optimization. Achieves **0 bytes per iteration**.
+
 ## Executive Summary
 
 This document analyzes the current data structure hierarchy for MNA circuit evaluation and proposes refactoring to achieve the following hierarchy:

@@ -103,36 +103,47 @@ to the simulation initialization logic.
 - `src/mna/contrib.jl`: `is_voltage_dependent_charge()` implementation
 - `benchmarks/vacask/`: All benchmarks using PSP103 MOSFETs
 
-## Implemented Fix: Conservative Detection (Option 2)
+## Implemented Fix: Q/V Ratio Detection
 
-As of January 2026, we implemented **Option 2: Conservative Detection**:
+As of January 2026, we implemented **Q/V ratio comparison** across multiple operating points:
 
-- `detect_or_cached!` in `src/mna/contrib.jl` now **always returns true**
-- All `ddt()` calls in VA-generated code use charge formulation
-- This guarantees correctness for complex models like PSP103
+The key insight is that while `∂Q/∂V` from ForwardDiff doesn't capture intermediate
+value dependencies (because intermediates are computed before JacobianTag duals exist),
+the actual **Q value itself DOES change correctly** when x changes.
 
-### Results After Fix
+### Detection Algorithm
+
+1. **Pass 1**: Use `ZERO_VECTOR` to discover structure and get initial system size
+2. **Pass 2-3**: Use random voltages (0-0.8V), compare Q/V ratios:
+   - For linear capacitor: Q = C*V, so Q/V = C (constant across operating points)
+   - For nonlinear capacitor: Q = f(V), so Q/V varies
+
+If the Q/V ratio differs significantly between passes, the charge is marked as
+voltage-dependent and uses charge formulation.
+
+### Results
 
 ```
 === PSP103 Ring Oscillator ===
 Nodes: 154
 Currents: 127
-Charges: 144  <-- Now correctly allocated!
-System size: 425
+Charges (nonlinear): 90   <-- Only truly nonlinear charges!
+System size: 371
 ```
 
-All 144 charge contributions are now properly using charge formulation,
-ensuring a constant mass matrix for Rosenbrock solvers.
+Compared to conservative detection (144 charges), this correctly identifies only
+90 nonlinear charges, saving 54 state variables.
 
 ### Trade-offs
 
-- **Pro**: Guaranteed correctness for all VA models
-- **Con**: Adds extra state variables for truly linear capacitors
-- **Note**: Simple inline expressions (using `stamp_reactive_with_detection!` directly)
-  still use accurate lambda-based detection via `is_voltage_dependent_charge`
+- **Pro**: Accurate detection - only nonlinear caps use charge formulation
+- **Pro**: Fewer state variables than conservative approach
+- **Con**: Requires 3 builder passes (minor compilation overhead)
+- **Note**: Simple inline expressions still use accurate lambda-based detection
 
 ### Files Modified
 
-- `src/mna/contrib.jl`: `detect_or_cached!` returns true unconditionally
-- `src/mna/solve.jl`: `assemble!(::MNACircuit)` simplified (single pass)
-- `src/mna/context.jl`: Added `charge_capacitances` vector for diagnostics
+- `src/mna/contrib.jl`: `detect_or_cached!` compares Q/V ratios
+- `src/mna/solve.jl`: `assemble!(::MNACircuit)` runs 3 detection passes
+- `src/mna/context.jl`: Store `charge_Q_values` and `charge_V_values` for comparison
+- `src/vasim.jl`: Pass `V_branch` and `q_val` to detection

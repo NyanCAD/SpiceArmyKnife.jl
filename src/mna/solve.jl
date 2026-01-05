@@ -1163,15 +1163,41 @@ v_out = voltage(acc, :out, 0.5e-3)
 ```
 """
 function assemble!(circuit::MNACircuit)
-    # Build circuit with conservative charge detection (always uses charge formulation)
-    # See doc/voltage_dependent_capacitor_detection_bug.md for why multi-pass detection
-    # doesn't work reliably for complex VA models like PSP103.
+    # Multi-pass detection for voltage-dependent capacitors
+    # Run the builder multiple times with different random operating points
+    # to detect Q/V ratio variations. See doc/voltage_dependent_capacitor_detection_bug.md
     #
-    # Conservative approach: detect_or_cached! always returns true, so all ddt() calls
-    # use charge formulation. This guarantees correctness at the cost of potentially
-    # more state variables than strictly necessary for truly linear capacitors.
+    # Pass 1: Discover structure, store initial (V, Q) values
+    # Pass 2+: Compare Q/V ratios - if different, mark as voltage-dependent
+    # Final: Build with accurate detection cache
+    #
+    # Key insight: While dq_dV from ForwardDiff doesn't capture intermediate value dependencies,
+    # the actual Q value DOES change when x changes. So we compare Q/V ratios.
 
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    N_DETECTION_PASSES = 3
+    ctx = nothing
+    known_size = 0
+
+    for pass in 1:N_DETECTION_PASSES
+        if ctx === nothing
+            # First pass: use ZERO_VECTOR to discover structure and get initial system size
+            ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+            known_size = system_size(ctx)
+        else
+            # Save system size BEFORE reset
+            known_size = system_size(ctx)
+
+            # Reset structure but preserve detection cache (charge_is_vdep, charge_Q_values, charge_V_values)
+            reset_for_restamping!(ctx)
+
+            # Generate random operating point using known size (avoid V=0 for Q/V comparison)
+            x = rand(known_size) * 0.8
+
+            # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
+        end
+    end
+
     return assemble!(ctx)
 end
 

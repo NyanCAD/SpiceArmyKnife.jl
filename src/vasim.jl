@@ -1628,19 +1628,32 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
         #
         # For linear capacitors, we use standard C matrix stamping (no extra variables).
         #
-        # Detection works by comparing total capacitance across multiple runs with
-        # different random operating points. If capacitance differs, it's voltage-dependent.
+        # Detection works by comparing Q/V ratios across multiple runs with different
+        # random operating points. If the ratio varies, the charge is voltage-dependent.
+        #
+        # Key insight: dq_dV from ForwardDiff doesn't capture intermediate value dependencies
+        # (because intermediates are computed before JacobianTag duals exist), but the actual
+        # Q value DOES change correctly when x changes. So we compare Q/V ratios.
 
-        # Build expression to compute total capacitance (sum of absolute values)
-        c_total_terms = [:(abs($(Symbol("dq_dV", k)))) for k in 1:n_all_nodes]
-        c_total_expr = length(c_total_terms) == 1 ? c_total_terms[1] : Expr(:call, :+, c_total_terms...)
+        # Compute V_branch = V_p - V_n for detection
+        V_p_expr = p_idx === nothing ? 0.0 : Symbol("V_", p_idx)
+        V_n_expr = n_idx === nothing ? 0.0 : Symbol("V_", n_idx)
+        v_branch_expr = if p_idx === nothing && n_idx === nothing
+            0.0
+        elseif p_idx === nothing
+            :(-$V_n_expr)
+        elseif n_idx === nothing
+            V_p_expr
+        else
+            :($V_p_expr - $V_n_expr)
+        end
 
         push!(branch_stamp.args, quote
             if has_reactive
-                # Compute total capacitance and detect voltage-dependence
-                # detect_or_cached! compares across multiple runs with different operating points
-                _C_total = $c_total_expr
-                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_name_expr, _C_total)
+                # Detect voltage-dependence by comparing Q/V ratio across runs
+                # q_val is the charge value, V_branch is the branch voltage
+                _V_branch = $v_branch_expr
+                _is_voltage_dependent = CedarSim.MNA.detect_or_cached!(ctx, $charge_name_expr, _V_branch, q_val)
                 if _is_voltage_dependent
                     # Voltage-dependent charge: use charge formulation for constant mass matrix
                     # Allocate charge variable (or get existing one)

@@ -189,11 +189,15 @@ mutable struct MNAContext
     charge_branches::Vector{Tuple{Int,Int}}
 
     # Cache for voltage-dependent charge detection (build-time optimization)
-    # Detection works by comparing capacitances across multiple runs with different
-    # random operating points. If capacitance differs, the charge is voltage-dependent.
+    # Detection works by comparing Q/V ratios across multiple runs with different
+    # random operating points. If the ratio varies, the charge is voltage-dependent.
     # See doc/voltage_dependent_capacitor_detection_bug.md for design rationale.
+    #
+    # Key insight: dq_dV from ForwardDiff doesn't capture intermediate value dependencies,
+    # but the actual Q value DOES change correctly when x changes. So we compare Q/V ratios.
     charge_is_vdep::Vector{Bool}
-    charge_capacitances::Vector{Float64}  # Stored capacitances for comparison
+    charge_Q_values::Vector{Float64}  # Stored Q values for comparison
+    charge_V_values::Vector{Float64}  # Stored V_branch values for comparison
     charge_detection_pos::Int
 
     # Track if system has been finalized
@@ -226,7 +230,8 @@ function MNAContext()
         0,                  # n_charges
         Tuple{Int,Int}[],   # charge_branches
         Bool[],             # charge_is_vdep (detection cache)
-        Float64[],          # charge_capacitances (for comparison across runs)
+        Float64[],          # charge_Q_values (for Q/V ratio comparison)
+        Float64[],          # charge_V_values (for Q/V ratio comparison)
         1,                  # charge_detection_pos (counter for detection cache access)
         false               # finalized
     )
@@ -812,7 +817,8 @@ function clear!(ctx::MNAContext)
     ctx.n_charges = 0
     empty!(ctx.charge_branches)
     empty!(ctx.charge_is_vdep)
-    empty!(ctx.charge_capacitances)
+    empty!(ctx.charge_Q_values)
+    empty!(ctx.charge_V_values)
     ctx.charge_detection_pos = 1
     ctx.finalized = false
     return nothing

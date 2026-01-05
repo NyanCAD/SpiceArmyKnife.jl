@@ -82,8 +82,12 @@ end
 end
 
 @testset "Compile simple RC circuit" begin
-    function build_rc(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
 
@@ -114,8 +118,12 @@ end
 end
 
 @testset "PrecompiledCircuit DC solution" begin
-    function build_divider(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         mid = get_node!(ctx, :mid)
 
@@ -138,8 +146,12 @@ end
 end
 
 @testset "PrecompiledCircuit with DC solve" begin
-    function build_rc(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
 
@@ -162,8 +174,12 @@ end
 end
 
 @testset "fast_residual! computation" begin
-    function build_rc(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
 
@@ -192,8 +208,12 @@ end
 end
 
 @testset "Nonlinear circuit compilation" begin
-    function build_diode_circuit(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_diode_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
 
@@ -223,8 +243,12 @@ end
 end
 
 @testset "alter with compiled circuit" begin
-    function build_r(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_r(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
 
         stamp!(VoltageSource(params.V; name=:V1), ctx, vin, 0)
@@ -249,8 +273,12 @@ end
 end
 
 @testset "Performance comparison" begin
-    function build_large_ladder(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function build_large_ladder(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         N = params.N
 
         vin = get_node!(ctx, :vin)

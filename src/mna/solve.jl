@@ -1140,7 +1140,7 @@ export alter
 Get the system size (number of unknowns) for the circuit.
 """
 function system_size(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    ctx0 = build_with_detection(circuit)
     sys0 = assemble!(ctx0)
     return system_size(sys0)
 end
@@ -1163,8 +1163,58 @@ v_out = voltage(acc, :out, 0.5e-3)
 ```
 """
 function assemble!(circuit::MNACircuit)
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    # Multi-pass detection for voltage-dependent capacitors
+    # Run the builder multiple times with different random operating points
+    # to detect Q/V ratio variations. See doc/voltage_dependent_capacitor_detection_bug.md
+    #
+    # Pass 1: Discover structure, store initial (V, Q) values
+    # Pass 2+: Compare Q/V ratios - if different, mark as voltage-dependent
+    # Final: Build with accurate detection cache
+    #
+    # Key insight: While dq_dV from ForwardDiff doesn't capture intermediate value dependencies,
+    # the actual Q value DOES change when x changes. So we compare Q/V ratios.
+    ctx = build_with_detection(circuit)
     return assemble!(ctx)
+end
+
+"""
+    build_with_detection(circuit::MNACircuit) -> MNAContext
+
+Build circuit with multi-pass voltage-dependent charge detection.
+
+This function runs the builder multiple times with different operating points
+to detect which charges have voltage-dependent capacitance (Q/V ratio varies).
+All code paths that build from MNACircuit should use this function to ensure
+consistent detection results.
+
+Returns an MNAContext with accurate charge_is_vdep detection cache.
+"""
+function build_with_detection(circuit::MNACircuit)
+    N_DETECTION_PASSES = 3
+    ctx = nothing
+    known_size = 0
+
+    for pass in 1:N_DETECTION_PASSES
+        if ctx === nothing
+            # First pass: use ZERO_VECTOR to discover structure and get initial system size
+            ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+            known_size = system_size(ctx)
+        else
+            # Save system size BEFORE reset
+            known_size = system_size(ctx)
+
+            # Reset structure but preserve detection cache (charge_is_vdep, charge_Q_values, charge_V_values)
+            reset_for_restamping!(ctx)
+
+            # Generate random operating point using known size (avoid V=0 for Q/V comparison)
+            x = rand(known_size) * 0.8
+
+            # Re-run builder - this compares Q/V ratios and updates charge_is_vdep
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=x, ctx=ctx)
+        end
+    end
+
+    return ctx
 end
 
 """
@@ -1209,15 +1259,26 @@ end
 # Use the compiled versions (make_compiled_dae_residual) for ~10x speedup.
 
 """
-    detect_differential_vars(circuit::MNACircuit) -> BitVector
+    detect_differential_vars(circuit::MNACircuit; ctx=nothing) -> BitVector
 
 Determine which variables are differential (have du terms in C*du).
 
 Variables with nonzero rows in the C matrix are differential.
 Variables with zero rows are algebraic (no time derivatives).
+
+If `ctx` is provided, it will be used instead of calling build_with_detection.
+This ensures consistent detection results across code paths.
 """
-function detect_differential_vars(circuit::MNACircuit)
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
+    if ctx === nothing
+        ctx0 = build_with_detection(circuit)
+    else
+        # Use provided context directly - it should already have correct structure
+        # from previous build_with_detection or compute_initial_conditions.
+        # Do NOT rebuild with ZERO_VECTOR - reactive branches may return scalars
+        # at x=0 instead of Duals, causing incorrect structure.
+        ctx0 = ctx
+    end
     sys0 = assemble!(ctx0)
     return detect_differential_vars(sys0)
 end
@@ -1255,7 +1316,7 @@ function detect_differential_vars(sys::MNASystem)
 end
 
 """
-    compute_initial_conditions(circuit::MNACircuit) -> (u0, du0)
+    compute_initial_conditions(circuit::MNACircuit; ctx=nothing) -> (u0, du0)
 
 Compute consistent initial conditions via DC operating point.
 
@@ -1264,17 +1325,32 @@ Compute consistent initial conditions via DC operating point.
 3. Computes du0 to satisfy F(du0, u0, 0) = 0
 
 This is equivalent to CedarDCOp initialization.
+
+If `ctx` is provided, it will be used instead of calling build_with_detection.
+This ensures consistent detection results across code paths.
 """
-function compute_initial_conditions(circuit::MNACircuit)
+function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
+    # Use provided context or run multi-pass detection
+    if ctx === nothing
+        ctx = build_with_detection(circuit)
+    end
+    sys0 = assemble!(ctx)
+    n = system_size(sys0)
+
     # DC solve for u0 (node voltages and currents)
-    dc_spec = MNASpec(temp=circuit.spec.temp, mode=:dcop, time=0.0)
-    u0 = solve_dc(circuit.builder, circuit.params, dc_spec).x
+    # IMPORTANT: Do NOT rebuild with dc_spec here! The detection cache is position-based
+    # (charge_detection_pos), and if the circuit stamps differently in dcop mode (e.g.,
+    # skips capacitor stamps), the position counter won't advance correctly, causing
+    # subsequent detection cache lookups to be misaligned.
+    #
+    # Instead, use the already-assembled sys0 for the initial DC solve. The G\b solve
+    # is just an approximation anyway - the charge iteration below will refine it.
+    u0 = sys0.G \ sys0.b
 
-    n = length(u0)
-
-    # Get system structure to identify charge variables
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-    sys0 = assemble!(ctx0)
+    # Rebuild with circuit spec at DC operating point
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+    sys0 = assemble!(ctx)
 
     # Fix charge variable initial values
     # The DC solve may not correctly initialize charges because the constraint
@@ -1295,8 +1371,9 @@ function compute_initial_conditions(circuit::MNACircuit)
         # Re-solve for charge values using Newton iteration
         # The constraint is q = Q(V), which can be solved directly
         for iter in 1:5  # Few iterations should suffice
-            ctx_iter = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-            sys_iter = assemble!(ctx_iter)
+            reset_for_restamping!(ctx)
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+            sys_iter = assemble!(ctx)
 
             # For each charge variable, solve the constraint equation
             n_nodes = sys_iter.n_nodes
@@ -1316,8 +1393,9 @@ function compute_initial_conditions(circuit::MNACircuit)
             end
 
             # Check convergence
-            ctx_check = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-            sys_check = assemble!(ctx_check)
+            reset_for_restamping!(ctx)
+            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+            sys_check = assemble!(ctx)
             resid = sys_check.G * u0 - sys_check.b
             if norm(resid) < 1e-12
                 break
@@ -1326,8 +1404,9 @@ function compute_initial_conditions(circuit::MNACircuit)
     end
 
     # Recompute system at final u0
-    ctx0 = circuit.builder(circuit.params, circuit.spec, 0.0; x=u0)
-    sys0 = assemble!(ctx0)
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+    sys0 = assemble!(ctx)
 
     du0 = zeros(n)
 
@@ -1338,14 +1417,33 @@ function compute_initial_conditions(circuit::MNACircuit)
     rhs = sys0.b - sys0.G * u0
     diff_vars = detect_differential_vars(sys0)
 
-    # Compute du0 for differential variables
-    # Simple diagonal approximation (works for typical MNA)
-    C_dense = Matrix(sys0.C)
-    for i in 1:n
-        if diff_vars[i]
-            c_ii = C_dense[i, i]
-            if abs(c_ii) > 1e-15
-                du0[i] = rhs[i] / c_ii
+    # For charge-coupled systems, the C matrix has off-diagonal entries:
+    #   C[v_node, q_var] = 1 (charge couples to KCL)
+    #   C[q_var, :] = 0 (charge constraint is algebraic)
+    #
+    # The simple diagonal approximation doesn't work here. Instead, solve
+    # the reduced system for differential variables using least squares.
+    #
+    # Extract rows/cols for differential variables and solve:
+    #   C_diff * du_diff = rhs_diff
+    diff_idx = findall(diff_vars)
+    if !isempty(diff_idx)
+        C_dense = Matrix(sys0.C)
+        C_diff = C_dense[diff_idx, diff_idx]
+        rhs_diff = rhs[diff_idx]
+
+        # Use least squares in case C_diff is ill-conditioned
+        # This handles cases where some diagonal entries are zero but
+        # off-diagonal entries exist (charge coupling)
+        try
+            du_diff = C_diff \ rhs_diff
+            du0[diff_idx] = du_diff
+        catch e
+            # If direct solve fails, try pseudo-inverse
+            if isa(e, SingularException) || isa(e, LAPACKException)
+                du0[diff_idx] = pinv(C_diff) * rhs_diff
+            else
+                rethrow(e)
             end
         end
     end
@@ -1391,20 +1489,30 @@ finite differencing.
 """
 function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
                                u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
-    # Get initial conditions
+    # First run multi-pass detection to get consistent results
+    # This ctx will be reused for ALL subsequent operations to ensure consistency
+    ctx = build_with_detection(circuit)
+
+    # Get initial conditions using the same detection context
     if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(circuit)
+        u0_computed, du0_computed = compute_initial_conditions(circuit; ctx=ctx)
         u0 = u0 === nothing ? u0_computed : u0
         du0 = du0 === nothing ? du0_computed : du0
     end
 
-    # Detect differential variables
-    diff_vars = detect_differential_vars(circuit)
+    # Detect differential variables using the same detection context
+    diff_vars = detect_differential_vars(circuit; ctx=ctx)
 
-    # Compile circuit structure (immutable) and create workspace (mutable)
-    # The workspace is passed as the p parameter to the DAE solver
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec)
-    ws = create_workspace(cs)
+    # Compile circuit structure using the same detection context
+    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
+    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
+    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
+    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
+    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
 
     # Initialize workspace at t=0 with the DC operating point
     # This is required for IDA's initialization to work properly
@@ -1486,14 +1594,21 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     params = circuit.params
     base_spec = circuit.spec
 
-    # Get initial conditions via DC solve
+    # First run multi-pass detection to get consistent results
+    # This ctx will be reused for ALL subsequent operations to ensure consistency
+    ctx = build_with_detection(circuit)
+
+    # Get initial conditions via DC solve using the same detection context
     if u0 === nothing
-        dc_spec = MNASpec(temp=base_spec.temp, mode=:dcop, time=0.0)
-        u0 = solve_dc(builder, params, dc_spec).x
+        u0, _ = compute_initial_conditions(circuit; ctx=ctx)
     end
 
-    # Compile circuit for ~10x speedup
-    pc = compile_circuit(builder, params, base_spec)
+    # Compile circuit using the same detection context
+    # Use u0 instead of ZERO_VECTOR to ensure consistent structure
+    # (see comment in DAEProblem for detailed explanation)
+    reset_for_restamping!(ctx)
+    builder(params, base_spec, 0.0; x=u0, ctx=ctx)
+    pc = compile_circuit(builder, params, base_spec; ctx=ctx)
 
     # RHS function using precompiled circuit
     function rhs!(du, u, p, t)
@@ -1538,14 +1653,17 @@ end
 # Note: Unlike some SPICE simulators that force :dcop mode, we respect the circuit's
 # spec to allow mode-aware testing. Use with_mode(circuit, :dcop) explicitly if needed.
 function solve_dc(circuit::MNACircuit)
-    ctx = circuit.builder(circuit.params, circuit.spec, 0.0; x=ZERO_VECTOR)
+    ctx = build_with_detection(circuit)
     sys = assemble!(ctx)
     return solve_dc(sys)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)
+    # Build with detection, then rebuild with AC spec
+    ctx = build_with_detection(circuit)
     ac_spec = MNASpec(temp=circuit.spec.temp, mode=:ac, time=0.0)
-    ctx = circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR)
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, ac_spec, 0.0; x=ZERO_VECTOR, ctx=ctx)
     sys = assemble!(ctx)
     return solve_ac(sys, freqs; kwargs...)
 end

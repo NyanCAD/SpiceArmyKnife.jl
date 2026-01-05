@@ -504,10 +504,16 @@ end
 # Note: explicit_jacobian defaults to true for Sundials solvers (IDA) for performance.
 # OrdinaryDiffEq DAE solvers (DFBDF, DABDF2, DImplicitEuler) need explicit_jacobian=false
 # because their internal W matrix computation is incompatible with our custom Jacobian.
+#
+# Default initializealg is CedarDCOp which:
+# 1. Switches to :dcop mode (turns off time dependence)
+# 2. Solves DC steady state with robust nonlinear solver
+# 3. Uses BrownFullBasicInit to fix differential vars
+# This mirrors the original CedarSim approach and handles voltage-dependent capacitors.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractDAEAlgorithm;
                         abstol=1e-10, reltol=1e-8, explicit_jacobian=nothing,
-                        initializealg=nothing, kwargs...)
+                        initializealg=MNA.CedarDCOp(), kwargs...)
     # Auto-detect explicit_jacobian based on solver type
     # Sundials IDA works with explicit Jacobian, OrdinaryDiffEq DAE solvers don't
     if explicit_jacobian === nothing
@@ -515,12 +521,7 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
     end
 
     prob = SciMLBase.DAEProblem(circuit, tspan; explicit_jacobian=explicit_jacobian)
-    # Use initializealg if provided, otherwise let the solver use its default
-    if initializealg !== nothing
-        return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
-    else
-        return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, kwargs...)
-    end
+    return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end
 
 # ODE solver dispatch (Rodas5P, etc.)

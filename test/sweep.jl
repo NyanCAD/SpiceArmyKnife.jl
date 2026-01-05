@@ -5,7 +5,7 @@ using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
 # MNA imports for sweep tests
-using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!
+using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restamping!
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current, DCSolution
 using CedarSim: ParamLens
@@ -19,12 +19,16 @@ using CedarSim: ParamLens
 # We'll vary `R1` and `R2` with parameter sweeps,
 # then verify that the current out of `V` is correct.
 # Default values are R1=1000.0, R2=1000.0 (matching the old @kwdef struct)
-function build_two_resistor(params, spec, t::Real=0.0; x=Float64[])
+function build_two_resistor(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
     # Merge with defaults (like @kwdef did for the struct)
     defaults = (R1=1000.0, R2=1000.0)
     p = merge(defaults, params)
 
-    ctx = MNAContext()
+    if ctx === nothing
+        ctx = MNAContext()
+    else
+        reset_for_restamping!(ctx)
+    end
     vcc = get_node!(ctx, :vcc)
     out = get_node!(ctx, :out)
 
@@ -251,13 +255,17 @@ end
 
     # Test nested parameter access with var-strings (like SPICE codegen will use)
     # Builder uses ParamLens for hierarchical params with defaults
-    function build_nested_resistor(params, spec, t::Real=0.0; x=Float64[])
+    function build_nested_resistor(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         # Convert params to ParamLens for SPICE-style hierarchical access
         lens = ParamLens(params)
         # lens.inner(; defaults...) returns params merged with lens overrides
         p = lens.inner(; R1=1000.0, R2=1000.0)
 
-        ctx = MNAContext()
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)
 

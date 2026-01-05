@@ -502,8 +502,12 @@ end
     @testset "Tier 7: Transient Circuits" begin
 
         @testset "RC circuit with VADistiller components" begin
-            function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 v = get_node!(ctx, :v)
                 out = get_node!(ctx, :out)
 
@@ -525,8 +529,12 @@ end
         end
 
         @testset "Diode rectifier transient" begin
-            function build_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
 
@@ -540,7 +548,9 @@ end
             circuit = MNACircuit(build_rectifier; V=1.0, R=1000.0)
             tspan = (0.0, 1e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because diode has voltage-dependent junction capacitance
+            # QNDF uses mass matrix formulation which doesn't correctly handle vdep caps
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 0.5e-3
@@ -548,8 +558,12 @@ end
         end
 
         @testset "MOSFET CS amplifier transient" begin
-            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
                 vdrain = get_node!(ctx, :vdrain)
@@ -568,7 +582,8 @@ end
                                  Vdd=5.0, Vbias=1.5, Vac=0.1, freq=1000.0, Rd=2000.0)
             tspan = (0.0, 2e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because MOSFET has voltage-dependent gate capacitance
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3
@@ -577,8 +592,12 @@ end
         end
 
         @testset "BJT CE amplifier transient" begin
-            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)
                 vcollector = get_node!(ctx, :vcollector)
@@ -597,7 +616,8 @@ end
                                  Vcc=12.0, Vbias=0.6, Vac=0.01, freq=1000.0, Rc=1000.0)
             tspan = (0.0, 2e-3)
 
-            sol = tran!(circuit, tspan; solver=QNDF(), abstol=1e-8, reltol=1e-6)
+            # Use IDA (DAE solver) because BJT has voltage-dependent junction capacitance
+            sol = tran!(circuit, tspan; solver=IDA(), abstol=1e-8, reltol=1e-6)
             @test sol.retcode == SciMLBase.ReturnCode.Success
 
             T = 1e-3

@@ -49,13 +49,13 @@ and infinitely steep segments (same time, different values).
     type_stable_time = 0.0 * t  # Preserves type (e.g., ForwardDiff.Dual)
     if i <= 1
         # Signal is before the first timepoint, hold the first value.
-        @inbounds return ys[1] + type_stable_time
+        return ys[1] + type_stable_time
     end
     if i > length(ts)
         # Signal is beyond the final timepoint, hold the final value.
-        @inbounds return ys[end] + type_stable_time
+        return ys[end] + type_stable_time
     end
-    @inbounds begin
+    begin
         if ys[i-1] == ys[i]
             # signal is constant/flat (singularity in y)
             return ys[i] + type_stable_time

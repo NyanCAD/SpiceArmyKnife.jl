@@ -166,37 +166,78 @@ Tag ordering rules ensure ForwardDiff.Tag{F,V} is inner to our tags.
 end
 
 """
-    detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+    detect_or_cached!(ctx::MNAContext, name::Symbol, V_branch::Real, Q::Real) -> Bool
 
-Check cache for voltage-dependent charge detection result, or run detection if not cached.
+Detect voltage-dependent capacitance by comparing Q/V ratios across multiple runs.
 
-This is a build-time optimization: detection only needs to run once per branch.
-After the first call, results are cached in the context using counter-based access.
+The key insight is that while ∂Q/∂V from ForwardDiff doesn't capture intermediate
+value dependencies (because those are computed before JacobianTag duals exist),
+the actual Q value DOES change correctly when x changes. So we compare Q/V ratios:
 
-On first run through stamp code: pos > length(cache), so detect and push result.
-On subsequent runs (re-stamping): pos <= length(cache), so return cached result.
+- For linear capacitor: Q = C*V, so Q/V = C (constant across operating points)
+- For nonlinear capacitor: Q = f(V), so Q/V varies
+
+The circuit builder should be called multiple times with different random operating
+points to detect Q/V variations. After all detection runs, charge_is_vdep will be correct.
+
+See doc/voltage_dependent_capacitor_detection_bug.md for details.
 
 # Arguments
-- `ctx`: MNA context containing the detection cache
-- `name`: Unique name for this branch (ignored, uses counter access)
-- `contrib_fn`: Contribution function `V -> I` that may contain `va_ddt(Q(V))`
-- `Vp`, `Vn`: Operating point voltages
+- `ctx`: MNA context containing detection cache
+- `name`: Unique name for this branch (for debugging)
+- `V_branch`: Branch voltage V(p,n) = Vp - Vn at current operating point
+- `Q`: Charge value at current operating point
 
 # Returns
-- `true` if the contribution has voltage-dependent capacitance
-- `false` if purely resistive or constant capacitance
-
-# Example
-```julia
-# In generated stamp code:
-_is_vdep = detect_or_cached!(ctx, :Q_branch1, V -> va_ddt(C0 * V^2), Vp, Vn)
-if _is_vdep
-    # Use charge formulation
-else
-    # Use C matrix
-end
-```
+- `true` if voltage-dependent capacitance detected (Q/V ratio differs across runs)
+- `false` if constant capacitance (Q/V ratio same across all runs so far)
 """
+@inline function detect_or_cached!(ctx::MNAContext, name::Symbol, V_branch::Real, Q::Real)::Bool
+    pos = ctx.charge_detection_pos
+    ctx.charge_detection_pos = pos + 1
+
+    V = Float64(V_branch)
+    Q_val = Float64(Q)
+
+    if pos > length(ctx.charge_Q_values)
+        # First run: store (V, Q), assume linear for now
+        push!(ctx.charge_is_vdep, false)
+        push!(ctx.charge_Q_values, Q_val)
+        push!(ctx.charge_V_values, V)
+        return false
+    else
+        # Subsequent runs: compare Q/V ratio (apparent capacitance)
+        V_stored = ctx.charge_V_values[pos]
+        Q_stored = ctx.charge_Q_values[pos]
+
+        # Avoid division by very small voltages
+        V_min = 1e-6
+        if abs(V) > V_min && abs(V_stored) > V_min
+            # Compare apparent capacitance C = Q/V
+            C_current = Q_val / V
+            C_stored = Q_stored / V_stored
+
+            diff = abs(C_current - C_stored)
+            max_C = max(abs(C_current), abs(C_stored))
+
+            # Check if capacitance differs significantly (relative or absolute tolerance)
+            is_different = diff > 1e-15 && (max_C < 1e-30 || diff / max_C > 1e-6)
+
+            if is_different
+                # Mark as voltage-dependent (sticky - once true, stays true)
+                ctx.charge_is_vdep[pos] = true
+            end
+        end
+
+        # Update stored values for next comparison
+        ctx.charge_Q_values[pos] = Q_val
+        ctx.charge_V_values[pos] = V
+
+        return ctx.charge_is_vdep[pos]
+    end
+end
+
+# Legacy signature for backward compatibility (used by stamp_reactive_with_detection!)
 @inline function detect_or_cached!(ctx::MNAContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
     cache = ctx.charge_is_vdep
     pos = ctx.charge_detection_pos
@@ -206,25 +247,34 @@ end
         # First time: run detection and cache result
         result = is_voltage_dependent_charge(contrib_fn, Vp, Vn)
         push!(cache, result)
+        push!(ctx.charge_Q_values, 0.0)
+        push!(ctx.charge_V_values, 0.0)
         return result
     else
         # Subsequent runs: return cached result
-        return @inbounds cache[pos]
+        return cache[pos]
     end
 end
 
 """
-    detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real) -> Bool
+    detect_or_cached!(dctx::DirectStampContext, name::Symbol, V_branch::Real, Q::Real) -> Bool
 
 Counter-based lookup of cached charge detection result for DirectStampContext.
 
 Detection was done during the MNAContext build phase.
-This just returns the cached result.
+This just returns the cached result (V_branch and Q are ignored).
 """
+@inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, V_branch::Real, Q::Real)::Bool
+    pos = dctx.charge_detection_pos
+    dctx.charge_detection_pos = pos + 1
+    return dctx.charge_is_vdep[pos]
+end
+
+# Legacy signature for DirectStampContext (used by stamp_reactive_with_detection!)
 @inline function detect_or_cached!(dctx::DirectStampContext, name::Symbol, contrib_fn, Vp::Real, Vn::Real)::Bool
     pos = dctx.charge_detection_pos
     dctx.charge_detection_pos = pos + 1
-    return @inbounds dctx.charge_is_vdep[pos]
+    return dctx.charge_is_vdep[pos]
 end
 
 export detect_or_cached!
@@ -239,7 +289,7 @@ The name parameter is ignored - uses position counter for O(1) access.
 @inline function get_is_vdep(ctx::MNAContext, name::Symbol)::Bool
     pos = ctx.charge_detection_pos
     ctx.charge_detection_pos = pos + 1
-    return @inbounds ctx.charge_is_vdep[pos]
+    return ctx.charge_is_vdep[pos]
 end
 
 """
@@ -250,7 +300,7 @@ Counter-based lookup of cached charge detection result for DirectStampContext.
 @inline function get_is_vdep(dctx::DirectStampContext, name::Symbol)::Bool
     pos = dctx.charge_detection_pos
     dctx.charge_detection_pos = pos + 1
-    return @inbounds dctx.charge_is_vdep[pos]
+    return dctx.charge_is_vdep[pos]
 end
 
 """

@@ -136,7 +136,7 @@ struct EvalWorkspace{T,CS<:CompiledStructure}
 end
 
 """
-    create_workspace(cs::CompiledStructure{F,P,S}) -> EvalWorkspace
+    create_workspace(cs::CompiledStructure{F,P,S}; ctx=nothing) -> EvalWorkspace
 
 Create a workspace that stamps directly to sparse matrices.
 
@@ -144,10 +144,17 @@ This is the single recommended API - it works optimally for all circuit sizes:
 - No intermediate G_V, C_V arrays
 - Stamps go straight to sparse nzval
 - Deferred b stamps resolved using precomputed mapping
+
+If `ctx` is provided, it will be used for the DirectStampContext (including its
+detection cache). This is important for voltage-dependent capacitor detection:
+if ZERO_VECTOR is used to build the context, reactive branches like ddt(Q(V))
+may return scalars instead of Duals, causing incorrect detection cache.
 """
-function create_workspace(cs::CompiledStructure{F,P,S}) where {F,P,S}
-    # Get initial context for structure info
-    ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
+function create_workspace(cs::CompiledStructure{F,P,S}; ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or rebuild (fallback for backward compatibility)
+    if ctx === nothing
+        ctx = cs.builder(cs.params, cs.spec, 0.0; x=ZERO_VECTOR)
+    end
 
     # Create b vector
     b = zeros(Float64, cs.n)
@@ -357,14 +364,21 @@ then creates the sparse matrices and COO→CSC mappings.
   Time is passed explicitly for zero-allocation iteration.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
+- `ctx`: Optional pre-built context with detection cache. If provided,
+  this context is used instead of building fresh. This ensures consistent
+  detection results across code paths.
 
 # Returns
 An immutable `CompiledStructure` that can be shared across threads.
 Use `create_workspace(cs)` to create a mutable workspace for evaluation.
 """
-function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
-    # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or build fresh
+    if ctx === nothing
+        ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    else
+        ctx0 = ctx
+    end
     n = system_size(ctx0)
 
     if n == 0
@@ -401,7 +415,7 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
     # These are fixed after the first build and can be reused in value-only mode
     n_b_deferred = length(ctx0.b_I)
     b_deferred_resolved = Vector{Int}(undef, n_b_deferred)
-    @inbounds for k in 1:n_b_deferred
+    for k in 1:n_b_deferred
         idx_typed = ctx0.b_I[k]
         b_deferred_resolved[k] = if idx_typed isa NodeIndex
             idx_typed.idx
@@ -426,7 +440,7 @@ function compile_structure(builder::F, params::P, spec::S) where {F,P,S}
 end
 
 """
-    compile_circuit(builder, params, spec; capacity_factor=2.0) -> PrecompiledCircuit
+    compile_circuit(builder, params, spec; capacity_factor=2.0, ctx=nothing) -> PrecompiledCircuit
 
 Compile a circuit builder into a PrecompiledCircuit.
 
@@ -440,6 +454,8 @@ then creates the sparse matrices and COO→CSC mappings.
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec)
 - `capacity_factor`: Extra capacity for COO arrays (safety margin)
+- `ctx`: Optional pre-built context with detection cache. If provided,
+  this context is used instead of building fresh.
 
 # Returns
 A `PrecompiledCircuit` ready for fast evaluation.
@@ -486,9 +502,14 @@ points, consider:
 2. Using a "compilation operating point" that activates all paths
 """
 function compile_circuit(builder::F, params::P, spec::S;
-                        capacity_factor::Float64=2.0) where {F,P,S}
-    # First pass: discover structure at zero operating point (t=0.0)
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+                        capacity_factor::Float64=2.0,
+                        ctx::Union{MNAContext, Nothing}=nothing) where {F,P,S}
+    # Use provided context or build fresh
+    if ctx === nothing
+        ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    else
+        ctx0 = ctx
+    end
     n = system_size(ctx0)
 
     if n == 0
@@ -616,7 +637,7 @@ function update_sparse_from_coo!(S::SparseMatrixCSC, V::Vector{Float64},
     nz = nonzeros(S)
     fill!(nz, 0.0)
 
-    @inbounds for k in 1:n_entries
+    for k in 1:n_entries
         idx = mapping[k]
         if idx > 0
             nz[idx] += V[k]
@@ -641,12 +662,12 @@ function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
 
     # Copy direct stamps
     n = min(length(b_direct), length(b))
-    @inbounds for i in 1:n
+    for i in 1:n
         b[i] = b_direct[i]
     end
 
     # Apply deferred stamps (typed indices for current/charge variables)
-    @inbounds for (idx_typed, v) in zip(b_deferred_I, b_deferred_V)
+    for (idx_typed, v) in zip(b_deferred_I, b_deferred_V)
         # Resolve typed index to actual position
         idx = if idx_typed isa NodeIndex
             idx_typed.idx
@@ -699,16 +720,16 @@ function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
     @assert n_C == pc.C_n_coo "C matrix COO length changed: expected $(pc.C_n_coo), got $n_C"
 
     # Copy COO values only (indices are assumed constant)
-    @inbounds for k in 1:n_G
+    for k in 1:n_G
         pc.G_V[k] = ctx.G_V[k]
     end
-    @inbounds for k in 1:n_C
+    for k in 1:n_C
         pc.C_V[k] = ctx.C_V[k]
     end
 
     # Copy b vector data
     n_b = min(length(ctx.b), length(pc.b_direct))
-    @inbounds for i in 1:n_b
+    for i in 1:n_b
         pc.b_direct[i] = ctx.b[i]
     end
 
@@ -776,7 +797,7 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
 
     # Apply deferred b stamps
     n_deferred = cs.n_b_deferred
-    @inbounds for k in 1:n_deferred
+    for k in 1:n_deferred
         idx = dctx.b_resolved[k]
         if idx > 0
             dctx.b[idx] += dctx.b_V[k]

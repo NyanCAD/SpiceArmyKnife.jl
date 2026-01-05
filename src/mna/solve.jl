@@ -1417,14 +1417,33 @@ function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, 
     rhs = sys0.b - sys0.G * u0
     diff_vars = detect_differential_vars(sys0)
 
-    # Compute du0 for differential variables
-    # Simple diagonal approximation (works for typical MNA)
-    C_dense = Matrix(sys0.C)
-    for i in 1:n
-        if diff_vars[i]
-            c_ii = C_dense[i, i]
-            if abs(c_ii) > 1e-15
-                du0[i] = rhs[i] / c_ii
+    # For charge-coupled systems, the C matrix has off-diagonal entries:
+    #   C[v_node, q_var] = 1 (charge couples to KCL)
+    #   C[q_var, :] = 0 (charge constraint is algebraic)
+    #
+    # The simple diagonal approximation doesn't work here. Instead, solve
+    # the reduced system for differential variables using least squares.
+    #
+    # Extract rows/cols for differential variables and solve:
+    #   C_diff * du_diff = rhs_diff
+    diff_idx = findall(diff_vars)
+    if !isempty(diff_idx)
+        C_dense = Matrix(sys0.C)
+        C_diff = C_dense[diff_idx, diff_idx]
+        rhs_diff = rhs[diff_idx]
+
+        # Use least squares in case C_diff is ill-conditioned
+        # This handles cases where some diagonal entries are zero but
+        # off-diagonal entries exist (charge coupling)
+        try
+            du_diff = C_diff \ rhs_diff
+            du0[diff_idx] = du_diff
+        catch e
+            # If direct solve fails, try pseudo-inverse
+            if isa(e, SingularException) || isa(e, LAPACKException)
+                du0[diff_idx] = pinv(C_diff) * rhs_diff
+            else
+                rethrow(e)
             end
         end
     end

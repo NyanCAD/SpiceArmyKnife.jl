@@ -66,4 +66,7 @@ include("precompile.jl")
 # Analysis solvers (uses precompile.jl types)
 include("solve.jl")
 
+# Cedar DC operating point initialization (uses EvalWorkspace from precompile.jl)
+include("dcop.jl")
+
 end # module MNA

@@ -291,7 +291,7 @@ function get_node!(ctx::MNAContext, name::Symbol)::Int
         new_len = system_size(ctx)
         resize!(ctx.b, new_len)
         # Zero-initialize all new elements (resize! leaves them uninitialized)
-        @inbounds for j in (old_len+1):new_len
+        for j in (old_len+1):new_len
             ctx.b[j] = 0.0
         end
     end
@@ -663,7 +663,7 @@ The b vector contains source terms:
     if idx > length(ctx.b)
         old_len = length(ctx.b)
         resize!(ctx.b, idx)
-        @inbounds for j in (old_len+1):idx
+        for j in (old_len+1):idx
             ctx.b[j] = 0.0
         end
     end

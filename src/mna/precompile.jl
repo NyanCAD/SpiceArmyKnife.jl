@@ -408,7 +408,7 @@ function compile_structure(builder::F, params::P, spec::S; ctx::Union{MNAContext
     # These are fixed after the first build and can be reused in value-only mode
     n_b_deferred = length(ctx0.b_I)
     b_deferred_resolved = Vector{Int}(undef, n_b_deferred)
-    @inbounds for k in 1:n_b_deferred
+    for k in 1:n_b_deferred
         idx_typed = ctx0.b_I[k]
         b_deferred_resolved[k] = if idx_typed isa NodeIndex
             idx_typed.idx
@@ -630,7 +630,7 @@ function update_sparse_from_coo!(S::SparseMatrixCSC, V::Vector{Float64},
     nz = nonzeros(S)
     fill!(nz, 0.0)
 
-    @inbounds for k in 1:n_entries
+    for k in 1:n_entries
         idx = mapping[k]
         if idx > 0
             nz[idx] += V[k]
@@ -655,12 +655,12 @@ function update_b_vector!(b::Vector{Float64}, b_direct::Vector{Float64},
 
     # Copy direct stamps
     n = min(length(b_direct), length(b))
-    @inbounds for i in 1:n
+    for i in 1:n
         b[i] = b_direct[i]
     end
 
     # Apply deferred stamps (typed indices for current/charge variables)
-    @inbounds for (idx_typed, v) in zip(b_deferred_I, b_deferred_V)
+    for (idx_typed, v) in zip(b_deferred_I, b_deferred_V)
         # Resolve typed index to actual position
         idx = if idx_typed isa NodeIndex
             idx_typed.idx
@@ -713,16 +713,16 @@ function fast_rebuild!(pc::PrecompiledCircuit, u::Vector{Float64}, t::Real)
     @assert n_C == pc.C_n_coo "C matrix COO length changed: expected $(pc.C_n_coo), got $n_C"
 
     # Copy COO values only (indices are assumed constant)
-    @inbounds for k in 1:n_G
+    for k in 1:n_G
         pc.G_V[k] = ctx.G_V[k]
     end
-    @inbounds for k in 1:n_C
+    for k in 1:n_C
         pc.C_V[k] = ctx.C_V[k]
     end
 
     # Copy b vector data
     n_b = min(length(ctx.b), length(pc.b_direct))
-    @inbounds for i in 1:n_b
+    for i in 1:n_b
         pc.b_direct[i] = ctx.b[i]
     end
 
@@ -790,7 +790,7 @@ function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
 
     # Apply deferred b stamps
     n_deferred = cs.n_b_deferred
-    @inbounds for k in 1:n_deferred
+    for k in 1:n_deferred
         idx = dctx.b_resolved[k]
         if idx > 0
             dctx.b[idx] += dctx.b_V[k]

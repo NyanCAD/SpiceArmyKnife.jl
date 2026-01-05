@@ -137,14 +137,14 @@ end
 
 @inline function get_node!(dctx::DirectStampContext, name::Symbol)::Int
     (name === :gnd || name === Symbol("0") || name === Symbol("gnd!")) && return 0
-    @inbounds return dctx.node_to_idx[name]
+    return dctx.node_to_idx[name]
 end
 
 @inline get_node!(dctx::DirectStampContext, name::String) = get_node!(dctx, Symbol(name))
 @inline get_node!(dctx::DirectStampContext, idx::Int) = idx
 
 @inline function alloc_internal_node!(dctx::DirectStampContext, name::Symbol)::Int
-    @inbounds return dctx.node_to_idx[name]
+    return dctx.node_to_idx[name]
 end
 
 @inline alloc_internal_node!(dctx::DirectStampContext, name::String) = alloc_internal_node!(dctx, Symbol(name))
@@ -179,10 +179,10 @@ No intermediate array - single memory write.
     dctx.G_pos = pos + 1
 
     # Direct write to sparse matrix nzval
-    nz_idx = @inbounds dctx.G_mapping[pos]
+    nz_idx = dctx.G_mapping[pos]
     if nz_idx > 0
         v = extract_value(val)
-        @inbounds dctx.G_nzval[nz_idx] += v
+        dctx.G_nzval[nz_idx] += v
     end
 
     return nothing
@@ -200,10 +200,10 @@ Stamp C matrix value DIRECTLY to sparse nzval using precomputed mapping.
     pos = dctx.C_pos
     dctx.C_pos = pos + 1
 
-    nz_idx = @inbounds dctx.C_mapping[pos]
+    nz_idx = dctx.C_mapping[pos]
     if nz_idx > 0
         v = extract_value(val)
-        @inbounds dctx.C_nzval[nz_idx] += v
+        dctx.C_nzval[nz_idx] += v
     end
 
     return nothing
@@ -222,12 +222,12 @@ Stamp b vector value. Direct for nodes, deferred for currents/charges.
     if typed isa CurrentIndex || typed isa ChargeIndex
         # Deferred stamp: store value, apply later with pre-resolved index
         pos = dctx.b_deferred_pos
-        @inbounds dctx.b_V[pos] = v
+        dctx.b_V[pos] = v
         dctx.b_deferred_pos = pos + 1
     else
         # NodeIndex: direct stamp
         idx = typed.idx
-        @inbounds dctx.b[idx] += v
+        dctx.b[idx] += v
     end
     return nothing
 end

@@ -73,6 +73,58 @@ Key features:
    - Spineax for GPU (with COO→CSR precomputation)
    - cuDSS for NVIDIA GPUs
 
+### Critical Insight: JAX-SPICE Ignores Convergence Failures
+
+**This is the key difference from SciML/IDA.**
+
+jax-spice uses a simple forward/backward Euler timestepping loop that **does not require Newton convergence**. From `engine.py` (lines 3095-3108):
+
+```python
+def step_fn(carry, source_vals):
+    V, Q_prev = carry
+    vsource_vals, isource_vals = source_vals
+    V_new, iterations, converged, max_f, Q = nr_solve_fn(
+        V, vsource_vals, isource_vals, Q_prev, inv_dt_val, device_arrays_arg
+    )
+    # Uses V_new regardless of whether converged is True or False!
+    return (V_new, Q), (V_new[:n_ext], iterations, converged)
+```
+
+They track convergence as a **statistic**, not a stopping condition:
+
+```python
+non_converged = int(jnp.sum(~all_converged))
+stats = {
+    'non_converged_count': non_converged,
+    'convergence_rate': 1.0 - non_converged / max(num_timesteps, 1),
+    ...
+}
+```
+
+**Why this works for them:**
+1. **Fixed small timestep** (e.g., 0.05ns) - errors don't accumulate catastrophically
+2. **Capacitors provide damping** - even unconverged Newton gives bounded updates
+3. **No consistency requirement** - they don't need `F(du0, u0, 0) = 0`
+4. **Backward Euler is unconditionally stable** - won't blow up even with large errors
+
+**Why this doesn't work with SciML/IDA:**
+1. **IDA requires consistent initial conditions**: `F(du0, u0, 0) = 0` must be satisfied
+2. **IDA fails on Newton non-convergence**: The entire simulation stops
+3. **IDA uses adaptive timestep control**: Based on local error estimates that assume convergence
+4. **IDA is a proper DAE solver**: It solves the algebraic constraints exactly
+
+**Implications for SpiceArmyKnife.jl:**
+
+To match jax-spice's behavior, we would need to either:
+1. **Implement a custom Euler integrator** that ignores convergence like jax-spice
+2. **Use `initializealg = NoInit()`** to skip IDA's consistency check (risky)
+3. **Pre-compute very good initial conditions** so IDA's first Newton succeeds
+
+The jax-spice approach is less rigorous but pragmatic for digital circuits where:
+- The capacitances naturally damp oscillations
+- Small timesteps keep local errors bounded
+- Exact algebraic constraint satisfaction isn't critical
+
 ### Current Status in JAX-SPICE
 
 From `registry.py`:

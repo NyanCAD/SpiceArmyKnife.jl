@@ -5,7 +5,7 @@ using CedarSim
 include(joinpath(Base.pkgdir(CedarSim), "test", "common.jl"))
 
 # MNA imports for sweep tests
-using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!
+using CedarSim.MNA: MNAContext, MNACircuit, get_node!, stamp!, reset_for_restamping!
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current, DCSolution
 using CedarSim: ParamLens

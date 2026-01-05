@@ -502,8 +502,12 @@ end
     @testset "Tier 7: Transient Circuits" begin
 
         @testset "RC circuit with VADistiller components" begin
-            function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 v = get_node!(ctx, :v)
                 out = get_node!(ctx, :out)
 
@@ -525,8 +529,12 @@ end
         end
 
         @testset "Diode rectifier transient" begin
-            function build_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_rectifier(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
 
@@ -548,8 +556,12 @@ end
         end
 
         @testset "MOSFET CS amplifier transient" begin
-            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_cs_amp(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 vgate = get_node!(ctx, :vgate)
                 vdrain = get_node!(ctx, :vdrain)
@@ -577,8 +589,12 @@ end
         end
 
         @testset "BJT CE amplifier transient" begin
-            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
-                reset_for_restamping!(ctx)
+            function build_ce_amp(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 vbase = get_node!(ctx, :vbase)
                 vcollector = get_node!(ctx, :vcollector)

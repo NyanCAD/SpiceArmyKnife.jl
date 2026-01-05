@@ -51,16 +51,6 @@ sol = dc!(circuit)
 println("Output voltage: ", voltage(sol, :out))  # 2.5V (voltage divider)
 ```
 
-## Documentation
-
-Design documentation is available in the `doc/` directory:
-
-| File | Description |
-|------|-------------|
-| `doc/mna_design.md` | Core design decisions and key principles |
-| `doc/mna_architecture.md` | Architecture details and GPU compatibility design |
-| `doc/code_tour_mna_pipeline.md` | Code tour of the MNA pipeline |
-
 ## Testing
 
 Run the test suite:
@@ -75,9 +65,9 @@ Or run specific test groups:
 julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
 ```
 
-## License / Contributing
+## License
 
-Cadnip is dual-licensed under a commercial license and CERN-OHL-S v2. Some packages are also available under the MIT license. Please see the LICENSE file for more information and the LICENSE.FAQ.md file for details on using Cadnip under the CERN-OHL-S v2 license.
+This package is available under the MIT license (see LICENSE.MIT). You may also use it under CERN-OHL-S v2 if that better suits your project.
 
 Contributions are welcome! Please open an issue or pull request on GitHub.
 

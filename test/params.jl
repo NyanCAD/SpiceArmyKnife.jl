@@ -6,7 +6,7 @@ include("common.jl")
 using CedarSim.MNA: MNAContext, MNACircuit, MNASpec, get_node!, stamp!, assemble!, solve_dc
 using CedarSim.MNA: Resistor, VoltageSource
 using CedarSim.MNA: voltage, current
-using CedarSim.MNA: alter  # MNA-specific alter for MNACircuit
+using CedarSim.MNA: alter, reset_for_restamping!  # MNA-specific alter for MNACircuit
 using CedarSim: ParamLens, IdentityLens
 using CedarSim: dc!
 
@@ -19,12 +19,16 @@ using CedarSim: dc!
 
 # MNA builder function equivalent to ParCir struct
 # Default values: R=2.0, V=5.0
-function build_par_cir(params, spec, t::Real=0.0; x=Float64[])
+function build_par_cir(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
     # Merge with defaults (like @kwdef did for the struct)
     defaults = (R=2.0, V=5.0)
     p = merge(defaults, params)
 
-    ctx = MNAContext()
+    if ctx === nothing
+        ctx = MNAContext()
+    else
+        reset_for_restamping!(ctx)
+    end
     vcc = get_node!(ctx, :vcc)
     gnd = get_node!(ctx, :gnd)  # Use explicit gnd node for clarity
 
@@ -49,12 +53,16 @@ sol = dc!(circuit)
 
 # MNA builder using ParamLens for hierarchical access
 # Structure: (child=(params=(R=..., V=...),),)
-function build_nested_par_cir(params, spec, t::Real=0.0; x=Float64[])
+function build_nested_par_cir(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
     lens = ParamLens(params)
     # lens.child(; defaults...) merges defaults with overrides
     p = lens.child(; R=2.0, V=5.0)
 
-    ctx = MNAContext()
+    if ctx === nothing
+        ctx = MNAContext()
+    else
+        reset_for_restamping!(ctx)
+    end
     vcc = get_node!(ctx, :vcc)
 
     stamp!(VoltageSource(p.V; name=:V), ctx, vcc, 0)
@@ -80,12 +88,16 @@ sol = dc!(circuit)
 #==============================================================================#
 
 # MNA builder using ParamLens for parameter defaults with overrides
-function build_func_cir(params, spec, t::Real=0.0; x=Float64[])
+function build_func_cir(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
     lens = ParamLens(params)
     # Call lens with defaults - returns merged params
     p = lens(; V=5.0, R=2.0)
 
-    ctx = MNAContext()
+    if ctx === nothing
+        ctx = MNAContext()
+    else
+        reset_for_restamping!(ctx)
+    end
     vcc = get_node!(ctx, :vcc)
 
     stamp!(VoltageSource(p.V::Float64; name=:V), ctx, vcc, 0)

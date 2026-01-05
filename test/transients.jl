@@ -2,7 +2,7 @@ module transient_tests
 
 include("common.jl")
 
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
 using CedarSim.MNA: PWLVoltageSource, PWLCurrentSource, SinVoltageSource
 using CedarSim.MNA: voltage, current, MNACircuit
@@ -73,8 +73,12 @@ const r_val_pwl = 2
     end
 
     # Also test using direct MNA API with PWLCurrentSource
-    function PWLIRcircuit(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function PWLIRcircuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vout = get_node!(ctx, :vout)
         # PWL: 0->0 at 1ms, 0->i_max at 9ms
         times = [1e-3, 9e-3]
@@ -188,8 +192,12 @@ const ω_val = 1
     @test isapprox(rms(steady_state_vout), 0.5; atol=0.15, rtol=0.15)
 
     # Test using direct MNA API with SinVoltageSource
-    function butterworth_circuit(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function butterworth_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         vin = get_node!(ctx, :vin)
         n1 = get_node!(ctx, :n1)
         vout = get_node!(ctx, :vout)

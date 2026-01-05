@@ -7,14 +7,12 @@
 #
 # Benchmark target: ~1 million timepoints, ~2 million iterations
 #
-# Note: Uses Sundials IDA (variable-order BDF, orders 1-5) with dtmax to enforce
-# fixed timesteps. IDA is comparable to ngspice's Gear method and uses our
-# explicit Jacobian for optimal performance.
+# Note: Uses Rodas5P (Rosenbrock method) with dtmax to enforce fixed timesteps.
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using Sundials
+using OrdinaryDiffEq: Rodas5P
 using BenchmarkTools
 using Printf
 
@@ -42,15 +40,14 @@ end
 function run_benchmark(; dt=1e-6)
     tspan = (0.0, 1.0)  # 1 second simulation
 
-    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
-    # IDA uses our explicit Jacobian for optimal performance.
-    solver = IDA(max_error_test_failures=20)
+    # Use Rodas5P (Rosenbrock method) with dtmax to enforce timestep constraint.
+    solver = Rodas5P()
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with IDA (dtmax=$dt)...")
+    println("\nBenchmarking transient analysis with Rodas5P (dtmax=$dt)...")
     bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver) samples=6 evals=1 seconds=600
 
     # Also run once to get solution statistics

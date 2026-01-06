@@ -1603,40 +1603,48 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         u0, _ = compute_initial_conditions(circuit; ctx=ctx)
     end
 
-    # Compile circuit using the same detection context
-    # Use u0 instead of ZERO_VECTOR to ensure consistent structure
-    # (see comment in DAEProblem for detailed explanation)
+    # Compile circuit structure using the same detection context
+    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
+    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
+    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
+    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
+    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
     reset_for_restamping!(ctx)
     builder(params, base_spec, 0.0; x=u0, ctx=ctx)
-    pc = compile_circuit(builder, params, base_spec; ctx=ctx)
+    cs = compile_structure(builder, params, base_spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
 
-    # RHS function using precompiled circuit
+    # Initialize workspace at t=0 with the DC operating point
+    fast_rebuild!(ws, u0, 0.0)
+
+    # RHS function using EvalWorkspace with DirectStampContext
+    # This is the zero-allocation path that preserves the detection cache
     function rhs!(du, u, p, t)
-        fast_rebuild!(pc, u, real_time(t))
+        fast_rebuild!(ws, u, real_time(t))
         # du = b - G*u
-        mul!(du, pc.G, u)
+        mul!(du, cs.G, u)
         du .*= -1
-        du .+= pc.b
+        du .+= ws.dctx.b
         return nothing
     end
 
-    # Jacobian using precompiled circuit
+    # Jacobian using EvalWorkspace
     function jac!(J, u, p, t)
-        fast_rebuild!(pc, u, real_time(t))
-        copyto!(J, -pc.G)
+        fast_rebuild!(ws, u, real_time(t))
+        copyto!(J, -cs.G)
         return nothing
     end
 
-    # Note: Mass matrix pc.C is evaluated at the initial DC operating point and
+    # Note: Mass matrix cs.C is evaluated at the initial DC operating point and
     # remains constant during integration. For voltage-dependent capacitance
     # (junction capacitance), use DAEProblem instead - it rebuilds the C matrix
     # at each step via fast_rebuild!.
 
     f = SciMLBase.ODEFunction(
         rhs!;
-        mass_matrix = pc.C,
+        mass_matrix = cs.C,
         jac = jac!,
-        jac_prototype = -pc.G
+        jac_prototype = -cs.G
     )
 
     return SciMLBase.ODEProblem(f, u0, Float64.(tspan); kwargs...)

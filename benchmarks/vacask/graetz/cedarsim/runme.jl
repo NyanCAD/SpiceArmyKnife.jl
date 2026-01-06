@@ -7,14 +7,14 @@
 #
 # Benchmark target: ~1 million timepoints, ~2 million NR iterations
 #
-# Note: Uses Sundials IDA (variable-order BDF, orders 1-5) with dtmax to enforce
-# fixed timesteps. IDA is comparable to ngspice's Gear method and uses our
-# explicit Jacobian for 5x memory reduction vs DABDF2 autodiff.
+# Usage: julia runme.jl [solver]
+#   solver: IDA (default), FBDF, or Rodas5P
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
-using Sundials
+using Sundials: IDA
+using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
 using VerilogAParser
@@ -56,27 +56,22 @@ function setup_simulation()
     return circuit
 end
 
-function run_benchmark(; dt=1e-6)
+function run_benchmark(solver; dt=1e-6, maxiters=10_000_000)
     tspan = (0.0, 1.0)  # 1 second simulation (~1M timepoints with dt=1us)
-
-    # Use Sundials IDA (variable-order BDF) with dtmax to enforce timestep constraint.
-    # IDA uses our explicit Jacobian (5x less memory than DABDF2 autodiff).
-    # - max_nonlinear_iters=100: High limit ensures Newton converges at each step
-    # - max_error_test_failures=20: More retries for difficult transient points
-    solver = IDA(max_nonlinear_iters=100, max_error_test_failures=20)
+    solver_name = nameof(typeof(solver))
 
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
     # Benchmark the actual simulation (not setup)
-    println("\nBenchmarking transient analysis with IDA (dtmax=$dt)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, abstol=1e-3, reltol=1e-3) samples=6 evals=1 seconds=600
+    println("\nBenchmarking transient analysis with $solver_name (dtmax=$dt)...")
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, abstol=1e-3, reltol=1e-3, maxiters=$maxiters) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3)
+    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3, maxiters=maxiters)
 
-    println("\n=== Results ===")
+    println("\n=== Results ($solver_name) ===")
     @printf("Timepoints:  %d\n", length(sol.t))
     @printf("Expected:    ~%d\n", round(Int, (tspan[2] - tspan[1]) / dt) + 1)
     @printf("NR iters:    %d\n", sol.stats.nnonliniter)
@@ -89,5 +84,15 @@ end
 
 # Run if executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
-    run_benchmark()
+    solver_name = length(ARGS) >= 1 ? ARGS[1] : "IDA"
+    solver = if solver_name == "IDA"
+        IDA(max_nonlinear_iters=100, max_error_test_failures=20)
+    elseif solver_name == "FBDF"
+        FBDF()
+    elseif solver_name == "Rodas5P"
+        Rodas5P()
+    else
+        error("Unknown solver: $solver_name. Use IDA, FBDF, or Rodas5P")
+    end
+    run_benchmark(solver)
 end

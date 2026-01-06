@@ -27,6 +27,9 @@ if PHASE0_MINIMAL
         @testset "VADistiller Integration" begin
             @testset "mna/vadistiller_integration.jl" include("mna/vadistiller_integration.jl")
         end
+        @testset "Audio Integration" begin
+            @testset "mna/audio_integration.jl" include("mna/audio_integration.jl")
+        end
     elseif RUN_CORE
         @info "Running Phase 0/1 tests (parsing/codegen + MNA core)"
 
@@ -75,6 +78,9 @@ if PHASE0_MINIMAL
             GC.gc()  # Clean up before heavy tests
             @testset "VADistiller Integration" begin
                 @testset "mna/vadistiller_integration.jl" include("mna/vadistiller_integration.jl")
+            end
+            @testset "Audio Integration" begin
+                @testset "mna/audio_integration.jl" include("mna/audio_integration.jl")
             end
         end
     end

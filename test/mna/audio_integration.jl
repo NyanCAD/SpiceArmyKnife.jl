@@ -1,16 +1,17 @@
 #==============================================================================#
-# Audio Integration Tests: SPICE Circuits with Simplified Verilog-A BJT Models
+# Audio Integration Tests: MNA Circuits with Simplified Verilog-A BJT Models
 #
-# This file tests mixed SPICE/Verilog-A circuit simulation using:
-# - VA BJT models (Ebers-Moll equations)
-# - Transient simulation with sinusoidal inputs
+# This file tests mixed MNA/Verilog-A circuit simulation using:
+# - VA BJT models (Ebers-Moll equations) via va"""...""" macro
+# - Builder functions with stamp!() for circuit construction
+# - Transient simulation with sinusoidal inputs (SinVoltageSource)
 # - Signal processing analysis (gain measurement)
 #
 # Key patterns demonstrated:
-# 1. va"""...""" for creating device models
-# 2. Builder function pattern with solve_dc()
-# 3. tran!() for transient simulation
-# 4. MNASolutionAccessor for accessing results
+# 1. va"""...""" for creating 3-terminal VA device models
+# 2. Builder function pattern with _mna_x_ for Newton iteration
+# 3. MNACircuit and tran!() for transient simulation
+# 4. MNASolutionAccessor for extracting voltage trajectories
 #==============================================================================#
 
 using Test
@@ -45,7 +46,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 #==============================================================================#
 
 va"""
-module npnBJTEbersMoll(b, e, c);
+module npnbjt(b, e, c);
     inout b, e, c;
     electrical b, e, c;
     analog I(b,e) <+ 1.0e-14*(exp(V(b,e)/25.0e-3) - 1) - 1.0/(1 + 100.0)*1.0e-14*(exp(V(b,c)/25.0e-3) - 1);
@@ -60,23 +61,21 @@ endmodule
     #
     # Test the BJT model at a known operating point using voltage sources.
     # This verifies the BJT model produces correct terminal currents.
+    # Note: We use a builder function to properly pass _mna_x_ for Newton
+    # iteration on nonlinear VA devices.
     #==========================================================================#
     @testset "BJT with fixed voltages - active region" begin
-        # Apply known voltages and verify currents
-        # Vbe = 0.65V (forward biased), Vbc = -4.35V (reverse biased)
-        # Active mode: Ic ≈ BF * Ib
-
         function bjt_fixed_voltage(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             b = get_node!(ctx, :b)
             c = get_node!(ctx, :c)
 
             # Fixed voltage sources to set operating point
-            stamp!(VoltageSource(0.65; name=:Vbe), ctx, b, 0)    # Base at 0.65V
-            stamp!(VoltageSource(5.0; name=:Vce), ctx, c, 0)     # Collector at 5V
+            stamp!(VoltageSource(0.65; name=:Vbe), ctx, b, 0)
+            stamp!(VoltageSource(5.0; name=:Vce), ctx, c, 0)
 
             # BJT: b, e, c with emitter grounded
-            stamp!(npnBJTEbersMoll(), ctx, b, 0, c; _mna_x_=x)
+            stamp!(npnbjt(), ctx, b, 0, c; _mna_x_=x)
 
             return ctx
         end
@@ -92,7 +91,6 @@ endmodule
         I_Vce = current(sol, :I_Vce)  # Current into collector
 
         # Base current should be small (μA range), collector current larger (mA range)
-        # For Vbe=0.65V: Ib ≈ 19μA, Ic ≈ 1.9mA
         @test abs(I_Vbe) > 1e-6   # Base current exists
         @test abs(I_Vce) > abs(I_Vbe)  # Collector current > base current
 
@@ -102,38 +100,24 @@ endmodule
     end
 
     #==========================================================================#
-    # Test 2: BJT with Collector Resistor (Simplest Amplifier)
+    # Test 2: BJT with Collector Resistor (builder function)
     #
     # Use voltage sources for base bias (stable convergence) and
     # a resistor load at the collector. This forms the simplest amplifier.
+    # Note: We use a builder function here because it properly passes
+    # _mna_x_ for Newton iteration on nonlinear devices.
     #==========================================================================#
     @testset "BJT with collector resistor" begin
-        # Circuit:
-        # Vcc --+-- Rc --+-- collector
-        #       |        |
-        #       |      (BJT)
-        #       |        |
-        #      Vb ----+--base
-        #              \
-        #               emitter -- gnd
-
         function bjt_with_rc(params, spec, t::Real=0.0; x=Float64[])
             ctx = MNAContext()
             vcc = get_node!(ctx, :vcc)
             base = get_node!(ctx, :base)
             coll = get_node!(ctx, :coll)
 
-            # Power supply
             stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-
-            # Base bias voltage (stable convergence)
             stamp!(VoltageSource(params.Vb; name=:Vb), ctx, base, 0)
-
-            # Collector load resistor
             stamp!(Resistor(params.Rc), ctx, vcc, coll)
-
-            # NPN BJT: b, e, c terminals - emitter grounded
-            stamp!(npnBJTEbersMoll(), ctx, base, 0, coll; _mna_x_=x)
+            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
 
             return ctx
         end
@@ -145,12 +129,12 @@ endmodule
         V_base = voltage(sol, :base)
 
         # Base should be at Vb
-        @test isapprox(V_base, params.Vb; atol=1e-6)
+        @test isapprox(V_base, 0.65; atol=1e-6)
 
         # Collector voltage = Vcc - Ic * Rc
         # For Vbe=0.65V, Ic ≈ 1.9mA, so Vc ≈ 12 - 1.9e-3 * 4.7e3 ≈ 3.1V
         @test V_coll > 1.0 && V_coll < 10.0  # In reasonable range
-        @test V_coll < params.Vcc  # Below supply
+        @test V_coll < 12.0  # Below supply
     end
 
     #==========================================================================#
@@ -159,10 +143,12 @@ endmodule
     # This is the main test: a common emitter amplifier with:
     # - Fixed DC bias using voltage source (for stable convergence)
     # - Small-signal sinusoidal input superimposed
+    # - Load capacitor for transient stability
     # - Measurement of voltage gain
     #==========================================================================#
     @testset "Common emitter amplifier transient" begin
 
+        # For transient with SIN source, we need a builder function
         function build_ce_amplifier(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
             if ctx === nothing
                 ctx = MNAContext()
@@ -178,7 +164,6 @@ endmodule
             stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
 
             # Input: DC bias + small sinusoidal signal directly at base
-            # Using SIN source: V(t) = Vdc + Vac * sin(2π*freq*t)
             sin_src = SinVoltageSource(
                 params.Vbias,   # DC offset (sets Vbe operating point)
                 params.Vac,     # AC amplitude (small signal)
@@ -195,19 +180,19 @@ endmodule
             stamp!(Capacitor(params.Cload), ctx, coll, 0)
 
             # NPN BJT: b, e, c terminals - emitter grounded
-            stamp!(npnBJTEbersMoll(), ctx, base, 0, coll; _mna_x_=x)
+            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
 
             return ctx
         end
 
-        # Circuit parameters - designed for small-signal linear amplification
+        # Circuit parameters
         params = (
-            Vcc = 12.0,        # Supply voltage
-            Vbias = 0.65,      # DC bias at base (sets Vbe)
-            Vac = 0.001,       # 1mV AC amplitude (small signal)
-            freq = 1000.0,     # 1kHz audio frequency
-            Rc = 4.7e3,        # Collector load
-            Cload = 100e-12    # 100pF load capacitor (parasitic/output)
+            Vcc = 12.0,
+            Vbias = 0.65,
+            Vac = 0.001,
+            freq = 1000.0,
+            Rc = 4.7e3,
+            Cload = 100e-12
         )
 
         # First verify DC operating point
@@ -225,7 +210,7 @@ endmodule
         # Run transient simulation
         freq = params.freq
         period = 1.0 / freq
-        tspan = (0.0, 5 * period)  # 5 periods
+        tspan = (0.0, 5 * period)
 
         sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
         @test sol.retcode == ReturnCode.Success
@@ -251,10 +236,7 @@ endmodule
         # Calculate voltage gain magnitude
         gain = Vout_pp / Vin_pp
 
-        # Common emitter gain: |Av| ≈ gm * Rc where gm = Ic/Vt
-        # For Ic ≈ 1.9mA, Vt = 25mV: gm ≈ 76mS
-        # Expected gain: gm * Rc ≈ 76e-3 * 4.7e3 ≈ 357
-        # But this is very high - let's just check it's significant
+        # Common emitter has inverting gain
         @test gain > 10.0    # Should have significant amplification
         @test gain < 1000.0  # But not unreasonably large
 
@@ -270,7 +252,6 @@ endmodule
     # Test 4: Gain Measurement with Different Signal Levels
     #
     # Test linearity by measuring gain with different input amplitudes.
-    # For small signals, gain should be relatively constant.
     #==========================================================================#
     @testset "Gain linearity with signal level" begin
 
@@ -285,19 +266,12 @@ endmodule
             base = get_node!(ctx, :base)
             coll = get_node!(ctx, :coll)
 
-            # Power supply
             stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-
-            # Input with configurable AC amplitude
             sin_src = SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vin)
             stamp!(sin_src, ctx, base, 0, t, spec.mode)
-
-            # Collector load
             stamp!(Resistor(params.Rc), ctx, vcc, coll)
             stamp!(Capacitor(params.Cload), ctx, coll, 0)
-
-            # BJT
-            stamp!(npnBJTEbersMoll(), ctx, base, 0, coll; _mna_x_=x)
+            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
 
             return ctx
         end
@@ -305,7 +279,7 @@ endmodule
         base_params = (
             Vcc = 12.0,
             Vbias = 0.65,
-            Vac = 0.001,  # Will vary this
+            Vac = 0.001,
             freq = 1000.0,
             Rc = 4.7e3,
             Cload = 100e-12
@@ -313,7 +287,6 @@ endmodule
 
         gains = Float64[]
 
-        # Test with different input levels (all small-signal)
         for vac in [0.0005, 0.001, 0.002]
             params = merge(base_params, (Vac=vac,))
             circuit = MNACircuit(build_ce_amp_level; params...)
@@ -327,7 +300,6 @@ endmodule
                 sys = assemble!(circuit)
                 acc = MNASolutionAccessor(sol, sys)
 
-                # Measure in last 2 periods
                 t_start = 3 * period
                 times = range(t_start, 5*period; length=100)
 
@@ -337,8 +309,7 @@ endmodule
                 Vout_pp = maximum(V_coll) - minimum(V_coll)
                 Vin_pp = maximum(V_base) - minimum(V_base)
 
-                gain = Vout_pp / Vin_pp
-                push!(gains, gain)
+                push!(gains, Vout_pp / Vin_pp)
             else
                 push!(gains, NaN)
             end
@@ -355,7 +326,7 @@ endmodule
     end
 
     #==========================================================================#
-    # Test 5: Frequency Response (optional - if time permits)
+    # Test 5: Frequency Response
     #
     # Test gain at different frequencies to verify proper operation
     # across audio band.
@@ -378,7 +349,7 @@ endmodule
             stamp!(sin_src, ctx, base, 0, t, spec.mode)
             stamp!(Resistor(params.Rc), ctx, vcc, coll)
             stamp!(Capacitor(params.Cload), ctx, coll, 0)
-            stamp!(npnBJTEbersMoll(), ctx, base, 0, coll; _mna_x_=x)
+            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
 
             return ctx
         end
@@ -399,7 +370,7 @@ endmodule
             circuit = MNACircuit(build_ce_freq; params...)
 
             period = 1.0 / freq
-            tspan = (0.0, 10 * period)  # More periods for accuracy
+            tspan = (0.0, 10 * period)
 
             sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
 

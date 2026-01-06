@@ -15,10 +15,13 @@ Cadnip is an MNA-based analog circuit simulator written in Julia, focused on sim
 
 ## Installation
 
-Cadnip works with release Julia and can be installed directly from GitHub:
+Install from GitHub by first adding the subpackages, then the main package:
 
 ```julia
 using Pkg
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="Lexers.jl")
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="SpectreNetlistParser.jl")
+Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl", subdir="VerilogAParser.jl")
 Pkg.add(url="https://github.com/NyanCAD/Cadnip.jl")
 ```
 

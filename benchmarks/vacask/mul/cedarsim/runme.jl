@@ -72,11 +72,11 @@ function run_benchmark(solver; dt=1e-9, maxiters=10_000_000)
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (dtmax=$dt)...")
-    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, abstol=1e-3, reltol=1e-3, maxiters=$maxiters) samples=3 evals=1 seconds=300
+    bench = @benchmark tran!($circuit, $tspan; dtmax=$dt, solver=$solver, abstol=1e-3, reltol=1e-3, maxiters=$maxiters, dense=false) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3, maxiters=maxiters)
+    sol = tran!(circuit, tspan; dtmax=dt, solver=solver, abstol=1e-3, reltol=1e-3, maxiters=maxiters, dense=false)
 
     println("\n=== Results ($solver_name) ===")
     @printf("Timepoints:  %d\n", length(sol.t))

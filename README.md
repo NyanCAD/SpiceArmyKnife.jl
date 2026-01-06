@@ -40,7 +40,9 @@ using CedarSim
 using CedarSim.MNA: MNACircuit, MNASpec, voltage
 
 # Define a circuit using SPICE syntax
+# Note: SPICE requires a title line as the first line
 builder = mna_sp"""
+* Voltage divider circuit
 V1 vcc 0 DC 5
 R1 vcc out 1k
 R2 out 0 1k

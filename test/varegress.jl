@@ -36,8 +36,7 @@ endmodule
     # DC analysis - at steady state, no current through capacitor
     # V_out should equal V_vcc = 1V (no DC current through capacitor)
     ctx = circuit1((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = dc_linear(ctx)
     @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
     @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
 
@@ -104,8 +103,7 @@ endmodule
 
     # DC analysis
     ctx = circuit2((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = dc_linear(ctx)
     @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
     @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
 

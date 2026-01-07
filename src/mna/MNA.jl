@@ -31,11 +31,7 @@
 #
 # # Solve DC
 # sol = solve_dc(ctx)
-# @assert sol.x[out] ≈ 2.5  # Voltage divider
-#
-# # Or assemble for later use
-# sys = assemble!(ctx)
-# sol = solve_dc(sys)
+# @assert voltage(sol, :out) ≈ 2.5  # Voltage divider
 # ```
 #==============================================================================#
 

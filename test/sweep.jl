@@ -336,8 +336,7 @@ end
 
     # Build and solve
     ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    sol = CedarSim.MNA.dc_linear(ctx)
 
     # Verify voltage divider: out = 5 * 1k/(1k+1k) = 2.5V
     @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
@@ -365,8 +364,7 @@ end
     circuit_fn = Base.eval(m, circuit_code)
 
     ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    sol = CedarSim.MNA.dc_linear(ctx)
 
     # At DC, inductor is short, capacitor is open
     # So n1 = 10V (after R, but L is short)
@@ -397,8 +395,7 @@ end
     circuit_fn = Base.eval(m, circuit_code)
 
     ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    sol = CedarSim.MNA.dc_linear(ctx)
 
     # V = I * R = 1mA * 1kΩ = 1V
     @test isapprox(voltage(sol, :out), 1.0; atol=deftol)

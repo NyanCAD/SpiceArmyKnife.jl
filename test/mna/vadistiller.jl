@@ -58,8 +58,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
 
             ctx = resistor_divider((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -242,8 +241,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
 
             ctx = vccs_circuit((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             # Ids = gm * Vgs = 1e-3 * 1.0 = 1mA
             # Vdrain = Vdd - Ids * Rd = 5 - 1e-3 * 1000 = 4V
@@ -812,8 +810,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
 
             ctx = var_init_divider((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -845,8 +842,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             end
 
             ctx = var_init_offset((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             @test isapprox_deftol(voltage(sol, :vcc), 4.5)
             # Current should be (4.5 + 0.5) / 1000 = 5mA

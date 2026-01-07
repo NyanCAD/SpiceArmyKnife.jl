@@ -2460,8 +2460,7 @@ ast = SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_
 code = make_mna_circuit(ast)
 circuit_fn = eval(code)
 ctx = circuit_fn((R1=1000.0,), MNASpec())
-sys = MNA.assemble!(ctx)
-sol = MNA.solve_dc(sys)
+sol = MNA.solve_dc(ctx)
 ```
 """
 function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modules::Vector{Module}=Module[])

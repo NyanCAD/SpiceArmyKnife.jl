@@ -191,8 +191,7 @@ R2 out 0 1k
 \"\"\"
 build_fn = parse_spice_to_mna(code)
 ctx = build_fn((;), MNASpec())
-sys = MNA.assemble!(ctx)
-sol = MNA.solve_dc(sys)
+sol = MNA.solve_dc(ctx)
 voltage(sol, :out)  # Returns 2.5
 ```
 """
@@ -249,8 +248,11 @@ function solve_spice_mna(spice_code::String; temp::Real=27.0)
 
     spec = MNA.MNASpec(temp=Float64(temp), mode=:dcop)
     ctx = Base.invokelatest(circuit_fn, (;), spec)
-    sys = MNA.assemble!(ctx)
-    sol = MNA.solve_dc(sys)
+    sol = MNA.solve_dc(ctx)
+
+    # Also return assembled system for inspection
+    ctx2 = Base.invokelatest(circuit_fn, (;), spec)
+    sys = MNA.assemble!(ctx2)
 
     return sys, sol
 end

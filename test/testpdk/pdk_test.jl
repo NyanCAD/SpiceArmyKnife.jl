@@ -91,8 +91,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
 
         # Solve DC
         ctx = build_inverter_test((;), MNASpec())
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # Check that we get reasonable voltages
         vdd_idx = ctx.node_to_idx[:vdd]
@@ -126,8 +125,7 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
             end
 
             ctx = build_nmos_test((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             # Get current through voltage source (last element typically)
             # Current = 1V / R, so higher current means lower resistance
@@ -188,8 +186,7 @@ end
 
         # Solve DC
         ctx = build_va_resistor_test((;), MNASpec())
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
         out_idx = ctx.node_to_idx[:out]
@@ -214,8 +211,7 @@ end
             # Fixed load
             stamp!(CedarSim.MNA.Resistor(1000.0), ctx, out, 0)
 
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            sol = dc_linear(ctx)
 
             return sol.x[ctx.node_to_idx[:out]]
         end
@@ -259,8 +255,7 @@ end
 
         # Build and solve
         ctx = builder((;), MNASpec())
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # Check voltage divider: Vout = 1.0 * 500 / (500 + 500) = 0.5V
         out_idx = ctx.node_to_idx[:out]

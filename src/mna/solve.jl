@@ -259,53 +259,32 @@ end
 
 #==============================================================================#
 # DC Analysis
+#
+# PUBLIC API: solve_dc(builder, params, spec) and solve_dc(circuit::MNACircuit)
+# Both use Newton iteration via dc_solve_compiled, which handles linear and
+# nonlinear circuits correctly. For convenience, use dc!(circuit).
+#
+# INTERNAL: dc_linear(ctx) for tests that stamp directly. This is NOT exported
+# and should only be used for linear circuits in tests.
 #==============================================================================#
 
 """
-    solve_dc(sys::MNASystem) -> DCSolution
+    dc_linear(ctx::MNAContext) -> DCSolution
 
-Solve for DC operating point: G*x = b
+Internal linear DC solve for tests. NOT for general use.
 
-For circuits with capacitors/inductors, this finds the steady-state
-where all derivatives are zero (C*dx/dt = 0).
+This performs a simple G*x = b solve on the assembled context. It works correctly
+for LINEAR circuits but gives wrong results for nonlinear circuits.
+
+For general use, use `solve_dc(builder, params, spec)` or `dc!(circuit)` which
+use Newton iteration.
 """
-function solve_dc(sys::MNASystem)
+function dc_linear(ctx::MNAContext)
+    sys = assemble!(ctx)
     n = system_size(sys)
     n == 0 && return DCSolution(Float64[], Symbol[], Symbol[], 0)
-
-    # Solve G*x = b
-    # Use \ which automatically selects appropriate solver
     x = sys.G \ sys.b
-
     return DCSolution(sys, x)
-end
-
-"""
-    solve_dc!(x::Vector{Float64}, sys::MNASystem)
-
-Solve DC operating point into pre-allocated vector x.
-"""
-function solve_dc!(x::Vector{Float64}, sys::MNASystem)
-    n = system_size(sys)
-    n == 0 && return x
-    length(x) >= n || resize!(x, n)
-
-    # Solve in-place using ldiv! if possible
-    copyto!(view(x, 1:n), sys.b)
-    F = lu(sys.G)
-    ldiv!(F, view(x, 1:n))
-
-    return x
-end
-
-"""
-    solve_dc(ctx::MNAContext) -> DCSolution
-
-Convenience function: assemble and solve in one step.
-"""
-function solve_dc(ctx::MNAContext)
-    sys = assemble!(ctx)
-    return solve_dc(sys)
 end
 
 #==============================================================================#
@@ -556,9 +535,8 @@ sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
 ```
 
 # See Also
-- `solve_dc(sys::MNASystem)`: Direct linear solve on pre-assembled system (linear circuits only)
-- `solve_dc(ctx::MNAContext)`: Assemble and solve in one step (linear circuits only)
-- `dc_solve_core`: The shared core function used by both solve_dc and CedarDCOp
+- `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
+- `dc_solve_compiled`: Zero-allocation Newton iteration
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100) where {F,P}
@@ -723,10 +701,10 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
-    # Default initial condition: DC solution
+    # Default initial condition: linear DC solution (G\b)
+    # Note: For nonlinear circuits, use MNACircuit + ODEProblem instead
     if u0 === nothing
-        dc_sol = solve_dc(sys)
-        u0 = dc_sol.x
+        u0 = sys.G \ sys.b
     end
 
     # Get ODE function components
@@ -838,10 +816,10 @@ function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
-    # Default initial condition: DC solution
+    # Default initial condition: linear DC solution (G\b)
+    # Note: For nonlinear circuits, use MNACircuit + DAEProblem instead
     if u0 === nothing
-        dc_sol = solve_dc(sys)
-        u0 = dc_sol.x
+        u0 = sys.G \ sys.b
     end
 
     # Get DAE function components
@@ -1806,8 +1784,9 @@ end
 # in one iteration. For nonlinear circuits (diodes, MOSFETs, VA devices), it uses
 # proper Newton iteration.
 #
-# The low-level solve_dc(sys::MNASystem) and solve_dc(ctx::MNAContext) are kept
-# for internal use and testing - they only do linear solve (G \ b).
+# Note: solve_dc(ctx::MNAContext) is kept for backward compatibility with tests
+# that stamp directly. It only does linear solve (G \ b) - use dc!(circuit) for
+# nonlinear circuits.
 function solve_dc(circuit::MNACircuit)
     # Use dcop mode to disable time-dependent sources for DC operating point
     dc_spec = with_mode(circuit.spec, :dcop)

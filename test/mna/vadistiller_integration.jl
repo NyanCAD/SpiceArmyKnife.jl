@@ -93,8 +93,7 @@ end
                 end
 
                 ctx = sp_resistor_divider((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                sol = dc_linear(ctx)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 2.5)
@@ -116,8 +115,7 @@ end
                 end
 
                 ctx = sp_capacitor_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                sol = dc_linear(ctx)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
@@ -139,8 +137,7 @@ end
                 end
 
                 ctx = sp_inductor_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                sol = dc_linear(ctx)
                 @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
             end
         end

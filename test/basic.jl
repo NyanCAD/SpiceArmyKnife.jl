@@ -44,8 +44,7 @@ end
     end
 
     ctx = VRcircuit((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = dc_linear(ctx)
 
     # I = V/R = 5/2 = 2.5A
     R_v = voltage(sol, :vcc)
@@ -94,8 +93,7 @@ end
     end
 
     ctx = IRcircuit((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = dc_linear(ctx)
 
     # V = IR = 5*2 = 10V
     R_v = voltage(sol, :icc)
@@ -424,8 +422,7 @@ end
         circuit_fn = Base.eval(m, code)
         spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
         ctx = Base.invokelatest(circuit_fn, (;), spec)
-        sys = CedarSim.MNA.assemble!(ctx)
-        sol = CedarSim.MNA.solve_dc(sys)
+        sol = CedarSim.MNA.dc_linear(ctx)
 
         # I = V / R = 1V / 1337Ω
         @test isapprox_deftol(current(sol, :I_v1), -1/1337)
@@ -882,8 +879,7 @@ end
     @test @param(observer.x1.rload) == 1000.0
 
     # Test that the parameter was applied by solving
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = dc_linear(ctx)
 
     # With factor=2, R = rload * factor = 1000 * 2 = 2000Ω
     # I = 1A (from current source), V = I*R

@@ -159,8 +159,7 @@ using VerilogAParser
         # Junction as simple resistor: a_int to ground (Rd = 1000Ω)
         stamp!(Resistor(1000.0), ctx, a_int, 0)
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # Check internal node is marked correctly in solution
         @test is_internal_node(ctx, a_int) == true
@@ -496,7 +495,7 @@ using VerilogAParser
         stamp!(Resistor(1000.0), ctx, vcc, out)
         stamp!(Resistor(1000.0), ctx, out, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :vcc) ≈ 5.0
         @test voltage(sol, :out) ≈ 2.5 atol=1e-10
@@ -514,7 +513,7 @@ using VerilogAParser
         stamp!(Resistor(2000.0), ctx, vcc, out)
         stamp!(Resistor(1000.0), ctx, out, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :out) ≈ 5.0 / 3.0 atol=1e-10
     end
@@ -529,7 +528,7 @@ using VerilogAParser
         stamp!(CurrentSource(0.001), ctx, n1, 0)  # 1mA into n1
         stamp!(Resistor(1000.0), ctx, n1, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :n1) ≈ 1.0 atol=1e-10
     end
@@ -548,7 +547,7 @@ using VerilogAParser
         stamp!(Resistor(1000.0), ctx, vcc, mid)
         stamp!(Resistor(1000.0), ctx, mid, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :vcc) ≈ 5.0
         @test voltage(sol, :mid) ≈ 3.0
@@ -575,7 +574,7 @@ using VerilogAParser
         stamp!(VCCS(0.01), ctx, out, 0, inp, 0)
         stamp!(Resistor(1000.0), ctx, out, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :inp) ≈ 1.0
         @test voltage(sol, :out) ≈ 10.0 atol=1e-10
@@ -592,7 +591,7 @@ using VerilogAParser
         stamp!(VoltageSource(0.5), ctx, inp, 0)
         stamp!(VCVS(-10.0), ctx, out, 0, inp, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :inp) ≈ 0.5
         @test voltage(sol, :out) ≈ -5.0 atol=1e-10
@@ -617,7 +616,7 @@ using VerilogAParser
         # Need a load to close the output circuit
         stamp!(Resistor(1e6), ctx, out, 0)  # High-impedance load
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :out) ≈ 1.0 atol=1e-6
     end
@@ -642,7 +641,7 @@ using VerilogAParser
         # Load resistor
         stamp!(Resistor(1000.0), ctx, out, 0)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         @test voltage(sol, :out) ≈ 2.0 atol=1e-10
     end
@@ -670,7 +669,7 @@ using VerilogAParser
         stamp!(Resistor(2000.0), ctx, n2, center)
         stamp!(Resistor(3000.0), ctx, n3, center)
 
-        sol = solve_dc(ctx)
+        sol = dc_linear(ctx)
 
         # Analytical: 9 / (11/6) = 54/11 ≈ 4.909
         expected = 9.0 / (1.0 + 0.5 + 1.0/3.0)
@@ -775,9 +774,8 @@ using VerilogAParser
         @test prob.tspan == (0.0, 1e-3)
         @test length(prob.u0) == system_size(sys)
 
-        # Initial condition should be DC solution
-        dc_sol = solve_dc(sys)
-        @test prob.u0 ≈ dc_sol.x
+        # Initial condition should be DC solution (G\b)
+        @test prob.u0 ≈ sys.G \ sys.b
 
         # Mass matrix should be the C matrix
         @test prob.mass_matrix == sys.C
@@ -837,13 +835,21 @@ using VerilogAParser
         show(io, ctx)
         show(io, MIME"text/plain"(), ctx)
 
-        sys = assemble!(ctx)
-        show(io, sys)
-        show(io, MIME"text/plain"(), sys)
-
-        sol = solve_dc(sys)
+        # dc_linear(ctx) internally assembles, but we also test sys display separately
+        sol = dc_linear(ctx)
         show(io, sol)
         show(io, MIME"text/plain"(), sol)
+
+        # Also test MNASystem display (need to rebuild ctx for sys)
+        ctx2 = MNAContext()
+        vcc2 = get_node!(ctx2, :vcc)
+        out2 = get_node!(ctx2, :out)
+        stamp!(VoltageSource(5.0), ctx2, vcc2, 0)
+        stamp!(Resistor(1000.0), ctx2, vcc2, out2)
+        stamp!(Resistor(1000.0), ctx2, out2, 0)
+        sys = assemble!(ctx2)
+        show(io, sys)
+        show(io, MIME"text/plain"(), sys)
 
         # Just check no errors
         @test true
@@ -1889,8 +1895,7 @@ using VerilogAParser
         pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
         stamp!(pwl, ctx, vcc, 0, 0.5e-3, :tran)
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # At t=0.5ms, PWL value = 2.5V
         @test voltage(sol, :vcc) ≈ 2.5 atol=1e-10

@@ -237,8 +237,7 @@ end
         stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
         stamp!(directres(r=1000.0), ctx, mid, 0)
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         @test isapprox_deftol(voltage(sol, :vcc), 10.0)
         @test isapprox_deftol(voltage(sol, :mid), 5.0)
@@ -264,8 +263,7 @@ end
         stamp!(chainres(r=2000.0), ctx, n1, n2)
         stamp!(chainres(r=1000.0), ctx, n2, 0)
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # Total = 4k, I = 10V/4k = 2.5mA
         @test isapprox(voltage(sol, :n1), 7.5; atol=0.01)

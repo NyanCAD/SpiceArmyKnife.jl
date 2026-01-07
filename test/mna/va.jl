@@ -243,8 +243,7 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         end
 
         ctx = va_resistor_circuit((;), MNASpec())
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        sol = dc_linear(ctx)
 
         # V = 5V, R = 2000Ω, I = 2.5mA
         # Voltage source current = -2.5mA (negative = sourcing)
@@ -339,7 +338,9 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test isapprox(sys.C[vcc_idx, vcc_idx], 1e-6; atol=1e-9)
 
         # DC solution: I = V/R = 5/1000 = 5mA
-        sol = solve_dc(sys)
+        # Need fresh ctx since assemble! consumes it
+        ctx2 = va_parallel_rc_circuit((;), MNASpec())
+        sol = solve_dc(ctx2)
         @test isapprox_deftol(voltage(sol, :vcc), 5.0)
         @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
     end

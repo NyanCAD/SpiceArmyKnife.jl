@@ -319,4 +319,97 @@ eval(ce_amplifier_code)
         end
     end
 
+    #==========================================================================#
+    # Test 6: Common Emitter Amplifier with Emitter Degeneration
+    #
+    # Tests the BJT model in a common emitter amplifier configuration with
+    # emitter degeneration resistor. This circuit previously failed to converge
+    # with higher voltages due to exponential overflow in the Newton solver.
+    # Now uses source stepping for robust convergence.
+    #==========================================================================#
+    @testset "Common emitter with emitter degeneration" begin
+        # Define circuit builder for common emitter with emitter resistor
+        function ce_amplifier_builder(params, spec, t::Real=0.0; x=Float64[])
+            ctx = MNAContext()
+            vin = MNA.get_node!(ctx, :vin)
+            vcc = MNA.get_node!(ctx, :vcc)
+            collector = MNA.get_node!(ctx, :collector)
+            emitter = MNA.get_node!(ctx, :emitter)
+
+            # Input voltage (base bias)
+            MNA.stamp!(MNA.VoltageSource(3.0; name=:Vin), ctx, vin, 0)
+            # Supply voltage
+            MNA.stamp!(MNA.VoltageSource(6.0; name=:Vcc), ctx, vcc, 0)
+            # Collector resistor
+            MNA.stamp!(MNA.Resistor(100.0; name=:Rc), ctx, vcc, collector)
+            # Emitter degeneration resistor
+            MNA.stamp!(MNA.Resistor(100.0; name=:Re), ctx, emitter, 0)
+            # BJT: npnbjt(b, e, c) = (vin, emitter, collector)
+            MNA.stamp!(npnbjt(), ctx, vin, emitter, collector; _mna_x_=x)
+
+            return ctx
+        end
+
+        spec = MNA.MNASpec(mode=:dcop)
+        sol = MNA.solve_dc(ce_amplifier_builder, (;), spec)
+
+        # Check that BJT is properly biased
+        V_vin = voltage(sol, :vin)
+        V_vcc = voltage(sol, :vcc)
+        V_emitter = voltage(sol, :emitter)
+        V_collector = voltage(sol, :collector)
+
+        @test isapprox(V_vin, 3.0; atol=1e-6)
+        @test isapprox(V_vcc, 6.0; atol=1e-6)
+
+        # Vbe should be around 0.7V (forward bias)
+        Vbe = V_vin - V_emitter
+        @test Vbe > 0.6 && Vbe < 0.8
+
+        # Emitter voltage ≈ Vin - 0.7V
+        @test V_emitter > 2.0 && V_emitter < 2.5
+
+        # Collector voltage should be below Vcc (current through Rc)
+        @test V_collector < V_vcc
+        @test V_collector > 2.0  # Not saturated
+
+        # Test with higher voltages (this was failing before source stepping fix)
+        function ce_high_voltage_builder(params, spec, t::Real=0.0; x=Float64[])
+            ctx = MNAContext()
+            vin = MNA.get_node!(ctx, :vin)
+            vcc = MNA.get_node!(ctx, :vcc)
+            collector = MNA.get_node!(ctx, :collector)
+            emitter = MNA.get_node!(ctx, :emitter)
+
+            MNA.stamp!(MNA.VoltageSource(6.0; name=:Vin), ctx, vin, 0)
+            MNA.stamp!(MNA.VoltageSource(12.0; name=:Vcc), ctx, vcc, 0)
+            MNA.stamp!(MNA.Resistor(100.0; name=:Rc), ctx, vcc, collector)
+            MNA.stamp!(MNA.Resistor(100.0; name=:Re), ctx, emitter, 0)
+            MNA.stamp!(npnbjt(), ctx, vin, emitter, collector; _mna_x_=x)
+
+            return ctx
+        end
+
+        sol_high = MNA.solve_dc(ce_high_voltage_builder, (;), spec)
+
+        V_vin_h = voltage(sol_high, :vin)
+        V_vcc_h = voltage(sol_high, :vcc)
+        V_emitter_h = voltage(sol_high, :emitter)
+        V_collector_h = voltage(sol_high, :collector)
+
+        @test isapprox(V_vin_h, 6.0; atol=1e-6)
+        @test isapprox(V_vcc_h, 12.0; atol=1e-6)
+
+        # Vbe should still be around 0.7V
+        Vbe_h = V_vin_h - V_emitter_h
+        @test Vbe_h > 0.6 && Vbe_h < 0.8
+
+        # Emitter voltage ≈ Vin - 0.7V = 5.3V
+        @test V_emitter_h > 5.0 && V_emitter_h < 5.5
+
+        # Collector should have reasonable voltage (not Vcc, not 0)
+        @test V_collector_h < V_vcc_h
+        @test V_collector_h > 5.0
+    end
+
 end  # testset "Audio Integration Tests"

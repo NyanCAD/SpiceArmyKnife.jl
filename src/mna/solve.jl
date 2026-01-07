@@ -319,7 +319,8 @@ using ADTypes
 
 """
     solve_dc(builder, params, spec::MNASpec;
-             abstol=1e-10, maxiters=100, explicit_jacobian=true) -> DCSolution
+             abstol=1e-10, maxiters=100, explicit_jacobian=true,
+             source_stepping=true) -> DCSolution
 
 Solve DC operating point using a circuit builder function.
 
@@ -336,12 +337,16 @@ Newton iteration via NonlinearSolve.jl.
 - `maxiters`: Maximum Newton iterations (default: 100)
 - `explicit_jacobian`: Whether to provide explicit Jacobian (default: true).
   Uses the G matrix from circuit assembly as the Jacobian, avoiding finite differencing.
+- `source_stepping`: Whether to use source stepping for convergence (default: true).
+  When Newton iteration fails, automatically ramps up sources from 0 to 100% to
+  help circuits with exponential nonlinearities (BJTs, diodes) converge.
 
 # How It Works
 1. Builds circuit at initial guess to get system size and structure
 2. Solves linear system G*x = b as initial guess
 3. Checks residual - if converged, returns immediately (linear case)
 4. Otherwise, creates NonlinearProblem and iterates until ||F(u)|| < abstol
+5. If Newton fails and source_stepping=true, ramps sources from 0% to 100%
 
 # Example
 ```julia
@@ -367,7 +372,8 @@ sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100,
-                  explicit_jacobian::Bool=true) where {F,P}
+                  explicit_jacobian::Bool=true,
+                  source_stepping::Bool=true) where {F,P}
     # Build at x=0, t=0 to get system size and initial structure
     ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
     sys0 = assemble!(ctx0)
@@ -386,6 +392,18 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     resid0 = sys_check.G * x0 - sys_check.b
     if norm(resid0) < abstol
         return DCSolution(sys_check, x0)
+    end
+
+    # Check if residual is extremely large (indicating exponential overflow)
+    # This typically happens with BJT/diode circuits where Vbe is too large
+    # In this case, we need source stepping to get a good initial guess
+    if source_stepping && norm(resid0) > 1e20
+        stepped_sol = _solve_dc_with_source_stepping(builder, params, spec, sys0;
+                                                      abstol=abstol, maxiters=maxiters)
+        if stepped_sol !== nothing
+            return stepped_sol
+        end
+        # If source stepping failed, fall through to normal Newton
     end
 
     # Need Newton iteration - create NonlinearProblem
@@ -433,6 +451,14 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     sol = solve(nlprob, nlsolver; abstol=abstol, maxiters=maxiters)
 
     if sol.retcode != SciMLBase.ReturnCode.Success
+        # Try source stepping as fallback
+        if source_stepping
+            stepped_sol = _solve_dc_with_source_stepping(builder, params, spec, sys0;
+                                                          abstol=abstol, maxiters=maxiters)
+            if stepped_sol !== nothing
+                return stepped_sol
+            end
+        end
         @warn "Nonlinear DC solve did not converge: $(sol.retcode)"
     end
 
@@ -441,6 +467,99 @@ function solve_dc(builder::F, params::P, spec::MNASpec;
     sys_final = assemble!(ctx_final)
 
     return DCSolution(sys_final, sol.u)
+end
+
+"""
+    _solve_dc_with_source_stepping(builder, params, spec, sys0; abstol, maxiters)
+
+Internal function: Solve DC using source stepping (continuation method).
+
+This is used when the initial Newton iteration fails or when the initial residual
+is extremely large (indicating exponential overflow from BJT/diode equations).
+
+Source stepping works by:
+1. Scaling the b vector (source values) from 0% to 100% in steps
+2. At each step, solve using the previous solution as initial guess
+3. This gradually moves the operating point toward the final solution
+
+The key insight is that at 0% sources, all node voltages are 0 (trivial solution).
+Small source values keep the exponentials in a reasonable range, allowing convergence.
+"""
+function _solve_dc_with_source_stepping(builder::F, params::P, spec::MNASpec, sys0::MNASystem;
+                                         abstol::Real=1e-10, maxiters::Int=100) where {F,P}
+    n = system_size(sys0)
+
+    # Source stepping schedule: start small, ramp up to 100%
+    # Use more steps at the beginning where exponentials are most sensitive
+    source_fractions = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+    # Start with zero solution
+    x_curr = zeros(n)
+
+    # Store the original b vector (source values)
+    b_full = copy(sys0.b)
+
+    for (step_idx, frac) in enumerate(source_fractions)
+        # Scale the b vector (source values)
+        b_scaled = frac * b_full
+
+        # Residual function with scaled sources
+        function residual_scaled!(F, u, p)
+            ctx = builder(params, spec, 0.0; x=u)
+            sys = assemble!(ctx)
+
+            # Scale the source terms in b
+            # Note: For nonlinear devices, b also depends on u, but the source
+            # contributions are in fixed positions (current equation rows for voltage sources)
+            b_with_scaling = copy(sys.b)
+            # Scale only the entries that correspond to source values
+            # These are the entries that were non-zero in the original sys0.b
+            for i in 1:n
+                if abs(b_full[i]) > 1e-15
+                    # This is a source entry - scale it
+                    ratio = b_scaled[i] / (b_full[i] + 1e-30)  # Avoid division by zero
+                    b_with_scaling[i] = sys.b[i] * frac  # Scale by fraction
+                end
+            end
+
+            mul!(F, sys.G, u)
+            F .-= b_with_scaling
+            return nothing
+        end
+
+        function jacobian_scaled!(J, u, p)
+            ctx = builder(params, spec, 0.0; x=u)
+            sys = assemble!(ctx)
+            copyto!(J, sys.G)
+            return nothing
+        end
+
+        # Create and solve at this source level
+        jac_prototype = sys0.G
+        nlfunc = NonlinearFunction(residual_scaled!; jac=jacobian_scaled!, jac_prototype=jac_prototype)
+        nlprob = NonlinearProblem(nlfunc, x_curr)
+
+        sol = solve(nlprob, RobustMultiNewton(); abstol=abstol, maxiters=maxiters)
+
+        if sol.retcode != SciMLBase.ReturnCode.Success
+            # This step failed - source stepping didn't help
+            return nothing
+        end
+
+        # Use this solution as starting point for next step
+        x_curr = copy(sol.u)
+    end
+
+    # Final check: verify the solution at full source values
+    ctx_final = builder(params, spec, 0.0; x=x_curr)
+    sys_final = assemble!(ctx_final)
+    resid_final = sys_final.G * x_curr - sys_final.b
+
+    if norm(resid_final) < abstol * 10  # Allow slightly larger tolerance for stepped solution
+        return DCSolution(sys_final, x_curr)
+    else
+        return nothing
+    end
 end
 
 #==============================================================================#

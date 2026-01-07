@@ -1,29 +1,29 @@
 #==============================================================================#
-# Audio Integration Tests: MNA Circuits with Simplified Verilog-A BJT Models
+# Audio Integration Tests: SPICE Circuits with Verilog-A BJT Models
 #
-# This file tests mixed MNA/Verilog-A circuit simulation using:
-# - VA BJT models (Ebers-Moll equations) via va"""...""" macro
-# - Builder functions with stamp!() for circuit construction
-# - Transient simulation with sinusoidal inputs (SinVoltageSource)
-# - Signal processing analysis (gain measurement)
+# This file tests SPICE netlists with Verilog-A device models using:
+# - va"""...""" macro for creating VA device models (BJT Ebers-Moll)
+# - SPICE netlists with X device syntax for VA model instantiation
+# - solve_mna_spice_code() for DC analysis with Newton iteration
+# - make_mna_spice_circuit() + MNACircuit for transient simulation
 #
 # Key patterns demonstrated:
-# 1. va"""...""" for creating 3-terminal VA device models
-# 2. Builder function pattern with _mna_x_ for Newton iteration
-# 3. MNACircuit and tran!() for transient simulation
-# 4. MNASolutionAccessor for extracting voltage trajectories
+# 1. VA device models defined separately, imported via imported_hdl_modules
+# 2. SPICE X device syntax to instantiate VA models in netlists
+# 3. Transient simulation with sinusoidal sources (SIN syntax)
+# 4. Signal processing analysis (gain measurement)
 #==============================================================================#
 
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, MNACircuit, MNASystem, MNASolutionAccessor
-using CedarSim.MNA: get_node!, stamp!, assemble!, solve_dc, reset_for_restamping!
-using CedarSim.MNA: voltage, current
-using CedarSim.MNA: VoltageSource, Resistor, Capacitor, SinVoltageSource
+using CedarSim.MNA: MNACircuit, MNASolutionAccessor
+using CedarSim.MNA: voltage, current, assemble!
 using CedarSim: tran!
 using OrdinaryDiffEq
 using SciMLBase
+
+include(joinpath(@__DIR__, "..", "common.jl"))
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -61,34 +61,24 @@ endmodule
     #
     # Test the BJT model at a known operating point using voltage sources.
     # This verifies the BJT model produces correct terminal currents.
-    # Note: We use a builder function to properly pass _mna_x_ for Newton
-    # iteration on nonlinear VA devices.
     #==========================================================================#
     @testset "BJT with fixed voltages - active region" begin
-        function bjt_fixed_voltage(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
-            b = get_node!(ctx, :b)
-            c = get_node!(ctx, :c)
+        spice = """
+        * BJT with fixed voltage sources
+        Vbe base 0 DC 0.65
+        Vce coll 0 DC 5.0
+        X1 base 0 coll npnbjt
+        """
 
-            # Fixed voltage sources to set operating point
-            stamp!(VoltageSource(0.65; name=:Vbe), ctx, b, 0)
-            stamp!(VoltageSource(5.0; name=:Vce), ctx, c, 0)
-
-            # BJT: b, e, c with emitter grounded
-            stamp!(npnbjt(), ctx, b, 0, c; _mna_x_=x)
-
-            return ctx
-        end
-
-        sol = solve_dc(bjt_fixed_voltage, (;), MNASpec())
+        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
 
         # Check voltages are as expected
-        @test isapprox(voltage(sol, :b), 0.65; atol=1e-6)
-        @test isapprox(voltage(sol, :c), 5.0; atol=1e-6)
+        @test isapprox(voltage(sol, :base), 0.65; atol=1e-6)
+        @test isapprox(voltage(sol, :coll), 5.0; atol=1e-6)
 
         # The voltage source currents tell us the terminal currents
-        I_Vbe = current(sol, :I_Vbe)  # Current into base
-        I_Vce = current(sol, :I_Vce)  # Current into collector
+        I_Vbe = current(sol, :I_vbe)  # Current into base
+        I_Vce = current(sol, :I_vce)  # Current into collector
 
         # Base current should be small (μA range), collector current larger (mA range)
         @test abs(I_Vbe) > 1e-6   # Base current exists
@@ -100,30 +90,21 @@ endmodule
     end
 
     #==========================================================================#
-    # Test 2: BJT with Collector Resistor (builder function)
+    # Test 2: BJT with Collector Resistor
     #
     # Use voltage sources for base bias (stable convergence) and
     # a resistor load at the collector. This forms the simplest amplifier.
-    # Note: We use a builder function here because it properly passes
-    # _mna_x_ for Newton iteration on nonlinear devices.
     #==========================================================================#
     @testset "BJT with collector resistor" begin
-        function bjt_with_rc(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
-            vcc = get_node!(ctx, :vcc)
-            base = get_node!(ctx, :base)
-            coll = get_node!(ctx, :coll)
+        spice = """
+        * BJT with collector resistor
+        Vcc vcc 0 DC 12.0
+        Vb base 0 DC 0.65
+        Rc vcc coll 4.7k
+        X1 base 0 coll npnbjt
+        """
 
-            stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-            stamp!(VoltageSource(params.Vb; name=:Vb), ctx, base, 0)
-            stamp!(Resistor(params.Rc), ctx, vcc, coll)
-            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
-
-            return ctx
-        end
-
-        params = (Vcc=12.0, Vb=0.65, Rc=4.7e3)
-        sol = solve_dc(bjt_with_rc, params, MNASpec())
+        ctx, sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
 
         V_coll = voltage(sol, :coll)
         V_base = voltage(sol, :base)
@@ -147,68 +128,39 @@ endmodule
     # - Measurement of voltage gain
     #==========================================================================#
     @testset "Common emitter amplifier transient" begin
-
-        # For transient with SIN source, we need a builder function
-        function build_ce_amplifier(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-
-            vcc = get_node!(ctx, :vcc)
-            base = get_node!(ctx, :base)
-            coll = get_node!(ctx, :coll)
-
-            # Power supply
-            stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-
-            # Input: DC bias + small sinusoidal signal directly at base
-            sin_src = SinVoltageSource(
-                params.Vbias,   # DC offset (sets Vbe operating point)
-                params.Vac,     # AC amplitude (small signal)
-                params.freq;    # Frequency
-                name=:Vin
-            )
-            stamp!(sin_src, ctx, base, 0, t, spec.mode)
-
-            # Collector load resistor
-            stamp!(Resistor(params.Rc), ctx, vcc, coll)
-
-            # Small load capacitor (represents parasitic/output capacitance)
-            # This provides differential states for the transient solver
-            stamp!(Capacitor(params.Cload), ctx, coll, 0)
-
-            # NPN BJT: b, e, c terminals - emitter grounded
-            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
-
-            return ctx
-        end
-
         # Circuit parameters
-        params = (
-            Vcc = 12.0,
-            Vbias = 0.65,
-            Vac = 0.001,
-            freq = 1000.0,
-            Rc = 4.7e3,
-            Cload = 100e-12
-        )
+        Vcc = 12.0
+        Vbias = 0.65
+        Vac = 0.001
+        freq = 1000.0
+        Rc = 4.7e3
+        Cload = 100e-12
+
+        # SPICE netlist with sinusoidal input
+        # SIN(offset amplitude freq) syntax
+        spice = """
+        * Common emitter amplifier
+        Vcc vcc 0 DC $Vcc
+        Vin base 0 DC $Vbias SIN $Vbias $Vac $freq
+        Rc vcc coll $Rc
+        Cload coll 0 $Cload
+        X1 base 0 coll npnbjt
+        """
 
         # First verify DC operating point
-        dc_sol = solve_dc(build_ce_amplifier, params, MNASpec())
+        ctx, dc_sol = solve_mna_spice_code(spice; imported_hdl_modules=[npnbjt_module])
         V_coll_dc = voltage(dc_sol, :coll)
         V_base_dc = voltage(dc_sol, :base)
 
         # Verify BJT is biased properly
-        @test isapprox(V_base_dc, params.Vbias; atol=0.01)
+        @test isapprox(V_base_dc, Vbias; atol=0.01)
         @test V_coll_dc > 1.0 && V_coll_dc < 11.0
 
         # Create circuit for transient
-        circuit = MNACircuit(build_ce_amplifier; params...)
+        builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+        circuit = MNACircuit(builder)
 
         # Run transient simulation
-        freq = params.freq
         period = 1.0 / freq
         tspan = (0.0, 5 * period)
 
@@ -231,7 +183,7 @@ endmodule
         Vin_pp = maximum(V_base) - minimum(V_base)
 
         # Input should be 2mV peak-to-peak (1mV amplitude)
-        @test isapprox(Vin_pp, 2 * params.Vac; rtol=0.15)
+        @test isapprox(Vin_pp, 2 * Vac; rtol=0.15)
 
         # Calculate voltage gain magnitude
         gain = Vout_pp / Vin_pp
@@ -254,44 +206,28 @@ endmodule
     # Test linearity by measuring gain with different input amplitudes.
     #==========================================================================#
     @testset "Gain linearity with signal level" begin
-
-        function build_ce_amp_level(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-
-            vcc = get_node!(ctx, :vcc)
-            base = get_node!(ctx, :base)
-            coll = get_node!(ctx, :coll)
-
-            stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-            sin_src = SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vin)
-            stamp!(sin_src, ctx, base, 0, t, spec.mode)
-            stamp!(Resistor(params.Rc), ctx, vcc, coll)
-            stamp!(Capacitor(params.Cload), ctx, coll, 0)
-            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
-
-            return ctx
-        end
-
-        base_params = (
-            Vcc = 12.0,
-            Vbias = 0.65,
-            Vac = 0.001,
-            freq = 1000.0,
-            Rc = 4.7e3,
-            Cload = 100e-12
-        )
+        Vcc = 12.0
+        Vbias = 0.65
+        freq = 1000.0
+        Rc = 4.7e3
+        Cload = 100e-12
 
         gains = Float64[]
 
         for vac in [0.0005, 0.001, 0.002]
-            params = merge(base_params, (Vac=vac,))
-            circuit = MNACircuit(build_ce_amp_level; params...)
+            spice = """
+            * CE amplifier - signal level test
+            Vcc vcc 0 DC $Vcc
+            Vin base 0 DC $Vbias SIN $Vbias $vac $freq
+            Rc vcc coll $Rc
+            Cload coll 0 $Cload
+            X1 base 0 coll npnbjt
+            """
 
-            period = 1.0 / params.freq
+            builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+            circuit = MNACircuit(builder)
+
+            period = 1.0 / freq
             tspan = (0.0, 5 * period)
 
             sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
@@ -332,42 +268,26 @@ endmodule
     # across audio band.
     #==========================================================================#
     @testset "Frequency response" begin
-
-        function build_ce_freq(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-            if ctx === nothing
-                ctx = MNAContext()
-            else
-                reset_for_restamping!(ctx)
-            end
-
-            vcc = get_node!(ctx, :vcc)
-            base = get_node!(ctx, :base)
-            coll = get_node!(ctx, :coll)
-
-            stamp!(VoltageSource(params.Vcc; name=:Vcc), ctx, vcc, 0)
-            sin_src = SinVoltageSource(params.Vbias, params.Vac, params.freq; name=:Vin)
-            stamp!(sin_src, ctx, base, 0, t, spec.mode)
-            stamp!(Resistor(params.Rc), ctx, vcc, coll)
-            stamp!(Capacitor(params.Cload), ctx, coll, 0)
-            stamp!(npnbjt(), ctx, base, 0, coll; _mna_x_=x)
-
-            return ctx
-        end
-
-        base_params = (
-            Vcc = 12.0,
-            Vbias = 0.65,
-            Vac = 0.001,
-            freq = 1000.0,
-            Rc = 4.7e3,
-            Cload = 100e-12
-        )
+        Vcc = 12.0
+        Vbias = 0.65
+        Vac = 0.001
+        Rc = 4.7e3
+        Cload = 100e-12
 
         gains = Float64[]
 
         for freq in [100.0, 1000.0, 10000.0]
-            params = merge(base_params, (freq=freq,))
-            circuit = MNACircuit(build_ce_freq; params...)
+            spice = """
+            * CE amplifier - frequency response
+            Vcc vcc 0 DC $Vcc
+            Vin base 0 DC $Vbias SIN $Vbias $Vac $freq
+            Rc vcc coll $Rc
+            Cload coll 0 $Cload
+            X1 base 0 coll npnbjt
+            """
+
+            builder, _ = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+            circuit = MNACircuit(builder)
 
             period = 1.0 / freq
             tspan = (0.0, 10 * period)

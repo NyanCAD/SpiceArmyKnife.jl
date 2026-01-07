@@ -24,7 +24,7 @@ allapprox_deftol(itr) = isempty(itr) ? true : all(isapprox_deftol(first(itr)), i
 using CedarSim.MNA: MNAContext, MNASpec, assemble!, solve_dc, solve_ac
 using CedarSim.MNA: voltage, current, get_node!, stamp!
 using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
-using CedarSim.MNA: make_ode_problem
+using CedarSim.MNA: make_ode_problem, ZERO_VECTOR
 
 """
     solve_mna_spice_code(spice_code::String; temp=27.0) -> (ctx, sol)
@@ -63,10 +63,13 @@ function solve_mna_spice_code(spice_code::String; temp::Real=27.0, imported_hdl_
     end
     circuit_fn = Base.eval(m, code)
 
+    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
+    # for nonlinear devices (VA BJTs, diodes, etc.)
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = Base.invokelatest(circuit_fn, (;), spec)
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec)
+
+    # Build context for returning (at the solved operating point)
+    ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
 
     return ctx, sol
 end
@@ -108,10 +111,13 @@ function solve_mna_spectre_code(spectre_code::String; temp::Real=27.0, imported_
     end
     circuit_fn = Base.eval(m, code)
 
+    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
+    # for nonlinear devices (VA BJTs, diodes, etc.)
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = Base.invokelatest(circuit_fn, (;), spec)
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = Base.invokelatest(solve_dc, circuit_fn, (;), spec)
+
+    # Build context for returning (at the solved operating point)
+    ctx = Base.invokelatest(circuit_fn, (;), spec, 0.0; x=sol.x)
 
     return ctx, sol
 end
@@ -120,11 +126,11 @@ end
     solve_mna_circuit(builder; params=(;), temp=27.0) -> (ctx, sol)
 
 Build and solve a circuit using MNA backend.
-`builder` should be a function (params, spec) -> MNAContext.
+`builder` should be a function (params, spec, t; x=...) -> MNAContext.
 
 # Example
 ```julia
-function my_circuit(params, spec, t::Real=0.0)
+function my_circuit(params, spec, t::Real=0.0; x=Float64[])
     ctx = MNAContext()
     vcc = get_node!(ctx, :vcc)
     stamp!(VoltageSource(5.0), ctx, vcc, 0)
@@ -135,10 +141,11 @@ ctx, sol = solve_mna_circuit(my_circuit; params=(R=1000.0,))
 ```
 """
 function solve_mna_circuit(builder; params=(;), temp::Real=27.0)
+    # Use solve_dc(builder, params, spec) which properly handles Newton iteration
+    # for nonlinear devices (VA BJTs, diodes, etc.)
     spec = MNASpec(temp=Float64(temp), mode=:dcop)
-    ctx = builder(params, spec)
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    sol = solve_dc(builder, params, spec)
+    ctx = builder(params, spec, 0.0; x=sol.x)
     return ctx, sol
 end
 
@@ -174,4 +181,57 @@ function tran_mna_circuit(builder, tspan::Tuple; params=(;), temp::Real=27.0, so
     sol = solve(prob, solver; reltol=deftol, abstol=deftol)
 
     return ctx, sol
+end
+
+using CedarSim.MNA: MNACircuit
+
+"""
+    make_mna_spice_circuit(spice_code::String; temp=27.0, imported_hdl_modules=Module[]) -> (builder, eval_module)
+
+Parse SPICE code and return an MNA builder function suitable for MNACircuit.
+
+The builder can be used with MNACircuit for transient simulation of circuits
+that include VA devices (via imported_hdl_modules).
+
+# Example
+```julia
+va\"\"\"
+module npnbjt(b, e, c); ...
+endmodule
+\"\"\"
+
+spice = \"\"\"
+* BJT amplifier
+V1 vcc 0 DC 12
+Vb base 0 DC 0.65
+Rc vcc coll 4.7k
+X1 base 0 coll npnbjt
+\"\"\"
+
+builder, m = make_mna_spice_circuit(spice; imported_hdl_modules=[npnbjt_module])
+circuit = MNACircuit(builder)
+sol = tran!(circuit, (0.0, 1e-3))
+```
+"""
+function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hdl_modules::Vector{Module}=Module[])
+    ast = CedarSim.SpectreNetlistParser.parse(IOBuffer(spice_code); start_lang=:spice, implicit_title=true)
+    code = CedarSim.make_mna_circuit(ast; imported_hdl_modules)
+
+    # Evaluate in temporary module
+    m = Module()
+    Base.eval(m, :(using CedarSim.MNA))
+    Base.eval(m, :(using CedarSim: ParamLens))
+    Base.eval(m, :(using CedarSim.SpectreEnvironment))
+    # Import VA device types
+    for hdl_mod in imported_hdl_modules
+        for name in names(hdl_mod; all=true, imported=false)
+            if !startswith(String(name), "#") && isdefined(hdl_mod, name)
+                val = getfield(hdl_mod, name)
+                isa(val, Type) && Base.eval(m, :(const $name = $val))
+            end
+        end
+    end
+    circuit_fn = Base.eval(m, code)
+
+    return circuit_fn, m
 end

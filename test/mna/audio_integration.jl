@@ -5,7 +5,7 @@
 # - va"""...""" macro for creating VA device models (BJT Ebers-Moll)
 # - SPICE netlists with X device syntax for VA model instantiation
 # - Top-level eval pattern for production-style SPICE loading
-# - SPICE .param with MNACircuit parameter overrides for sweeps
+# - SPICE .param with CircuitSweep for parameter sweeps
 # - Transient simulation with sinusoidal sources (SIN syntax)
 # - Signal processing analysis (gain measurement)
 #
@@ -13,8 +13,8 @@
 # 1. VA device models defined separately, imported via imported_hdl_modules
 # 2. SPICE X device syntax to instantiate VA models in netlists
 # 3. Top-level parse_spice_to_mna + eval (no invokelatest overhead)
-# 4. MNACircuit parameter overrides for parameterized circuits
-# 5. MNACircuit + tran!() for transient simulation
+# 4. CircuitSweep + Sweep for parameter sweeps with tran!()
+# 5. MNASolutionAccessor for accessing transient results
 #==============================================================================#
 
 using Test
@@ -22,7 +22,7 @@ using CedarSim
 using CedarSim.MNA
 using CedarSim.MNA: MNACircuit, MNASolutionAccessor
 using CedarSim.MNA: voltage, current, assemble!
-using CedarSim: tran!, parse_spice_to_mna
+using CedarSim: tran!, parse_spice_to_mna, CircuitSweep, Sweep
 using OrdinaryDiffEq
 using SciMLBase
 
@@ -220,21 +220,22 @@ eval(ce_amplifier_code)
     # Test 4: Gain Measurement with Different Signal Levels
     #
     # Test linearity by measuring gain with different input amplitudes.
-    # Uses SPICE .param with MNACircuit parameter overrides.
+    # Uses CircuitSweep API with SPICE .param parameter sweeps.
     #==========================================================================#
     @testset "Gain linearity with signal level" begin
         freq = 1000.0
+        period = 1.0 / freq
+        tspan = (0.0, 5 * period)
+
+        # Create sweep over vac values
+        sweep = Sweep(vac = [0.0005, 0.001, 0.002])
+        cs = CircuitSweep(ce_amplifier, sweep; vac=0.001, freq=freq)
+
+        # Run transient sweep - returns vector of solutions
+        solutions = tran!(cs, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
+
         gains = Float64[]
-
-        for vac in [0.0005, 0.001, 0.002]
-            # Override vac parameter via MNACircuit kwargs
-            circuit = MNACircuit(ce_amplifier; vac=vac, freq=freq)
-
-            period = 1.0 / freq
-            tspan = (0.0, 5 * period)
-
-            sol = tran!(circuit, tspan; solver=Rodas5P(), abstol=1e-9, reltol=1e-7)
-
+        for (sol, circuit) in zip(solutions, cs)
             if sol.retcode == ReturnCode.Success
                 sys = assemble!(circuit)
                 acc = MNASolutionAccessor(sol, sys)
@@ -268,16 +269,20 @@ eval(ce_amplifier_code)
     # Test 5: Frequency Response
     #
     # Test gain at different frequencies to verify proper operation
-    # across audio band. Uses SPICE .param with MNACircuit parameter overrides.
+    # across audio band. Uses CircuitSweep API with frequency-dependent tspans.
     #==========================================================================#
     @testset "Frequency response" begin
         vac = 0.001
+        freqs = [100.0, 1000.0, 10000.0]
+
+        # Create sweep over frequency values
+        sweep = Sweep(freq = freqs)
+        cs = CircuitSweep(ce_amplifier, sweep; vac=vac, freq=1000.0)
+
         gains = Float64[]
-
-        for freq in [100.0, 1000.0, 10000.0]
-            # Override freq parameter via MNACircuit kwargs
-            circuit = MNACircuit(ce_amplifier; vac=vac, freq=freq)
-
+        # Iterate over sweep - each frequency needs different tspan
+        for circuit in cs
+            freq = circuit.params.freq
             period = 1.0 / freq
             tspan = (0.0, 10 * period)
 
@@ -287,8 +292,10 @@ eval(ce_amplifier_code)
                 sys = assemble!(circuit)
                 acc = MNASolutionAccessor(sol, sys)
 
+                # Measure last 3 periods
                 t_start = 7 * period
-                times = range(t_start, 10*period; length=100)
+                t_end = 10 * period
+                times = range(t_start, t_end; length=100)
 
                 V_coll = [voltage(acc, :coll, t) for t in times]
                 V_base = [voltage(acc, :base, t) for t in times]

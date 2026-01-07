@@ -204,14 +204,24 @@ solutions = tran!(cs, tspan)
 
 | Feature | IDA (DAE) | DFBDF (DAE) | Rodas5P (ODE) | FBDF (ODE) |
 |---------|-----------|-------------|---------------|------------|
-| Voltage-dependent C | ✅ | ✅ | ⚠️ Fixed at DC | ⚠️ Fixed at DC |
+| Voltage-dependent C | ✅ | ✅ | ✅ | ✅ |
 | Explicit Jacobian | ✅ | ❌ | ✅ | ✅ |
 | Sparse matrices | ✅ | ✅ | ✅ | ✅ |
 | Stiff systems | ✅ | ✅ | ✅ | ✅ |
 | Speed (relative) | 1.0x | ~0.7x | ~1.5-2x | ~1.2x |
 | Memory | Medium | Medium | Lower | Lower |
 
-**Note:** ODE solvers use constant mass matrix (C evaluated at DC point), so voltage-dependent capacitors are not accurate during transient.
+**Note on Charge Formulation:** All solvers support voltage-dependent capacitors via the charge formulation
+(`src/mna/contrib.jl`). For nonlinear capacitors `Q(V)`, the system uses charge as an explicit state variable:
+- `C[p, q_idx] = 1.0`, `C[n, q_idx] = -1.0` (constant mass matrix entries!)
+- `G[q_idx, ...] = dQ/dV` (voltage-dependent part goes in G, not C)
+- This yields a constant mass matrix, compatible with all SciML solvers.
+
+**Code paths that use charge formulation:**
+- VA-generated devices (vasim.jl lines 1651-1706): ✅ Full support via `detect_or_cached!`
+- SPICE with VA models (via `imported_hdl_modules`): ✅ Uses VA stamp methods
+- Built-in `Capacitor` device: ❌ Constant C only (sufficient for SPICE C elements)
+- Built-in `MOSFET` device: ❌ Constant Cgs/Cgd only (use VA models for real MOSFETs)
 
 #### **AC Analysis**
 

@@ -1622,11 +1622,11 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions via DC solve using the SAME context structure
+    # Get initial conditions via DC solve using the SAME detection context
     # This ensures u0 has exactly the same size as the mass matrix.
     if u0 === nothing
-        sys0 = assemble!(ctx)
-        u0 = sys0.G \ sys0.b
+        dc_spec = with_mode(base_spec, :dcop)
+        u0, _ = dc_solve_with_ctx(builder, params, dc_spec, ctx)
     end
 
     # Compile circuit structure using the same detection context

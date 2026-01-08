@@ -459,6 +459,66 @@ function dc_solve_compiled(builder, params, spec;
     return sol.u, converged
 end
 
+"""
+    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=RobustMultiNewton())
+
+DC solve using a pre-built detection context.
+
+This ensures the solution vector has exactly the same size as the detection context,
+which is critical for DAE/ODE problem creation where u0 must match differential_vars/mass_matrix size.
+
+The context is used to determine the system structure, then compiled for Newton iteration.
+"""
+function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
+                            abstol::Real=1e-10, maxiters::Int=100,
+                            nlsolve=RobustMultiNewton())
+    n = system_size(ctx)
+
+    if n == 0
+        return Float64[], true
+    end
+
+    # Compile structure using the provided context
+    cs = compile_structure(builder, params, spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
+
+    # Initial guess: linear solve from the context's assembled system
+    sys0 = assemble!(ctx)
+    u0 = sys0.G \ sys0.b
+
+    # Check if linear solution is good enough
+    resid = zeros(n)
+    fast_rebuild!(ws, u0, 0.0)
+    mul!(resid, cs.G, u0)
+    resid .-= ws.dctx.b
+    if norm(resid) < abstol
+        return u0, true
+    end
+
+    # Need Newton iteration with compiled evaluation
+    function residual!(F, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+        return nothing
+    end
+
+    function jacobian!(J, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        copyto!(J, cs.G)
+        return nothing
+    end
+
+    jac_prototype = cs.G
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    nlprob = NonlinearProblem(nlfunc, u0)
+
+    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+
+    return sol.u, converged
+end
+
 export dc_solve_compiled
 
 export dc_residual!, dc_solve_core
@@ -1449,32 +1509,18 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     ctx = build_with_detection(circuit)
 
     # Detect differential variables using the same detection context
-    # Do this BEFORE u0 computation to ensure consistent size
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
     n = length(diff_vars)
 
-    # Get initial conditions via DC solve
+    # Get initial conditions via DC solve using the SAME detection context
+    # This ensures u0 has exactly the same size as diff_vars.
+    # We use dc_solve_with_ctx which does proper Newton iteration using
+    # the pre-built detection context structure.
     # Note: CedarDCOp (the default initializealg in tran!) will refine this and
-    # handle du0 properly during IDA initialization. We just need a good u0 here
-    # for structure compilation.
-    #
-    # IMPORTANT: Use the detection context's system size to ensure u0 has the
-    # correct dimension. dc_solve_compiled builds its own context which may have
-    # different size if the circuit produces different structure for :dcop vs :tran.
+    # handle du0 properly during IDA initialization.
     if u0 === nothing
         dc_spec = with_mode(circuit.spec, :dcop)
-        u0_raw, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
-        # Ensure u0 has the same size as the detection context
-        if length(u0_raw) == n
-            u0 = u0_raw
-        elseif length(u0_raw) < n
-            # Pad with zeros if dc_solve produced fewer variables
-            u0 = zeros(n)
-            u0[1:length(u0_raw)] = u0_raw
-        else
-            # Truncate if dc_solve produced more variables
-            u0 = u0_raw[1:n]
-        end
+        u0, _ = dc_solve_with_ctx(circuit.builder, circuit.params, dc_spec, ctx)
     end
     # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
     if du0 === nothing
@@ -1575,26 +1621,12 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
-    n = system_size(ctx)
 
-    # Get initial conditions via DC solve
-    # IMPORTANT: Use the detection context's system size to ensure u0 has the
-    # correct dimension. dc_solve_compiled builds its own context which may have
-    # different size if the circuit produces different structure for :dcop vs :tran.
+    # Get initial conditions via DC solve using the SAME context structure
+    # This ensures u0 has exactly the same size as the mass matrix.
     if u0 === nothing
-        dc_spec = with_mode(base_spec, :dcop)
-        u0_raw, _ = dc_solve_compiled(builder, params, dc_spec)
-        # Ensure u0 has the same size as the detection context
-        if length(u0_raw) == n
-            u0 = u0_raw
-        elseif length(u0_raw) < n
-            # Pad with zeros if dc_solve produced fewer variables
-            u0 = zeros(n)
-            u0[1:length(u0_raw)] = u0_raw
-        else
-            # Truncate if dc_solve produced more variables
-            u0 = u0_raw[1:n]
-        end
+        sys0 = assemble!(ctx)
+        u0 = sys0.G \ sys0.b
     end
 
     # Compile circuit structure using the same detection context

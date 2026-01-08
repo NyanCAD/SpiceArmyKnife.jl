@@ -352,25 +352,61 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
-# Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
-function _detect_structure(builder, params, spec)
-    N_DETECTION_PASSES = 3
-    ctx = nothing
-    known_size = 0
+# Core DC residual for Newton iteration (allocating path for builders without ctx)
+function _dc_residual!(out::AbstractVector, u::AbstractVector, builder, params, spec)
+    ctx = builder(params, spec, 0.0; x=u)
+    sys = assemble!(ctx)
+    mul!(out, sys.G, u)
+    out .-= sys.b
+    return nothing
+end
 
-    for pass in 1:N_DETECTION_PASSES
-        if ctx === nothing
-            ctx = builder(params, spec, 0.0; x=ZERO_VECTOR)
-            known_size = system_size(ctx)
-        else
-            known_size = system_size(ctx)
-            reset_for_restamping!(ctx)
-            x = rand(known_size) * 0.8
-            builder(params, spec, 0.0; x=x, ctx=ctx)
-        end
+# Allocating DC solve for builders that don't accept ctx kwarg
+# This rebuilds MNAContext each Newton iteration - slower but more compatible
+function _dc_solve_allocating(builder, params, spec;
+                               abstol::Real=1e-10, maxiters::Int=100,
+                               nlsolve=RobustMultiNewton())
+    # Build at x=0 to get system size
+    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
+    sys0 = assemble!(ctx0)
+    n = system_size(sys0)
+
+    if n == 0
+        return Float64[], true
     end
 
-    return ctx
+    # Initial guess: linear solve
+    u0 = sys0.G \ sys0.b
+
+    # Check if linear solution is good enough
+    ctx_check = builder(params, spec, 0.0; x=u0)
+    sys_check = assemble!(ctx_check)
+    resid = sys_check.G * u0 - sys_check.b
+    if norm(resid) < abstol
+        return u0, true
+    end
+
+    # Need Newton iteration
+    function residual!(F, u, p)
+        _dc_residual!(F, u, builder, params, spec)
+        return nothing
+    end
+
+    function jacobian!(J, u, p)
+        ctx = builder(params, spec, 0.0; x=u)
+        sys = assemble!(ctx)
+        copyto!(J, sys.G)
+        return nothing
+    end
+
+    jac_prototype = sys0.G
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    nlprob = NonlinearProblem(nlfunc, u0)
+
+    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+
+    return sol.u, converged
 end
 
 """
@@ -379,41 +415,38 @@ end
 
 Solve DC operating point using a circuit builder function.
 
-Uses the unified DC solve path: detection + dc_solve_with_ctx.
-Supports both linear and nonlinear devices.
+This API supports builders that don't accept the `ctx` keyword argument.
+For MNACircuit (which has proper builders), use `dc!(circuit)` for the
+faster compiled path.
 
 # Arguments
-- `builder`: Circuit builder function `(params, spec, t; x, ctx) -> MNAContext`
+- `builder`: Circuit builder function `(params, spec, t; x) -> MNAContext`
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
 - `maxiters`: Maximum Newton iterations (default: 100)
 
 # See Also
-- `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
+- `dc!(circuit)`: High-level API with compiled path (faster)
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100) where {F,P}
-    # Run detection passes to discover all states
-    ctx = _detect_structure(builder, params, spec)
-
-    n = system_size(ctx)
-    if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
-    end
-
-    # Use unified dc_solve_with_ctx for Newton iteration
-    u, converged = dc_solve_with_ctx(builder, params, spec, ctx;
-                                      abstol=abstol, maxiters=maxiters)
+    # Use allocating path (compatible with builders without ctx)
+    u, converged = _dc_solve_allocating(builder, params, spec;
+                                         abstol=abstol, maxiters=maxiters)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
     end
 
+    n = length(u)
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
     # Get final system for node names
-    reset_for_restamping!(ctx)
-    builder(params, spec, 0.0; x=u, ctx=ctx)
-    sys_final = assemble!(ctx)
+    ctx_final = builder(params, spec, 0.0; x=u)
+    sys_final = assemble!(ctx_final)
 
     return DCSolution(sys_final, u)
 end

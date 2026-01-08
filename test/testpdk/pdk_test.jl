@@ -65,8 +65,12 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
 
     @testset "Use PDK builders in circuit" begin
         # Build a circuit using the PDK
-        function build_inverter_test(params, spec::MNASpec)
-            ctx = MNAContext()
+        function build_inverter_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             lens = ParamLens(params)
 
             # Nodes
@@ -108,8 +112,12 @@ const va_device_mod = CedarSim.load_mna_va_module(@__MODULE__, test_va_path)
     @testset "Compare corners" begin
         function get_nmos_current(corner)
             # Build simple circuit with just nmos
-            function build_nmos_test(params, spec::MNASpec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function build_nmos_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 lens = ParamLens(params)
 
                 vdd = get_node!(ctx, :vdd)
@@ -165,8 +173,12 @@ end
 
     @testset "Use VA device in circuit" begin
         # Build a simple circuit using the VA resistor
-        function build_va_resistor_test(params, spec::MNASpec)
-            ctx = MNAContext()
+        function build_va_resistor_test(params, spec::MNASpec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
 
             # Nodes
             vin = get_node!(ctx, :vin)
@@ -198,8 +210,12 @@ end
     @testset "VA device with different parameters" begin
         # Test that parameter changes work
         function get_output_voltage(R_value)
-            function va_divider_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function va_divider_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
 
                 vin = get_node!(ctx, :vin)
                 out = get_node!(ctx, :out)

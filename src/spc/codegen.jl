@@ -2299,16 +2299,22 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # Helper to check if an instance is a voltage source (V element)
-    # Voltage sources need to be stamped first since they create current variables
-    # that controlled sources (H, F) reference
-    function is_voltage_source(inst)
-        if inst isa SNode{SP.Voltage}
-            return true
-        elseif inst isa SNode{SP.DCSource} && startswith(lowercase(String(inst.name)), "v")
-            return true
-        elseif inst isa SNode{SP.ACSource} && startswith(lowercase(String(inst.name)), "v")
-            return true
+    # Check if a SPICE element creates a current variable (needs to be stamped first).
+    # In SPICE, element names starting with 'V' are voltage sources which create
+    # current variables. These must be stamped before CCVS (H) and CCCS (F) elements
+    # that reference their currents.
+    #
+    # Note: The parser types (SP.Voltage, SP.DCSource, SP.ACSource) describe the
+    # source specification, not whether it's V or I. The element prefix determines:
+    # - V*: voltage source (creates current variable)
+    # - I*: current source (no current variable)
+    function creates_current_variable(inst)
+        # SP.Voltage is always a voltage source
+        inst isa SNode{SP.Voltage} && return true
+        # For DC/AC sources, check element prefix (V vs I)
+        if inst isa SNode{<:Union{SP.DCSource, SP.ACSource}}
+            prefix = first(lowercase(String(inst.name)))
+            return prefix == 'v'
         end
         return false
     end
@@ -2333,21 +2339,22 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    # First pass: process voltage sources (they create current variables)
+    # First pass: process elements that create current variables (voltage sources)
+    # These must be stamped before CCVS/CCCS which reference their currents
     for (name, instances) in state.sema.instances
         if !isempty(instances)
             first_inst = first(instances)[2].val
-            if is_voltage_source(first_inst)
+            if creates_current_variable(first_inst)
                 process_instance(name, instances)
             end
         end
     end
 
-    # Second pass: process all other instances
+    # Second pass: process all other instances (current sources, passives, etc.)
     for (name, instances) in state.sema.instances
         if !isempty(instances)
             first_inst = first(instances)[2].val
-            if !is_voltage_source(first_inst)
+            if !creates_current_variable(first_inst)
                 process_instance(name, instances)
             end
         end

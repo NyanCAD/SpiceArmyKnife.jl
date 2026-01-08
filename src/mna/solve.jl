@@ -276,7 +276,7 @@ using ADTypes
 # These functions are used by:
 # - solve_dc(circuit::MNACircuit) for standalone DC analysis
 # - CedarDCOp for DAE initialization (IDA, DFBDF, etc.)
-# - ODE initialization (Rodas5P, etc.) via compute_initial_conditions
+# - DAEProblem/ODEProblem constructors for initial u0
 #==============================================================================#
 
 """
@@ -1365,7 +1365,7 @@ function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, No
         ctx0 = build_with_detection(circuit)
     else
         # Use provided context directly - it should already have correct structure
-        # from previous build_with_detection or compute_initial_conditions.
+        # from previous build_with_detection.
         # Do NOT rebuild with ZERO_VECTOR - reactive branches may return scalars
         # at x=0 instead of Duals, causing incorrect structure.
         ctx0 = ctx
@@ -1404,145 +1404,6 @@ function detect_differential_vars(sys::MNASystem)
     end
 
     return diff_vars
-end
-
-"""
-    compute_initial_conditions(circuit::MNACircuit; ctx=nothing) -> (u0, du0)
-
-Compute consistent initial conditions via DC operating point.
-
-1. Solves DC problem (du=0) to get u0 using Newton iteration (dc_solve_core)
-2. For charge variables, computes q = Q(V) from the constraint
-3. Computes du0 to satisfy F(du0, u0, 0) = 0
-
-This uses `dc_solve_compiled` for zero-allocation Newton iteration, which is also
-used by solve_dc(circuit) and CedarDCOp initialization, ensuring consistent DC
-operating point results.
-
-If `ctx` is provided, it will be used for the charge iteration and du0 computation.
-This ensures consistent detection results across code paths.
-"""
-function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
-    # Use provided context or run multi-pass detection
-    if ctx === nothing
-        ctx = build_with_detection(circuit)
-    end
-    sys0 = assemble!(ctx)
-    n = system_size(sys0)
-
-    # DC solve for u0 using compiled path (zero-allocation Newton iteration)
-    # Use dcop mode to turn off time-dependent sources for DC operating point
-    dc_spec = with_mode(circuit.spec, :dcop)
-    u0, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
-
-    # Handle empty circuit case
-    if length(u0) == 0
-        return Float64[], Float64[]
-    end
-
-    # Rebuild with circuit spec at DC operating point
-    # Note: We use the circuit's actual spec (not dc_spec) to preserve detection cache
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    sys0 = assemble!(ctx)
-
-    # Fix charge variable initial values
-    # The DC solve may not correctly initialize charges because the constraint
-    # residual can be below abstol. We need to explicitly solve q = Q(V).
-    #
-    # For each charge variable at index q_idx, the constraint row in G is:
-    #   G[q_idx, q_idx] = 1 (coefficient of q)
-    #   G[q_idx, j] = -∂Q/∂Vj for voltage nodes j
-    #
-    # The constraint equation is: q - Q(V) = 0, or: q = Q(V)
-    # From G*x = b at the constraint row:
-    #   1*q + sum(-∂Q/∂Vj * Vj) = b[q_idx]
-    #   q = b[q_idx] + sum(∂Q/∂Vj * Vj)
-    #
-    # But actually, since b is the Newton companion, a simpler approach is to
-    # iterate: set q = Q(V) using the values from b recomputed at current x.
-    if sys0.n_charges > 0
-        # Re-solve for charge values using Newton iteration
-        # The constraint is q = Q(V), which can be solved directly
-        for iter in 1:5  # Few iterations should suffice
-            reset_for_restamping!(ctx)
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-            sys_iter = assemble!(ctx)
-
-            # For each charge variable, solve the constraint equation
-            n_nodes = sys_iter.n_nodes
-            n_currents = sys_iter.n_currents
-            for i in 1:sys_iter.n_charges
-                q_idx = n_nodes + n_currents + i
-
-                # Constraint row: G[q_idx, :] * x = b[q_idx]
-                # G[q_idx, q_idx] = 1, so: q = b[q_idx] - sum(G[q_idx, j] * x[j]) for j != q_idx
-                rhs = sys_iter.b[q_idx]
-                for j in 1:n
-                    if j != q_idx
-                        rhs -= sys_iter.G[q_idx, j] * u0[j]
-                    end
-                end
-                u0[q_idx] = rhs / sys_iter.G[q_idx, q_idx]
-            end
-
-            # Check convergence
-            reset_for_restamping!(ctx)
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-            sys_check = assemble!(ctx)
-            resid = sys_check.G * u0 - sys_check.b
-            if norm(resid) < 1e-12
-                break
-            end
-        end
-    end
-
-    # Recompute system at final u0
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    sys0 = assemble!(ctx)
-
-    du0 = zeros(n)
-
-    # At t=0, need F(du0, u0) = C*du0 + G*u0 - b = 0
-    # So: C*du0 = b - G*u0
-    # For singular C (algebraic vars), du0 components are 0
-
-    rhs = sys0.b - sys0.G * u0
-    diff_vars = detect_differential_vars(sys0)
-
-    # For charge-coupled systems, the C matrix has off-diagonal entries:
-    #   C[v_node, q_var] = 1 (charge couples to KCL)
-    #   C[q_var, :] = 0 (charge constraint is algebraic)
-    #
-    # The simple diagonal approximation doesn't work here. Instead, solve
-    # the reduced system for differential variables using least squares.
-    #
-    # Extract rows/cols for differential variables and solve:
-    #   C_diff * du_diff = rhs_diff
-    diff_idx = findall(diff_vars)
-    if !isempty(diff_idx)
-        C_dense = Matrix(sys0.C)
-        C_diff = C_dense[diff_idx, diff_idx]
-        rhs_diff = rhs[diff_idx]
-
-        # Use least squares in case C_diff is ill-conditioned
-        # This handles cases where some diagonal entries are zero but
-        # off-diagonal entries exist (charge coupling)
-        try
-            du_diff = C_diff \ rhs_diff
-            du0[diff_idx] = du_diff
-        catch e
-            # If direct solve fails, try pseudo-inverse
-            if isa(e, SingularException) || isa(e, LAPACKException)
-                du0[diff_idx] = pinv(C_diff) * rhs_diff
-            else
-                rethrow(e)
-            end
-        end
-    end
-
-    return u0, du0
 end
 
 """
@@ -1587,11 +1448,17 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions using the same detection context
-    if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(circuit; ctx=ctx)
-        u0 = u0 === nothing ? u0_computed : u0
-        du0 = du0 === nothing ? du0_computed : du0
+    # Get initial conditions via DC solve
+    # Note: CedarDCOp (the default initializealg in tran!) will refine this and
+    # handle du0 properly during IDA initialization. We just need a good u0 here
+    # for structure compilation.
+    if u0 === nothing
+        dc_spec = with_mode(circuit.spec, :dcop)
+        u0, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
+    end
+    # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
+    if du0 === nothing
+        du0 = zeros(length(u0))
     end
 
     # Detect differential variables using the same detection context
@@ -1692,9 +1559,10 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions via DC solve using the same detection context
+    # Get initial conditions via DC solve
     if u0 === nothing
-        u0, _ = compute_initial_conditions(circuit; ctx=ctx)
+        dc_spec = with_mode(base_spec, :dcop)
+        u0, _ = dc_solve_compiled(builder, params, dc_spec)
     end
 
     # Compile circuit structure using the same detection context

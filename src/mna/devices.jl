@@ -76,6 +76,41 @@ export VoltageSource, CurrentSource
 export VCVS, VCCS, CCVS, CCCS
 
 #==============================================================================#
+# Device Type Hierarchy
+#
+# Abstract types for device categorization:
+# - AbstractMNADevice: base type for all devices
+# - AbstractVoltageSource: devices that create a current variable (for KVL constraint)
+# - AbstractCurrentSource: devices that inject current but don't create variables
+#
+# Key distinction: Voltage sources create current variables that can be referenced
+# by controlled sources (CCVS, CCCS). Current sources only modify the RHS vector.
+#==============================================================================#
+
+"""Base type for all MNA circuit devices."""
+abstract type AbstractMNADevice end
+
+"""
+Devices that impose a voltage constraint and create a current variable.
+
+All voltage sources (independent, controlled, behavioral) create a current variable
+in the MNA system. This current can be referenced by CCVS/CCCS controlled sources.
+"""
+abstract type AbstractVoltageSource <: AbstractMNADevice end
+
+"""
+Devices that inject/absorb current without creating additional variables.
+
+Current sources only modify the RHS vector `b`, they don't add variables to the system.
+"""
+abstract type AbstractCurrentSource <: AbstractMNADevice end
+
+"""Passive devices (resistors, capacitors, inductors)."""
+abstract type AbstractPassiveDevice <: AbstractMNADevice end
+
+export AbstractMNADevice, AbstractVoltageSource, AbstractCurrentSource, AbstractPassiveDevice
+
+#==============================================================================#
 # Device Types
 #==============================================================================#
 
@@ -86,7 +121,7 @@ A linear resistor with resistance `r` ohms.
 
 MNA stamps G matrix only (resistive, no dynamics).
 """
-struct Resistor
+struct Resistor <: AbstractPassiveDevice
     r::Float64
     name::Symbol
 end
@@ -99,7 +134,7 @@ A linear capacitor with capacitance `c` farads.
 
 MNA stamps C matrix only (reactive dynamics).
 """
-struct Capacitor
+struct Capacitor <: AbstractPassiveDevice
     c::Float64
     name::Symbol
 end
@@ -113,7 +148,7 @@ A linear inductor with inductance `l` henries.
 MNA requires a current variable (I_L is a state variable).
 Stamps G matrix (KCL and voltage constraint) and C matrix (V = L*dI/dt).
 """
-struct Inductor
+struct Inductor <: AbstractPassiveDevice
     l::Float64
     name::Symbol
 end
@@ -127,7 +162,7 @@ An independent DC voltage source with voltage `v` volts.
 MNA requires a current variable (current through source is unknown).
 Stamps G matrix (KCL and voltage constraint) and b vector (source value).
 """
-struct VoltageSource
+struct VoltageSource <: AbstractVoltageSource
     v::Float64
     name::Symbol
 end
@@ -141,7 +176,7 @@ An independent DC current source with current `i` amperes.
 Stamps b vector only (source current into KCL equations).
 Positive current flows from n to p (into the positive terminal).
 """
-struct CurrentSource
+struct CurrentSource <: AbstractCurrentSource
     i::Float64
     name::Symbol
 end
@@ -169,7 +204,7 @@ pulse = TimeDependentVoltageSource(
 )
 ```
 """
-struct TimeDependentVoltageSource{F}
+struct TimeDependentVoltageSource{F} <: AbstractVoltageSource
     value_fn::F      # Function t -> voltage
     dc_value::Float64  # Value for DC analysis (mode = :dcop)
     name::Symbol
@@ -221,7 +256,7 @@ pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vramp)
 pwl = PWLVoltageSource((0.0, 1e-3), (0.0, 5.0); name=:Vramp)
 ```
 """
-struct PWLVoltageSource{T,V}
+struct PWLVoltageSource{T,V} <: AbstractVoltageSource
     times::T
     values::V
     name::Symbol
@@ -289,7 +324,7 @@ pwl = PWLCurrentSource([0.0, 1e-3], [0.0, 1e-3]; name=:Iramp)
 pwl = PWLCurrentSource((0.0, 1e-3), (0.0, 1e-3); name=:Iramp)
 ```
 """
-struct PWLCurrentSource{T,V}
+struct PWLCurrentSource{T,V} <: AbstractCurrentSource
     times::T
     values::V
     name::Symbol
@@ -356,7 +391,7 @@ For t < td: V(t) = vo + va * sin(phase)
 sin_src = SinVoltageSource(0.5, 1.0, 1000.0; name=:Vsin)
 ```
 """
-struct SinVoltageSource
+struct SinVoltageSource <: AbstractVoltageSource
     vo::Float64      # DC offset
     va::Float64      # Amplitude
     freq::Float64    # Frequency (Hz)
@@ -413,7 +448,7 @@ I(t) = io + ia * exp(-(t-td)*theta) * sin(2π*freq*(t-td) + phase)
 # Fields
 Same as SinVoltageSource but for current.
 """
-struct SinCurrentSource
+struct SinCurrentSource <: AbstractCurrentSource
     io::Float64      # DC offset
     ia::Float64      # Amplitude
     freq::Float64    # Frequency (Hz)
@@ -458,7 +493,7 @@ V(out+, out-) = gain * V(in+, in-)
 
 Requires a current variable for the output branch.
 """
-struct VCVS
+struct VCVS <: AbstractVoltageSource
     gain::Float64
     name::Symbol
 end
@@ -472,7 +507,7 @@ I(out+, out-) = gm * V(in+, in-)
 
 Does not require a current variable.
 """
-struct VCCS
+struct VCCS <: AbstractCurrentSource
     gm::Float64
     name::Symbol
 end
@@ -486,7 +521,7 @@ V(out+, out-) = rm * I(in+, in-)
 
 Requires current variables for both input and output branches.
 """
-struct CCVS
+struct CCVS <: AbstractVoltageSource
     rm::Float64
     name::Symbol
 end
@@ -500,7 +535,7 @@ I(out+, out-) = gain * I(in+, in-)
 
 Requires a current variable for the input (sensing) branch.
 """
-struct CCCS
+struct CCCS <: AbstractCurrentSource
     gain::Float64
     name::Symbol
 end
@@ -1080,7 +1115,7 @@ bsrc = BehavioralVoltageSource(
 )
 ```
 """
-struct BehavioralVoltageSource{F}
+struct BehavioralVoltageSource{F} <: AbstractVoltageSource
     value_fn::F      # Function (get_voltage) -> value
     name::Symbol
 end
@@ -1109,7 +1144,7 @@ bsrc = BehavioralCurrentSource(
 )
 ```
 """
-struct BehavioralCurrentSource{F}
+struct BehavioralCurrentSource{F} <: AbstractCurrentSource
     value_fn::F      # Function (get_voltage) -> value
     name::Symbol
 end

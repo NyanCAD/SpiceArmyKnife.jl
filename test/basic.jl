@@ -42,7 +42,7 @@ end
 
     # I = V/R = 5/2 = 2.5A
     R_v = voltage(sol, :vcc)
-    R_i = -current(sol, :I_V1)  # Voltage source current is negative when sourcing
+    R_i = -current(sol, :I_v1)  # Voltage source current is negative when sourcing (SPICE is case-insensitive)
     @test isapprox_deftol(R_v, 5.0)
     @test isapprox_deftol(R_i, 2.5)
 end

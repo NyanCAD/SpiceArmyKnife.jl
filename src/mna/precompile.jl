@@ -42,56 +42,14 @@ export reset_coo_values!, update_sparse_from_coo!
 """
     _pad_to_pattern(M::SparseMatrixCSC, pattern::SparseMatrixCSC) -> SparseMatrixCSC
 
-Create a new sparse matrix with the sparsity pattern of `pattern` but values from `M`.
-
-Entries in `pattern` that are not in `M` are set to zero. This enables
-zero-allocation Jacobian computation by ensuring G and C have identical
-sparsity structure (same colptr and rowvals).
-
-# Arguments
-- `M`: Source matrix with values to copy
-- `pattern`: Target sparsity pattern (typically from abs(G) + abs(C))
-
-# Returns
-A new sparse matrix with `pattern`'s structure and `M`'s values.
+Expand sparse matrix M to have the sparsity pattern of `pattern`.
+Entries in `pattern` not in `M` are zero.
 """
-function _pad_to_pattern(M::SparseMatrixCSC{Tv,Ti}, pattern::SparseMatrixCSC{Tp,Ti}) where {Tv,Tp,Ti}
-    m, n = size(pattern)
-    @assert size(M) == (m, n) "Matrix and pattern must have same dimensions"
-
-    # Create output with pattern's structure
-    result = SparseMatrixCSC(m, n, copy(pattern.colptr), copy(rowvals(pattern)), zeros(Tv, nnz(pattern)))
-
-    # Copy values from M into result at matching positions
-    result_nzval = nonzeros(result)
-    result_rowval = rowvals(result)
-
-    for j in 1:n
-        # Get range of nonzeros in column j for both matrices
-        M_range = nzrange(M, j)
-        result_range = nzrange(result, j)
-
-        # For each entry in result, find matching entry in M (if any)
-        M_rows = rowvals(M)
-        M_vals = nonzeros(M)
-
-        M_idx = first(M_range)
-        M_end = last(M_range)
-
-        for k in result_range
-            row = result_rowval[k]
-            # Advance M_idx until we reach or pass this row
-            while M_idx <= M_end && M_rows[M_idx] < row
-                M_idx += 1
-            end
-            # If we found the matching row, copy the value
-            if M_idx <= M_end && M_rows[M_idx] == row
-                result_nzval[k] = M_vals[M_idx]
-            end
-            # Otherwise result_nzval[k] remains 0.0
-        end
-    end
-
+function _pad_to_pattern(M::SparseMatrixCSC{Tv}, pattern::SparseMatrixCSC) where Tv
+    result = similar(pattern, Tv)
+    fill!(nonzeros(result), zero(Tv))
+    I, J, V = findnz(M)
+    result[CartesianIndex.(I, J)] .= V
     return result
 end
 

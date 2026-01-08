@@ -125,6 +125,20 @@ end
 get_current_idx(ctx::DirectStampContext, name::String) = get_current_idx(ctx, Symbol(name))
 
 """
+    resolve_index(ctx::DirectStampContext, idx::MNAIndex) -> Int
+
+Convert an MNA index (NodeIndex, CurrentIndex, ChargeIndex) to system row/column.
+This mirrors the MNAContext version for DirectStampContext compatibility.
+"""
+@inline resolve_index(ctx::DirectStampContext, ::GroundIndex)::Int = 0
+@inline resolve_index(ctx::DirectStampContext, idx::NodeIndex)::Int = idx.idx
+@inline resolve_index(ctx::DirectStampContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
+# ChargeIndex for DirectStampContext (charges come after currents)
+@inline function resolve_index(ctx::DirectStampContext, idx::ChargeIndex)::Int
+    return ctx.n_nodes + ctx.n_currents + idx.k
+end
+
+"""
     reset_direct_stamp!(dctx::DirectStampContext)
 
 Reset counters and zero sparse matrix values for a new iteration.

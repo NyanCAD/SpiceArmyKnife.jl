@@ -1448,21 +1448,38 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
+    # Detect differential variables using the same detection context
+    # Do this BEFORE u0 computation to ensure consistent size
+    diff_vars = detect_differential_vars(circuit; ctx=ctx)
+    n = length(diff_vars)
+
     # Get initial conditions via DC solve
     # Note: CedarDCOp (the default initializealg in tran!) will refine this and
     # handle du0 properly during IDA initialization. We just need a good u0 here
     # for structure compilation.
+    #
+    # IMPORTANT: Use the detection context's system size to ensure u0 has the
+    # correct dimension. dc_solve_compiled builds its own context which may have
+    # different size if the circuit produces different structure for :dcop vs :tran.
     if u0 === nothing
         dc_spec = with_mode(circuit.spec, :dcop)
-        u0, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
+        u0_raw, _ = dc_solve_compiled(circuit.builder, circuit.params, dc_spec)
+        # Ensure u0 has the same size as the detection context
+        if length(u0_raw) == n
+            u0 = u0_raw
+        elseif length(u0_raw) < n
+            # Pad with zeros if dc_solve produced fewer variables
+            u0 = zeros(n)
+            u0[1:length(u0_raw)] = u0_raw
+        else
+            # Truncate if dc_solve produced more variables
+            u0 = u0_raw[1:n]
+        end
     end
     # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
     if du0 === nothing
-        du0 = zeros(length(u0))
+        du0 = zeros(n)
     end
-
-    # Detect differential variables using the same detection context
-    diff_vars = detect_differential_vars(circuit; ctx=ctx)
 
     # Compile circuit structure using the same detection context
     # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!

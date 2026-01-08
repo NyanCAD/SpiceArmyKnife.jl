@@ -260,9 +260,9 @@ end
 #==============================================================================#
 # DC Analysis
 #
-# PUBLIC API: solve_dc(builder, params, spec) and solve_dc(circuit::MNACircuit)
-# Both use Newton iteration via dc_solve_compiled, which handles linear and
-# nonlinear circuits correctly. For convenience, use dc!(circuit).
+# PUBLIC API: solve_dc(circuit::MNACircuit) and dc!(circuit)
+# Uses unified DC initialization: build_with_detection() + dc_solve_with_ctx()
+# This ensures consistent state detection between DC and transient analysis.
 #==============================================================================#
 
 using NonlinearSolve
@@ -271,118 +271,19 @@ using SciMLBase: MatrixOperator
 using ADTypes
 
 #==============================================================================#
-# Shared DC Solve Core
+# Unified DC Solve
 #
-# These functions are used by:
+# ONE implementation shared by:
 # - solve_dc(circuit::MNACircuit) for standalone DC analysis
-# - CedarDCOp for DAE initialization (IDA, DFBDF, etc.)
 # - DAEProblem/ODEProblem constructors for initial u0
+# - CedarDCOp for DAE initialization
+#
+# The flow is:
+# 1. build_with_detection() discovers all states via multi-pass detection
+# 2. dc_solve_with_ctx() does Newton iteration using that detected context
 #==============================================================================#
 
-"""
-    dc_residual!(out, u, builder, params, spec)
-
-Core DC residual function: F(u) = G(u)*u - b(u)
-
-This is the shared residual evaluation used by both dc!(circuit) and CedarDCOp.
-It rebuilds the circuit at operating point u with the given spec (typically dcop mode)
-and computes the residual.
-
-# Arguments
-- `out`: Output residual vector (mutated)
-- `u`: Current operating point
-- `builder`: Circuit builder function
-- `params`: Circuit parameters
-- `spec`: MNASpec (should have mode=:dcop for DC analysis)
-"""
-function dc_residual!(out::AbstractVector, u::AbstractVector,
-                      builder, params, spec)
-    # Rebuild circuit at current operating point
-    ctx = builder(params, spec, 0.0; x=u)
-    sys = assemble!(ctx)
-
-    # F(u) = G(u)*u - b(u)
-    mul!(out, sys.G, u)
-    out .-= sys.b
-    return nothing
-end
-
-"""
-    dc_solve_core(builder, params, spec; abstol=1e-10, maxiters=100,
-                  nlsolve=RobustMultiNewton(), u0=nothing) -> (u, converged)
-
-Core DC solve using Newton iteration.
-
-This is the shared solver used by both solve_dc(circuit) and CedarDCOp.
-It handles both linear and nonlinear circuits:
-- For linear circuits, converges in one iteration
-- For nonlinear circuits, uses Newton iteration via NonlinearSolve.jl
-
-# Arguments
-- `builder`: Circuit builder function
-- `params`: Circuit parameters
-- `spec`: MNASpec (should have mode=:dcop)
-- `abstol`: Convergence tolerance
-- `maxiters`: Maximum iterations
-- `nlsolve`: Nonlinear solver algorithm
-- `u0`: Initial guess (default: linear solve G\\b)
-
-# Returns
-- `u`: Solution vector
-- `converged`: Whether the solve converged
-"""
-function dc_solve_core(builder, params, spec;
-                       abstol::Real=1e-10, maxiters::Int=100,
-                       nlsolve=RobustMultiNewton(),
-                       u0::Union{Nothing, AbstractVector}=nothing)
-    # Build at x=0 to get system size
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
-    sys0 = assemble!(ctx0)
-    n = system_size(sys0)
-
-    if n == 0
-        return Float64[], true
-    end
-
-    # Initial guess: linear solve or provided u0
-    if u0 === nothing
-        u0 = sys0.G \ sys0.b
-    end
-
-    # Check if linear solution is good enough
-    ctx_check = builder(params, spec, 0.0; x=u0)
-    sys_check = assemble!(ctx_check)
-    resid = sys_check.G * u0 - sys_check.b
-    if norm(resid) < abstol
-        return u0, true
-    end
-
-    # Need Newton iteration
-    function residual!(F, u, p)
-        dc_residual!(F, u, builder, params, spec)
-        return nothing
-    end
-
-    # Jacobian: G(u) (conductance matrix at operating point)
-    function jacobian!(J, u, p)
-        ctx = builder(params, spec, 0.0; x=u)
-        sys = assemble!(ctx)
-        copyto!(J, sys.G)
-        return nothing
-    end
-
-    jac_prototype = sys0.G
-    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
-    nlprob = NonlinearProblem(nlfunc, u0)
-
-    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
-    converged = sol.retcode == SciMLBase.ReturnCode.Success
-
-    return sol.u, converged
-end
-
 # Common Newton iteration core for compiled DC solve
-# Used by both dc_solve_compiled and dc_solve_with_ctx
 function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
                               abstol::Real=1e-10, maxiters::Int=100,
                               nlsolve=RobustMultiNewton())
@@ -422,54 +323,6 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 end
 
 """
-    dc_solve_compiled(builder, params, spec; abstol=1e-10, maxiters=100,
-                      nlsolve=RobustMultiNewton()) -> (u, converged)
-
-Compiled DC solve with zero-allocation Newton iteration.
-
-This is the optimized version of dc_solve_core that uses:
-- CompiledStructure for fixed sparsity pattern
-- EvalWorkspace with DirectStampContext for zero-allocation rebuilding
-- Fast residual/Jacobian evaluation via fast_rebuild!
-
-For circuits with many Newton iterations, this provides significant speedup
-over dc_solve_core which allocates new MNAContext each iteration.
-
-# Arguments
-- `builder`: Circuit builder function
-- `params`: Circuit parameters
-- `spec`: MNASpec (should have mode=:dcop)
-- `abstol`: Convergence tolerance
-- `maxiters`: Maximum iterations
-- `nlsolve`: Nonlinear solver algorithm
-
-# Returns
-- `u`: Solution vector
-- `converged`: Whether the solve converged
-"""
-function dc_solve_compiled(builder, params, spec;
-                           abstol::Real=1e-10, maxiters::Int=100,
-                           nlsolve=RobustMultiNewton())
-    # Build at x=0 to get initial structure
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
-    n = system_size(ctx0)
-
-    if n == 0
-        return Float64[], true
-    end
-
-    # Compile structure for zero-allocation iteration
-    cs = compile_structure(builder, params, spec; ctx=ctx0)
-    ws = create_workspace(cs; ctx=ctx0)
-
-    # Initial guess: linear solve
-    sys0 = assemble!(ctx0)
-    u0 = sys0.G \ sys0.b
-
-    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
-end
-
-"""
     dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=RobustMultiNewton())
 
 DC solve using a pre-built detection context.
@@ -499,9 +352,26 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
-export dc_solve_compiled
+# Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
+function _detect_structure(builder, params, spec)
+    N_DETECTION_PASSES = 3
+    ctx = nothing
+    known_size = 0
 
-export dc_residual!, dc_solve_core
+    for pass in 1:N_DETECTION_PASSES
+        if ctx === nothing
+            ctx = builder(params, spec, 0.0; x=ZERO_VECTOR)
+            known_size = system_size(ctx)
+        else
+            known_size = system_size(ctx)
+            reset_for_restamping!(ctx)
+            x = rand(known_size) * 0.8
+            builder(params, spec, 0.0; x=x, ctx=ctx)
+        end
+    end
+
+    return ctx
+end
 
 """
     solve_dc(builder, params, spec::MNASpec;
@@ -509,67 +379,41 @@ export dc_residual!, dc_solve_core
 
 Solve DC operating point using a circuit builder function.
 
-This is the recommended API for DC analysis. It supports both linear and
-nonlinear devices. For linear circuits, it converges in one iteration.
-For nonlinear devices (diodes, MOSFETs, VA devices with V*V terms), it uses
-Newton iteration via NonlinearSolve.jl.
-
-This function uses the shared `dc_solve_core` which is also used by CedarDCOp
-for DAE initialization, ensuring consistent DC operating point results.
+Uses the unified DC solve path: detection + dc_solve_with_ctx.
+Supports both linear and nonlinear devices.
 
 # Arguments
-- `builder`: Circuit builder function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
+- `builder`: Circuit builder function `(params, spec, t; x, ctx) -> MNAContext`
 - `params`: Circuit parameters (NamedTuple)
 - `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
 - `abstol`: Convergence tolerance (default: 1e-10)
 - `maxiters`: Maximum Newton iterations (default: 100)
 
-# How It Works
-1. Builds circuit at initial guess to get system size and structure
-2. Solves linear system G*x = b as initial guess
-3. Checks residual - if converged, returns immediately (linear case)
-4. Otherwise, creates NonlinearProblem and iterates until ||F(u)|| < abstol
-
-# Example
-```julia
-function build_circuit(params, spec; x=ZERO_VECTOR)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
-
-    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-    stamp!(Resistor(1000.0), ctx, vcc, out)
-    # For nonlinear devices, pass x to stamp:
-    stamp!(MyNonlinearDevice(), ctx, out, 0; x=x)
-
-    return ctx
-end
-
-sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
-```
-
 # See Also
 - `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
-- `dc_solve_compiled`: Zero-allocation Newton iteration
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
                   abstol::Real=1e-10, maxiters::Int=100) where {F,P}
-    # Use shared core function for Newton iteration
-    u, converged = dc_solve_core(builder, params, spec;
-                                  abstol=abstol, maxiters=maxiters)
+    # Run detection passes to discover all states
+    ctx = _detect_structure(builder, params, spec)
+
+    n = system_size(ctx)
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
+    # Use unified dc_solve_with_ctx for Newton iteration
+    u, converged = dc_solve_with_ctx(builder, params, spec, ctx;
+                                      abstol=abstol, maxiters=maxiters)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
     end
 
-    n = length(u)
-    if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
-    end
-
     # Get final system for node names
-    ctx_final = builder(params, spec, 0.0; x=u)
-    sys_final = assemble!(ctx_final)
+    reset_for_restamping!(ctx)
+    builder(params, spec, 0.0; x=u, ctx=ctx)
+    sys_final = assemble!(ctx)
 
     return DCSolution(sys_final, u)
 end
@@ -1670,28 +1514,31 @@ end
 # in one iteration. For nonlinear circuits (diodes, MOSFETs, VA devices), it uses
 # proper Newton iteration.
 #
-# Note: solve_dc(ctx::MNAContext) is kept for backward compatibility with tests
-# that stamp directly. It only does linear solve (G \ b) - use dc!(circuit) for
-# nonlinear circuits.
+# Uses the unified DC solve path: build_with_detection() + dc_solve_with_ctx()
+# This ensures consistent state detection between DC and transient analysis.
 function solve_dc(circuit::MNACircuit)
     # Use the circuit's spec directly - time-dependent sources handle mode internally
     # If caller wants DC operating point behavior, they should set mode to :dcop
 
-    # Use compiled path for zero-allocation Newton iteration
-    u, converged = dc_solve_compiled(circuit.builder, circuit.params, circuit.spec)
+    # Build with detection to discover all states (same as DAEProblem/ODEProblem)
+    ctx = build_with_detection(circuit)
+
+    n = system_size(ctx)
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
+    # Use unified dc_solve_with_ctx for Newton iteration
+    u, converged = dc_solve_with_ctx(circuit.builder, circuit.params, circuit.spec, ctx)
 
     if !converged
         @warn "Nonlinear DC solve did not converge"
     end
 
-    n = length(u)
-    if n == 0
-        return DCSolution(Float64[], Symbol[], Symbol[], 0)
-    end
-
     # Get final system for node names
-    ctx_final = circuit.builder(circuit.params, circuit.spec, 0.0; x=u)
-    sys_final = assemble!(ctx_final)
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u, ctx=ctx)
+    sys_final = assemble!(ctx)
 
     return DCSolution(sys_final, u)
 end

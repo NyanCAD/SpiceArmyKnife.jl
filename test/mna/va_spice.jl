@@ -229,8 +229,12 @@ end
         endmodule
         """
 
-        function directres_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function directres_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             mid = get_node!(ctx, :mid)
 
@@ -257,8 +261,12 @@ end
         endmodule
         """
 
-        function chainres_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function chainres_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             n1 = get_node!(ctx, :n1)
             n2 = get_node!(ctx, :n2)

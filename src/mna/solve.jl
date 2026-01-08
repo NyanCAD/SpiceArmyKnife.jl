@@ -381,6 +381,46 @@ function dc_solve_core(builder, params, spec;
     return sol.u, converged
 end
 
+# Common Newton iteration core for compiled DC solve
+# Used by both dc_solve_compiled and dc_solve_with_ctx
+function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                              abstol::Real=1e-10, maxiters::Int=100,
+                              nlsolve=RobustMultiNewton())
+    n = length(u0)
+
+    # Check if linear solution is good enough
+    resid = zeros(n)
+    fast_rebuild!(ws, u0, 0.0)
+    mul!(resid, cs.G, u0)
+    resid .-= ws.dctx.b
+    if norm(resid) < abstol
+        return u0, true
+    end
+
+    # Need Newton iteration with compiled evaluation
+    function residual!(F, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+        return nothing
+    end
+
+    function jacobian!(J, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        copyto!(J, cs.G)
+        return nothing
+    end
+
+    jac_prototype = cs.G
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    nlprob = NonlinearProblem(nlfunc, u0)
+
+    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+
+    return sol.u, converged
+end
+
 """
     dc_solve_compiled(builder, params, spec; abstol=1e-10, maxiters=100,
                       nlsolve=RobustMultiNewton()) -> (u, converged)
@@ -426,37 +466,7 @@ function dc_solve_compiled(builder, params, spec;
     sys0 = assemble!(ctx0)
     u0 = sys0.G \ sys0.b
 
-    # Check if linear solution is good enough
-    resid = zeros(n)
-    fast_rebuild!(ws, u0, 0.0)
-    mul!(resid, cs.G, u0)
-    resid .-= ws.dctx.b
-    if norm(resid) < abstol
-        return u0, true
-    end
-
-    # Need Newton iteration with compiled evaluation
-    function residual!(F, u, p)
-        fast_rebuild!(ws, u, 0.0)
-        mul!(F, cs.G, u)
-        F .-= ws.dctx.b
-        return nothing
-    end
-
-    function jacobian!(J, u, p)
-        fast_rebuild!(ws, u, 0.0)
-        copyto!(J, cs.G)
-        return nothing
-    end
-
-    jac_prototype = cs.G
-    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
-    nlprob = NonlinearProblem(nlfunc, u0)
-
-    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
-    converged = sol.retcode == SciMLBase.ReturnCode.Success
-
-    return sol.u, converged
+    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
 """
@@ -486,37 +496,7 @@ function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
     sys0 = assemble!(ctx)
     u0 = sys0.G \ sys0.b
 
-    # Check if linear solution is good enough
-    resid = zeros(n)
-    fast_rebuild!(ws, u0, 0.0)
-    mul!(resid, cs.G, u0)
-    resid .-= ws.dctx.b
-    if norm(resid) < abstol
-        return u0, true
-    end
-
-    # Need Newton iteration with compiled evaluation
-    function residual!(F, u, p)
-        fast_rebuild!(ws, u, 0.0)
-        mul!(F, cs.G, u)
-        F .-= ws.dctx.b
-        return nothing
-    end
-
-    function jacobian!(J, u, p)
-        fast_rebuild!(ws, u, 0.0)
-        copyto!(J, cs.G)
-        return nothing
-    end
-
-    jac_prototype = cs.G
-    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
-    nlprob = NonlinearProblem(nlfunc, u0)
-
-    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
-    converged = sol.retcode == SciMLBase.ReturnCode.Success
-
-    return sol.u, converged
+    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
 end
 
 export dc_solve_compiled

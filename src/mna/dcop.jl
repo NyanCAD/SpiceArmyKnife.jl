@@ -157,8 +157,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     integrator.u_modified = true
 
     # Let DefaultInit handle the rest
-    SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
-    return
+    return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
 end
 
 #==============================================================================#
@@ -199,7 +198,7 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
         integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
     end
 
-    return
+    return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
 end
 
 #==============================================================================#
@@ -255,19 +254,11 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     integrator.u_modified = true
 
     # Let DefaultInit validate/fix consistency for the main solver
-    SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
-    return
+    return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
 end
 
 function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     prob = integrator.sol.prob
-
-    # For ODE problems, p is the EvalWorkspace
-    ws = prob.p
-    if !(ws isa EvalWorkspace)
-        # Not an MNA circuit - can't do UIC warmup
-        return
-    end
 
     # Create warmup ODE problem with mass matrix
     warmup_tspan = (0.0, alg.warmup_steps * alg.dt * 2)  # Finite tspan
@@ -290,5 +281,5 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
 
     # The mass matrix ODE doesn't directly give us du, but after warmup
     # the algebraic constraints should be satisfied.
-    return
+    return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
 end

@@ -220,17 +220,17 @@ function main()
         joinpath(BENCHMARK_DIR, "mul", "cedarsim", "runme.jl")
     ))
 
-    # Ring Oscillator - all solvers
-    append!(results, run_benchmark_all_solvers(
-        "Ring Oscillator",
-        joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl")
-    ))
+    # # Ring Oscillator - all solvers
+    # append!(results, run_benchmark_all_solvers(
+    #     "Ring Oscillator",
+    #     joinpath(BENCHMARK_DIR, "ring", "cedarsim", "runme.jl")
+    # ))
 
-    # C6288 Multiplier - all solvers
-    append!(results, run_benchmark_all_solvers(
-        "C6288 Multiplier",
-        joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl")
-    ))
+    # # C6288 Multiplier - all solvers
+    # append!(results, run_benchmark_all_solvers(
+    #     "C6288 Multiplier",
+    #     joinpath(BENCHMARK_DIR, "c6288", "cedarsim", "runme.jl")
+    # ))
 
     println()
     println("=" ^ 60)

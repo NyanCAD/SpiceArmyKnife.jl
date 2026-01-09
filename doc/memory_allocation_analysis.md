@@ -109,13 +109,16 @@ For very long simulations, consider:
 
 ## Profiling Scripts
 
-The following scripts were created for this analysis:
+Run the allocation profiler to verify optimization status:
 
-1. `benchmarks/vacask/profile_solver_allocations.jl` - Compare solvers on RC
-2. `benchmarks/vacask/profile_solver_allocations_full.jl` - Full 1-second simulations
-3. `benchmarks/vacask/profile_rodas5p_internals.jl` - Rodas5P breakdown
-4. `benchmarks/vacask/profile_graetz_allocations.jl` - Graetz vs RC comparison
-5. `benchmarks/vacask/profile_va_device_allocations.jl` - VA device analysis
+```bash
+julia --project=. benchmarks/vacask/profile_allocations.jl
+```
+
+This script profiles:
+- Circuit builder allocations (MNA operations, VA device evaluation)
+- Individual operation breakdown (get_node!, alloc_*, stamp_*, detect_or_cached!)
+- Solver comparison (FBDF vs Rodas5P) if DifferentialEquations is installed
 
 ## Conclusions
 

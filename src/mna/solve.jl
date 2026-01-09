@@ -283,34 +283,14 @@ using ADTypes
 #==============================================================================#
 
 # Common Newton iteration core for compiled DC solve
-#
-# The optional `spec` parameter allows overriding the spec used during evaluation.
-# This is needed for CedarDCOp/CedarTranOp initialization where the workspace was
-# created with :tran spec but we need to evaluate with :dcop/:tranop spec.
 function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
                               abstol::Real=1e-10, maxiters::Int=100,
-                              nlsolve=RobustMultiNewton(),
-                              spec=nothing)
+                              nlsolve=RobustMultiNewton())
     n = length(u0)
-    use_spec = spec === nothing ? cs.spec : spec
-
-    # Helper to rebuild with the correct spec
-    function dc_rebuild!(u)
-        dctx = ws.dctx
-        reset_direct_stamp!(dctx)
-        cs.builder(cs.params, use_spec, 0.0; x=u, ctx=dctx)
-        # Apply deferred b stamps
-        for k in 1:cs.n_b_deferred
-            idx = dctx.b_resolved[k]
-            if idx > 0
-                dctx.b[idx] += dctx.b_V[k]
-            end
-        end
-    end
 
     # Check if linear solution is good enough
     resid = zeros(n)
-    dc_rebuild!(u0)
+    fast_rebuild!(ws, cs, u0, 0.0)
     mul!(resid, cs.G, u0)
     resid .-= ws.dctx.b
     if norm(resid) < abstol
@@ -319,14 +299,14 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 
     # Need Newton iteration with compiled evaluation
     function residual!(F, u, p)
-        dc_rebuild!(u)
+        fast_rebuild!(ws, cs, u, 0.0)
         mul!(F, cs.G, u)
         F .-= ws.dctx.b
         return nothing
     end
 
     function jacobian!(J, u, p)
-        dc_rebuild!(u)
+        fast_rebuild!(ws, cs, u, 0.0)
         copyto!(J, cs.G)
         return nothing
     end

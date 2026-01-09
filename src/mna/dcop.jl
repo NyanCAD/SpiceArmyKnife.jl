@@ -11,6 +11,7 @@
 # analysis and transient initialization.
 #==============================================================================#
 
+using Accessors: @set
 using OrdinaryDiffEq
 using OrdinaryDiffEq.OrdinaryDiffEqCore: ODEIntegrator
 using LinearAlgebra
@@ -91,18 +92,17 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     ws = p::EvalWorkspace
     cs = ws.structure
 
-    # Switch to dcop/tranop mode for the solve
+    # Create a CompiledStructure with dcop/tranop mode for the solve
     mode = alg isa CedarDCOp ? :dcop : :tranop
-    dc_spec = with_mode(cs.spec, mode)
+    cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
     # Use zeros as initial guess (same as dc_solve_with_ctx)
     u0_zeros = zeros(length(u0))
 
-    # Call the shared Newton iteration with the dcop/tranop spec
-    u_sol, converged = MNA._dc_newton_compiled(cs, ws, u0_zeros;
+    # Call the shared Newton iteration
+    u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, u0_zeros;
                                                 abstol=abstol, maxiters=100,
-                                                nlsolve=alg.nlsolve,
-                                                spec=dc_spec)
+                                                nlsolve=alg.nlsolve)
 
     integrator.u .= u_sol
     if !converged
@@ -141,15 +141,14 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
     u0 = integrator.u
     cs = ws.structure
 
-    # Switch to dcop/tranop mode for the solve
+    # Create a CompiledStructure with dcop/tranop mode for the solve
     mode = alg isa CedarDCOp ? :dcop : :tranop
-    dc_spec = with_mode(cs.spec, mode)
+    cs_dc = @set cs.spec = with_mode(cs.spec, mode)
 
-    # Solve DC operating point using the simulation workspace with dcop/tranop spec
-    u_sol, converged = MNA._dc_newton_compiled(cs, ws, zeros(length(u0));
+    # Solve DC operating point using the simulation workspace
+    u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, zeros(length(u0));
                                                 abstol=abstol, maxiters=100,
-                                                nlsolve=alg.nlsolve,
-                                                spec=dc_spec)
+                                                nlsolve=alg.nlsolve)
 
     integrator.u .= u_sol
     if !converged

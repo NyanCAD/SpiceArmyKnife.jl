@@ -377,7 +377,18 @@ Zero-copy rebuild using DirectStampContext.
 Stamps go directly to sparse matrix nzval - no intermediate arrays.
 """
 function fast_rebuild!(ws::EvalWorkspace, u::AbstractVector, t::Real)
-    cs = ws.structure
+    fast_rebuild!(ws, ws.structure, u, t)
+end
+
+"""
+    fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVector, t::Real)
+
+Zero-copy rebuild using DirectStampContext with an explicit CompiledStructure.
+
+This variant allows passing a different CompiledStructure (e.g., with modified spec
+for dcop mode) while still using the same workspace for stamping.
+"""
+function fast_rebuild!(ws::EvalWorkspace, cs::CompiledStructure, u::AbstractVector, t::Real)
     dctx = ws.dctx
 
     # Reset counters and zero matrices

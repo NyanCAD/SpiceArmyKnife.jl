@@ -45,8 +45,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         """
 
         # Build test circuit - use builder pattern for Newton iteration
-        function vccs_test_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function vccs_test_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
 
@@ -108,8 +112,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # Test in saturation: Vgs = 1.5V, Vds = 2V
         # Vov = 1.5 - 0.5 = 1V
         # Ids = K/2 * Vov^2 = 0.001/2 * 1 = 0.5mA
-        function simple_mos_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function simple_mos_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
 
@@ -134,8 +142,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         # Test in linear region: Vgs = 1.5V, Vds = 0.3V
         # Vov = 1.5 - 0.5 = 1V, Vds = 0.3 < Vov
         # Ids = K * (Vov * Vds - Vds^2/2) = 0.001 * (1*0.3 - 0.045) = 0.255mA
-        function simple_mos_linear_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function simple_mos_linear_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
 
@@ -157,8 +169,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
     @testset "SimpleMOS in cutoff" begin
         # Test in cutoff: Vgs = 0.3V < Vth = 0.5V
-        function simple_mos_cutoff_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function simple_mos_cutoff_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
 
@@ -215,8 +231,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         """
 
         # DC test - capacitors should have no effect on DC
-        function cap_mos_dc_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function cap_mos_dc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
 
@@ -246,8 +266,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         Cgs = 10e-12  # 10pF for visible time constant
         Cgd = 5e-12
 
-        function cap_mos_tran_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function cap_mos_tran_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             d = get_node!(ctx, :d)
             g = get_node!(ctx, :g)
             vin = get_node!(ctx, :vin)
@@ -356,8 +380,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         Vdd = 3.0
 
         # Test with input LOW (0V) - output should be HIGH (Vdd)
-        function inverter_low_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function inverter_low_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vdd = get_node!(ctx, :vdd)
             out = get_node!(ctx, :out)
             inp = get_node!(ctx, :inp)
@@ -390,8 +418,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         Vdd = 3.0
 
         # Test with input HIGH (Vdd) - output should be LOW (0V)
-        function inverter_high_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function inverter_high_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vdd = get_node!(ctx, :vdd)
             out = get_node!(ctx, :out)
             inp = get_node!(ctx, :inp)
@@ -448,8 +480,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         """
 
         # Test that capacitance varies with voltage
-        function junction_cap_circuit(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function junction_cap_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             p = get_node!(ctx, :p)
 
             stamp!(VoltageSource(0.4; name=:V1), ctx, p, 0)

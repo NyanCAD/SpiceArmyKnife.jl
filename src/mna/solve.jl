@@ -259,57 +259,10 @@ end
 
 #==============================================================================#
 # DC Analysis
-#==============================================================================#
-
-"""
-    solve_dc(sys::MNASystem) -> DCSolution
-
-Solve for DC operating point: G*x = b
-
-For circuits with capacitors/inductors, this finds the steady-state
-where all derivatives are zero (C*dx/dt = 0).
-"""
-function solve_dc(sys::MNASystem)
-    n = system_size(sys)
-    n == 0 && return DCSolution(Float64[], Symbol[], Symbol[], 0)
-
-    # Solve G*x = b
-    # Use \ which automatically selects appropriate solver
-    x = sys.G \ sys.b
-
-    return DCSolution(sys, x)
-end
-
-"""
-    solve_dc!(x::Vector{Float64}, sys::MNASystem)
-
-Solve DC operating point into pre-allocated vector x.
-"""
-function solve_dc!(x::Vector{Float64}, sys::MNASystem)
-    n = system_size(sys)
-    n == 0 && return x
-    length(x) >= n || resize!(x, n)
-
-    # Solve in-place using ldiv! if possible
-    copyto!(view(x, 1:n), sys.b)
-    F = lu(sys.G)
-    ldiv!(F, view(x, 1:n))
-
-    return x
-end
-
-"""
-    solve_dc(ctx::MNAContext) -> DCSolution
-
-Convenience function: assemble and solve in one step.
-"""
-function solve_dc(ctx::MNAContext)
-    sys = assemble!(ctx)
-    return solve_dc(sys)
-end
-
-#==============================================================================#
-# Builder-Based DC Analysis (with Newton Iteration)
+#
+# PUBLIC API: solve_dc(circuit::MNACircuit) and dc!(circuit)
+# Uses unified DC initialization: build_with_detection() + dc_solve_with_ctx()
+# This ensures consistent state detection between DC and transient analysis.
 #==============================================================================#
 
 using NonlinearSolve
@@ -317,130 +270,155 @@ using SciMLBase
 using SciMLBase: MatrixOperator
 using ADTypes
 
+#==============================================================================#
+# Unified DC Solve
+#
+# ONE implementation shared by:
+# - solve_dc(circuit::MNACircuit) for standalone DC analysis
+# - DAEProblem/ODEProblem constructors for initial u0
+# - CedarDCOp for DAE initialization
+#
+# The flow is:
+# 1. build_with_detection() discovers all states via multi-pass detection
+# 2. dc_solve_with_ctx() does Newton iteration using that detected context
+#==============================================================================#
+
+# Common Newton iteration core for compiled DC solve
+function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
+                              abstol::Real=1e-10, maxiters::Int=100,
+                              nlsolve=RobustMultiNewton())
+    n = length(u0)
+
+    # Check if linear solution is good enough
+    resid = zeros(n)
+    fast_rebuild!(ws, u0, 0.0)
+    mul!(resid, cs.G, u0)
+    resid .-= ws.dctx.b
+    if norm(resid) < abstol
+        return u0, true
+    end
+
+    # Need Newton iteration with compiled evaluation
+    function residual!(F, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        mul!(F, cs.G, u)
+        F .-= ws.dctx.b
+        return nothing
+    end
+
+    function jacobian!(J, u, p)
+        fast_rebuild!(ws, u, 0.0)
+        copyto!(J, cs.G)
+        return nothing
+    end
+
+    jac_prototype = cs.G
+    nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
+    nlprob = NonlinearProblem(nlfunc, u0)
+
+    sol = solve(nlprob, nlsolve; abstol=abstol, maxiters=maxiters)
+    converged = sol.retcode == SciMLBase.ReturnCode.Success
+
+    return sol.u, converged
+end
+
 """
-    solve_dc(builder, params, spec::MNASpec;
-             abstol=1e-10, maxiters=100, explicit_jacobian=true) -> DCSolution
+    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=RobustMultiNewton())
 
-Solve DC operating point using a circuit builder function.
+DC solve using a pre-built detection context.
 
-This is the recommended API for DC analysis. It supports both linear and
-nonlinear devices. For linear circuits, it converges in one iteration.
-For nonlinear devices (diodes, MOSFETs, VA devices with V*V terms), it uses
-Newton iteration via NonlinearSolve.jl.
+This ensures the solution vector has exactly the same size as the detection context,
+which is critical for DAE/ODE problem creation where u0 must match differential_vars/mass_matrix size.
 
-# Arguments
-- `builder`: Circuit builder function `(params, spec; x=ZERO_VECTOR) -> MNAContext`
-- `params`: Circuit parameters (NamedTuple)
-- `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
-- `abstol`: Convergence tolerance (default: 1e-10)
-- `maxiters`: Maximum Newton iterations (default: 100)
-- `explicit_jacobian`: Whether to provide explicit Jacobian (default: true).
-  Uses the G matrix from circuit assembly as the Jacobian, avoiding finite differencing.
+The context is used to determine the system structure, then compiled for Newton iteration.
+"""
+function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
+                            abstol::Real=1e-10, maxiters::Int=100,
+                            nlsolve=RobustMultiNewton())
+    n = system_size(ctx)
 
-# How It Works
-1. Builds circuit at initial guess to get system size and structure
-2. Solves linear system G*x = b as initial guess
-3. Checks residual - if converged, returns immediately (linear case)
-4. Otherwise, creates NonlinearProblem and iterates until ||F(u)|| < abstol
+    if n == 0
+        return Float64[], true
+    end
 
-# Example
-```julia
-function build_circuit(params, spec; x=ZERO_VECTOR)
-    ctx = MNAContext()
-    vcc = get_node!(ctx, :vcc)
-    out = get_node!(ctx, :out)
+    # Compile structure using the provided context
+    cs = compile_structure(builder, params, spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
 
-    stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-    stamp!(Resistor(1000.0), ctx, vcc, out)
-    # For nonlinear devices, pass x to stamp:
-    stamp!(MyNonlinearDevice(), ctx, out, 0; x=x)
+    # Initial guess: zeros
+    # Using zeros is more robust for highly nonlinear circuits (diodes, MOSFETs)
+    # than the linear solve G\b, which can give wildly wrong values when the
+    # circuit is linearized at x=0 (e.g., diode looks like open circuit at V=0).
+    # The Newton solver handles the nonlinearity more carefully from zeros.
+    u0 = zeros(n)
+
+    return _dc_newton_compiled(cs, ws, u0; abstol, maxiters, nlsolve)
+end
+
+# Internal: Run detection passes for a bare builder (like build_with_detection but for builder)
+function _detect_structure(builder, params, spec)
+    N_DETECTION_PASSES = 3
+    ctx = nothing
+    known_size = 0
+
+    for pass in 1:N_DETECTION_PASSES
+        if ctx === nothing
+            ctx = builder(params, spec, 0.0; x=ZERO_VECTOR)
+            known_size = system_size(ctx)
+        else
+            known_size = system_size(ctx)
+            reset_for_restamping!(ctx)
+            x = rand(known_size) * 0.8
+            builder(params, spec, 0.0; x=x, ctx=ctx)
+        end
+    end
 
     return ctx
 end
 
-sol = solve_dc(build_circuit, (;), MNASpec(mode=:dcop))
-```
+"""
+    solve_dc(builder, params, spec::MNASpec;
+             abstol=1e-10, maxiters=100) -> DCSolution
+
+Solve DC operating point using a circuit builder function.
+
+Uses the unified DC solve path: detection + dc_solve_with_ctx.
+Supports both linear and nonlinear devices.
+
+# Arguments
+- `builder`: Circuit builder function `(params, spec, t; x, ctx) -> MNAContext`
+- `params`: Circuit parameters (NamedTuple)
+- `spec`: Simulation specification (MNASpec with mode=:dcop recommended)
+- `abstol`: Convergence tolerance (default: 1e-10)
+- `maxiters`: Maximum Newton iterations (default: 100)
 
 # See Also
-- `solve_dc(sys::MNASystem)`: Direct linear solve on pre-assembled system
-- `solve_dc(ctx::MNAContext)`: Assemble and solve in one step
+- `dc!(circuit)`: High-level API for DC analysis (in sweeps.jl)
 """
 function solve_dc(builder::F, params::P, spec::MNASpec;
-                  abstol::Real=1e-10, maxiters::Int=100,
-                  explicit_jacobian::Bool=true) where {F,P}
-    # Build at x=0, t=0 to get system size and initial structure
-    ctx0 = builder(params, spec, 0.0; x=ZERO_VECTOR)
-    sys0 = assemble!(ctx0)
-    n = system_size(sys0)
+                  abstol::Real=1e-10, maxiters::Int=100) where {F,P}
+    # Run detection passes to discover all states
+    ctx = _detect_structure(builder, params, spec)
 
+    n = system_size(ctx)
     if n == 0
         return DCSolution(Float64[], Symbol[], Symbol[], 0)
     end
 
-    # Try linear solve first - if it satisfies tolerance, we're done
-    x0 = sys0.G \ sys0.b
+    # Use unified dc_solve_with_ctx for Newton iteration
+    u, converged = dc_solve_with_ctx(builder, params, spec, ctx;
+                                      abstol=abstol, maxiters=maxiters)
 
-    # Check if linear solution is good enough
-    ctx_check = builder(params, spec, 0.0; x=x0)
-    sys_check = assemble!(ctx_check)
-    resid0 = sys_check.G * x0 - sys_check.b
-    if norm(resid0) < abstol
-        return DCSolution(sys_check, x0)
-    end
-
-    # Need Newton iteration - create NonlinearProblem
-    # Residual function: F(u) = G(u)*u - b(u)
-    function residual!(F, u, p)
-        # Rebuild circuit at current operating point (t=0 for DC)
-        ctx = builder(params, spec, 0.0; x=u)
-        sys = assemble!(ctx)
-
-        # F(u) = G(u)*u - b(u)
-        mul!(F, sys.G, u)
-        F .-= sys.b
-        return nothing
-    end
-
-    # Create NonlinearProblem with or without explicit Jacobian
-    if explicit_jacobian
-        # Jacobian function: J(u) = G(u)
-        # For the DC problem F(u) = G(u)*u - b(u), the Jacobian is:
-        # dF/du = G(u) + dG/du * u - db/du
-        # For well-linearized devices, dG/du * u ≈ contributions already in G
-        # So J ≈ G (the conductance matrix at operating point)
-        function jacobian!(J, u, p)
-            ctx = builder(params, spec, 0.0; x=u)
-            sys = assemble!(ctx)
-            copyto!(J, sys.G)
-            return nothing
-        end
-
-        # Use sparse Jacobian prototype for efficiency
-        jac_prototype = sys0.G
-        nlfunc = NonlinearFunction(residual!; jac=jacobian!, jac_prototype=jac_prototype)
-        nlprob = NonlinearProblem(nlfunc, x0)
-
-        # Use RobustMultiNewton with explicit Jacobian for robustness
-        # The solver uses the Jacobian from NonlinearFunction, providing both
-        # accurate gradients and fallback mechanisms for difficult cases
-        nlsolver = RobustMultiNewton()
-    else
-        # Fall back to finite differences
-        nlprob = NonlinearProblem(residual!, x0)
-        nlsolver = RobustMultiNewton(autodiff=AutoFiniteDiff())
-    end
-
-    sol = solve(nlprob, nlsolver; abstol=abstol, maxiters=maxiters)
-
-    if sol.retcode != SciMLBase.ReturnCode.Success
-        @warn "Nonlinear DC solve did not converge: $(sol.retcode)"
+    if !converged
+        @warn "Nonlinear DC solve did not converge"
     end
 
     # Get final system for node names
-    ctx_final = builder(params, spec, 0.0; x=sol.u)
-    sys_final = assemble!(ctx_final)
+    reset_for_restamping!(ctx)
+    builder(params, spec, 0.0; x=u, ctx=ctx)
+    sys_final = assemble!(ctx)
 
-    return DCSolution(sys_final, sol.u)
+    return DCSolution(sys_final, u)
 end
 
 #==============================================================================#
@@ -584,10 +562,10 @@ function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
-    # Default initial condition: DC solution
+    # Default initial condition: linear DC solution (G\b)
+    # Note: For nonlinear circuits, use MNACircuit + ODEProblem instead
     if u0 === nothing
-        dc_sol = solve_dc(sys)
-        u0 = dc_sol.x
+        u0 = sys.G \ sys.b
     end
 
     # Get ODE function components
@@ -699,10 +677,10 @@ function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
-    # Default initial condition: DC solution
+    # Default initial condition: linear DC solution (G\b)
+    # Note: For nonlinear circuits, use MNACircuit + DAEProblem instead
     if u0 === nothing
-        dc_sol = solve_dc(sys)
-        u0 = dc_sol.x
+        u0 = sys.G \ sys.b
     end
 
     # Get DAE function components
@@ -1274,7 +1252,7 @@ function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, No
         ctx0 = build_with_detection(circuit)
     else
         # Use provided context directly - it should already have correct structure
-        # from previous build_with_detection or compute_initial_conditions.
+        # from previous build_with_detection.
         # Do NOT rebuild with ZERO_VECTOR - reactive branches may return scalars
         # at x=0 instead of Duals, causing incorrect structure.
         ctx0 = ctx
@@ -1313,142 +1291,6 @@ function detect_differential_vars(sys::MNASystem)
     end
 
     return diff_vars
-end
-
-"""
-    compute_initial_conditions(circuit::MNACircuit; ctx=nothing) -> (u0, du0)
-
-Compute consistent initial conditions via DC operating point.
-
-1. Solves DC problem (du=0) to get u0
-2. For charge variables, computes q = Q(V) from the constraint
-3. Computes du0 to satisfy F(du0, u0, 0) = 0
-
-This is equivalent to CedarDCOp initialization.
-
-If `ctx` is provided, it will be used instead of calling build_with_detection.
-This ensures consistent detection results across code paths.
-"""
-function compute_initial_conditions(circuit::MNACircuit; ctx::Union{MNAContext, Nothing}=nothing)
-    # Use provided context or run multi-pass detection
-    if ctx === nothing
-        ctx = build_with_detection(circuit)
-    end
-    sys0 = assemble!(ctx)
-    n = system_size(sys0)
-
-    # DC solve for u0 (node voltages and currents)
-    # IMPORTANT: Do NOT rebuild with dc_spec here! The detection cache is position-based
-    # (charge_detection_pos), and if the circuit stamps differently in dcop mode (e.g.,
-    # skips capacitor stamps), the position counter won't advance correctly, causing
-    # subsequent detection cache lookups to be misaligned.
-    #
-    # Instead, use the already-assembled sys0 for the initial DC solve. The G\b solve
-    # is just an approximation anyway - the charge iteration below will refine it.
-    u0 = sys0.G \ sys0.b
-
-    # Rebuild with circuit spec at DC operating point
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    sys0 = assemble!(ctx)
-
-    # Fix charge variable initial values
-    # The DC solve may not correctly initialize charges because the constraint
-    # residual can be below abstol. We need to explicitly solve q = Q(V).
-    #
-    # For each charge variable at index q_idx, the constraint row in G is:
-    #   G[q_idx, q_idx] = 1 (coefficient of q)
-    #   G[q_idx, j] = -∂Q/∂Vj for voltage nodes j
-    #
-    # The constraint equation is: q - Q(V) = 0, or: q = Q(V)
-    # From G*x = b at the constraint row:
-    #   1*q + sum(-∂Q/∂Vj * Vj) = b[q_idx]
-    #   q = b[q_idx] + sum(∂Q/∂Vj * Vj)
-    #
-    # But actually, since b is the Newton companion, a simpler approach is to
-    # iterate: set q = Q(V) using the values from b recomputed at current x.
-    if sys0.n_charges > 0
-        # Re-solve for charge values using Newton iteration
-        # The constraint is q = Q(V), which can be solved directly
-        for iter in 1:5  # Few iterations should suffice
-            reset_for_restamping!(ctx)
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-            sys_iter = assemble!(ctx)
-
-            # For each charge variable, solve the constraint equation
-            n_nodes = sys_iter.n_nodes
-            n_currents = sys_iter.n_currents
-            for i in 1:sys_iter.n_charges
-                q_idx = n_nodes + n_currents + i
-
-                # Constraint row: G[q_idx, :] * x = b[q_idx]
-                # G[q_idx, q_idx] = 1, so: q = b[q_idx] - sum(G[q_idx, j] * x[j]) for j != q_idx
-                rhs = sys_iter.b[q_idx]
-                for j in 1:n
-                    if j != q_idx
-                        rhs -= sys_iter.G[q_idx, j] * u0[j]
-                    end
-                end
-                u0[q_idx] = rhs / sys_iter.G[q_idx, q_idx]
-            end
-
-            # Check convergence
-            reset_for_restamping!(ctx)
-            circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-            sys_check = assemble!(ctx)
-            resid = sys_check.G * u0 - sys_check.b
-            if norm(resid) < 1e-12
-                break
-            end
-        end
-    end
-
-    # Recompute system at final u0
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    sys0 = assemble!(ctx)
-
-    du0 = zeros(n)
-
-    # At t=0, need F(du0, u0) = C*du0 + G*u0 - b = 0
-    # So: C*du0 = b - G*u0
-    # For singular C (algebraic vars), du0 components are 0
-
-    rhs = sys0.b - sys0.G * u0
-    diff_vars = detect_differential_vars(sys0)
-
-    # For charge-coupled systems, the C matrix has off-diagonal entries:
-    #   C[v_node, q_var] = 1 (charge couples to KCL)
-    #   C[q_var, :] = 0 (charge constraint is algebraic)
-    #
-    # The simple diagonal approximation doesn't work here. Instead, solve
-    # the reduced system for differential variables using least squares.
-    #
-    # Extract rows/cols for differential variables and solve:
-    #   C_diff * du_diff = rhs_diff
-    diff_idx = findall(diff_vars)
-    if !isempty(diff_idx)
-        C_dense = Matrix(sys0.C)
-        C_diff = C_dense[diff_idx, diff_idx]
-        rhs_diff = rhs[diff_idx]
-
-        # Use least squares in case C_diff is ill-conditioned
-        # This handles cases where some diagonal entries are zero but
-        # off-diagonal entries exist (charge coupling)
-        try
-            du_diff = C_diff \ rhs_diff
-            du0[diff_idx] = du_diff
-        catch e
-            # If direct solve fails, try pseudo-inverse
-            if isa(e, SingularException) || isa(e, LAPACKException)
-                du0[diff_idx] = pinv(C_diff) * rhs_diff
-            else
-                rethrow(e)
-            end
-        end
-    end
-
-    return u0, du0
 end
 
 """
@@ -1493,15 +1335,24 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions using the same detection context
-    if u0 === nothing || du0 === nothing
-        u0_computed, du0_computed = compute_initial_conditions(circuit; ctx=ctx)
-        u0 = u0 === nothing ? u0_computed : u0
-        du0 = du0 === nothing ? du0_computed : du0
-    end
-
     # Detect differential variables using the same detection context
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
+    n = length(diff_vars)
+
+    # Get initial conditions via DC solve using the SAME detection context
+    # This ensures u0 has exactly the same size as diff_vars.
+    # We use dc_solve_with_ctx which does proper Newton iteration using
+    # the pre-built detection context structure.
+    # Note: CedarDCOp (the default initializealg in tran!) will refine this and
+    # handle du0 properly during IDA initialization.
+    if u0 === nothing
+        dc_spec = with_mode(circuit.spec, :dcop)
+        u0, _ = dc_solve_with_ctx(circuit.builder, circuit.params, dc_spec, ctx)
+    end
+    # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
+    if du0 === nothing
+        du0 = zeros(n)
+    end
 
     # Compile circuit structure using the same detection context
     # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
@@ -1598,9 +1449,11 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
     # This ctx will be reused for ALL subsequent operations to ensure consistency
     ctx = build_with_detection(circuit)
 
-    # Get initial conditions via DC solve using the same detection context
+    # Get initial conditions via DC solve using the SAME detection context
+    # This ensures u0 has exactly the same size as the mass matrix.
     if u0 === nothing
-        u0, _ = compute_initial_conditions(circuit; ctx=ctx)
+        dc_spec = with_mode(base_spec, :dcop)
+        u0, _ = dc_solve_with_ctx(builder, params, dc_spec, ctx)
     end
 
     # Compile circuit structure using the same detection context
@@ -1658,12 +1511,39 @@ end
 #==============================================================================#
 
 # Internal solve_dc/solve_ac methods for MNACircuit (called from sweeps.jl)
-# Note: Unlike some SPICE simulators that force :dcop mode, we respect the circuit's
-# spec to allow mode-aware testing. Use with_mode(circuit, :dcop) explicitly if needed.
+#
+# NOTE: solve_dc(circuit) now uses Newton iteration via solve_dc(builder, params, spec)
+# which handles both linear and nonlinear circuits. For linear circuits, it converges
+# in one iteration. For nonlinear circuits (diodes, MOSFETs, VA devices), it uses
+# proper Newton iteration.
+#
+# Uses the unified DC solve path: build_with_detection() + dc_solve_with_ctx()
+# This ensures consistent state detection between DC and transient analysis.
 function solve_dc(circuit::MNACircuit)
+    # Use the circuit's spec directly - time-dependent sources handle mode internally
+    # If caller wants DC operating point behavior, they should set mode to :dcop
+
+    # Build with detection to discover all states (same as DAEProblem/ODEProblem)
     ctx = build_with_detection(circuit)
-    sys = assemble!(ctx)
-    return solve_dc(sys)
+
+    n = system_size(ctx)
+    if n == 0
+        return DCSolution(Float64[], Symbol[], Symbol[], 0)
+    end
+
+    # Use unified dc_solve_with_ctx for Newton iteration
+    u, converged = dc_solve_with_ctx(circuit.builder, circuit.params, circuit.spec, ctx)
+
+    if !converged
+        @warn "Nonlinear DC solve did not converge"
+    end
+
+    # Get final system for node names
+    reset_for_restamping!(ctx)
+    circuit.builder(circuit.params, circuit.spec, 0.0; x=u, ctx=ctx)
+    sys_final = assemble!(ctx)
+
+    return DCSolution(sys_final, u)
 end
 
 function solve_ac(circuit::MNACircuit, freqs::AbstractVector{<:Real}; kwargs...)

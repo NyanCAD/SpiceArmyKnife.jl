@@ -329,8 +329,12 @@ eval(ce_amplifier_code)
     #==========================================================================#
     @testset "Common emitter with emitter degeneration" begin
         # Define circuit builder for common emitter with emitter resistor
-        function ce_amplifier_builder(params, spec, t::Real=0.0; x=Float64[])
-            ctx = MNAContext()
+        function ce_amplifier_builder(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vin = MNA.get_node!(ctx, :vin)
             vcc = MNA.get_node!(ctx, :vcc)
             collector = MNA.get_node!(ctx, :collector)

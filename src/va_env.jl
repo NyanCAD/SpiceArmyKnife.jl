@@ -28,7 +28,7 @@ using Base: @inbounds, @inline, @noinline
 using Base.Experimental: @overlay
 export @inbounds, @inline, @overlay, var"$temperature"
 
-export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10
+export pow, ln, ddt, flicker_noise, white_noise, atan2, log, log10, va_or, va_and
 
 @noinline Base.@assume_effects :total pow(a, b) = NaNMath.pow(a, b)
 @noinline Base.@assume_effects :total pow(a::ForwardDiff.Dual, b) = NaNMath.pow(a, b)
@@ -38,6 +38,22 @@ log(x) = cedarerror("log not supported, use $log10 or $ln instead")
 !(a::Int64) = a == zero(a)
 !(a::Float64) = a == zero(a)
 !(a::ForwardDiff.Dual) = !(ForwardDiff.value(a))
+
+# Verilog-A logical OR (||) - handles mixed Bool/Float64/Dual types
+# Returns Bool: true if either operand is non-zero
+va_or(a::Bool, b::Bool) = Base.:(|)(a, b)
+va_or(a, b) = Base.:(|)(!Base.iszero(a), !Base.iszero(b))
+va_or(a::ForwardDiff.Dual, b) = va_or(ForwardDiff.value(a), b)
+va_or(a, b::ForwardDiff.Dual) = va_or(a, ForwardDiff.value(b))
+va_or(a::ForwardDiff.Dual, b::ForwardDiff.Dual) = va_or(ForwardDiff.value(a), ForwardDiff.value(b))
+
+# Verilog-A logical AND (&&) - handles mixed Bool/Float64/Dual types
+# Returns Bool: true if both operands are non-zero
+va_and(a::Bool, b::Bool) = Base.:(&)(a, b)
+va_and(a, b) = Base.:(&)(!Base.iszero(a), !Base.iszero(b))
+va_and(a::ForwardDiff.Dual, b) = va_and(ForwardDiff.value(a), b)
+va_and(a, b::ForwardDiff.Dual) = va_and(a, ForwardDiff.value(b))
+va_and(a::ForwardDiff.Dual, b::ForwardDiff.Dual) = va_and(ForwardDiff.value(a), ForwardDiff.value(b))
 atan2(x,y) = Base.atan(x,y)
 var"**"(a, b) = pow(a, b)
 ^ = Base.:(⊻)

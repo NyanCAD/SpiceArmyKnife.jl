@@ -2299,7 +2299,28 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
         end
     end
 
-    for (name, instances) in state.sema.instances
+    # Check if a SPICE element creates a current variable (needs to be stamped first).
+    # In SPICE, element names starting with 'V' are voltage sources which create
+    # current variables. These must be stamped before CCVS (H) and CCCS (F) elements
+    # that reference their currents.
+    #
+    # Note: The parser types (SP.Voltage, SP.DCSource, SP.ACSource) describe the
+    # source specification, not whether it's V or I. The element prefix determines:
+    # - V*: voltage source (creates current variable)
+    # - I*: current source (no current variable)
+    function creates_current_variable(inst)
+        # SP.Voltage is always a voltage source
+        inst isa SNode{SP.Voltage} && return true
+        # For DC/AC sources, check element prefix (V vs I)
+        if inst isa SNode{<:Union{SP.DCSource, SP.ACSource}}
+            prefix = first(lowercase(String(inst.name)))
+            return prefix == 'v'
+        end
+        return false
+    end
+
+    # Helper to process an instance (handles conditional logic)
+    function process_instance(name, instances)
         if length(instances) == 1 && only(instances)[2].cond == 0
             (_, instance) = only(instances)
             instance = instance.val
@@ -2314,6 +2335,27 @@ function codegen_mna!(state::CodegenState; skip_nets::Vector{Symbol}=Symbol[], i
                 else
                     push!(block.args, codegen_instance(instance.val))
                 end
+            end
+        end
+    end
+
+    # First pass: process elements that create current variables (voltage sources)
+    # These must be stamped before CCVS/CCCS which reference their currents
+    for (name, instances) in state.sema.instances
+        if !isempty(instances)
+            first_inst = first(instances)[2].val
+            if creates_current_variable(first_inst)
+                process_instance(name, instances)
+            end
+        end
+    end
+
+    # Second pass: process all other instances (current sources, passives, etc.)
+    for (name, instances) in state.sema.instances
+        if !isempty(instances)
+            first_inst = first(instances)[2].val
+            if !creates_current_variable(first_inst)
+                process_instance(name, instances)
             end
         end
     end
@@ -2460,8 +2502,7 @@ ast = SpectreNetlistParser.SPICENetlistParser.SPICENetlistCSTParser.parse(spice_
 code = make_mna_circuit(ast)
 circuit_fn = eval(code)
 ctx = circuit_fn((R1=1000.0,), MNASpec())
-sys = MNA.assemble!(ctx)
-sol = MNA.solve_dc(sys)
+sol = MNA.solve_dc(ctx)
 ```
 """
 function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modules::Vector{Module}=Module[])
@@ -2499,7 +2540,9 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         # Import MNA device types needed for stamping
         using CedarSim.MNA: Resistor, Capacitor, Inductor, VoltageSource, CurrentSource
         using CedarSim.MNA: PWLVoltageSource, SinVoltageSource, PWLCurrentSource, SinCurrentSource
+        using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
         using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
+        using CedarSim.MNA: get_current_idx  # For CCVS/CCCS current sensing
         using CedarSim: ParamLens, IdentityLens
         using CedarSim.SpectreEnvironment
         using StaticArrays

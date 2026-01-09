@@ -16,7 +16,7 @@ export solve
 
 # Phase 4: MNA SPICE codegen exports
 export make_mna_circuit, parse_spice_to_mna, parse_spice_file_to_mna, solve_spice_mna
-export @mna_sp_str
+export @sp_str
 
 # PDK/VA precompilation exports
 export load_mna_modules, load_mna_pdk, load_mna_va_module, load_mna_va_modules

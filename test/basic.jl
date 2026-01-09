@@ -33,23 +33,16 @@ end
 =#
 
 @testset "Simple VR Circuit" begin
-    # Original used Julia DSL with Named(V(...)), Named(R(...))
-    # Port to MNA direct API with same values
-    function VRcircuit(params, spec)
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        stamp!(VoltageSource(5.0; name=:V), ctx, vcc, 0)
-        stamp!(Resistor(2.0; name=:R), ctx, vcc, 0)
-        return ctx
-    end
-
-    ctx = VRcircuit((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    # Simple V-R circuit using sp"..." macro
+    circuit = MNACircuit(sp"""
+    V1 vcc 0 DC 5
+    R1 vcc 0 2
+    """i)
+    sol = dc!(circuit)
 
     # I = V/R = 5/2 = 2.5A
     R_v = voltage(sol, :vcc)
-    R_i = -current(sol, :I_V)  # Voltage source current is negative when sourcing
+    R_i = -current(sol, :I_v1)  # Voltage source current is negative when sourcing (SPICE is case-insensitive)
     @test isapprox_deftol(R_v, 5.0)
     @test isapprox_deftol(R_i, 2.5)
 end
@@ -82,22 +75,14 @@ end
 =#
 
 @testset "Simple IR circuit" begin
-    # Original used Julia DSL
-    function IRcircuit(params, spec)
-        ctx = MNAContext()
-        icc = get_node!(ctx, :icc)
-        # CurrentSource(I) stamps I into node p, meaning current I flows into p
-        # To get +10V on node icc with 2Ω to ground, we need 5A into icc
-        stamp!(CurrentSource(5.0; name=:I), ctx, icc, 0)
-        stamp!(Resistor(2.0; name=:R), ctx, icc, 0)
-        return ctx
-    end
+    # Simple I-R circuit using sp"..." macro
+    # Current source into resistor: V = IR = 5*2 = 10V
+    circuit = MNACircuit(sp"""
+    I1 0 icc DC 5
+    R1 icc 0 2
+    """i)
+    sol = dc!(circuit)
 
-    ctx = IRcircuit((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
-
-    # V = IR = 5*2 = 10V
     R_v = voltage(sol, :icc)
     @test isapprox_deftol(R_v, 10.0)
 end
@@ -422,10 +407,12 @@ end
         Base.eval(m, :(using CedarSim: ParamLens))
         Base.eval(m, :(using CedarSim.SpectreEnvironment))
         circuit_fn = Base.eval(m, code)
+
+        # Wrap in MNACircuit for proper dc! solve
         spec = CedarSim.MNA.MNASpec(temp=27.0, mode=:dcop)
-        ctx = Base.invokelatest(circuit_fn, (;), spec)
-        sys = CedarSim.MNA.assemble!(ctx)
-        sol = CedarSim.MNA.solve_dc(sys)
+        wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+        circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+        sol = dc!(circuit)
 
         # I = V / R = 1V / 1337Ω
         @test isapprox_deftol(current(sol, :I_v1), -1/1337)
@@ -882,8 +869,10 @@ end
     @test @param(observer.x1.rload) == 1000.0
 
     # Test that the parameter was applied by solving
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    # Wrap in MNACircuit for proper dc! solve
+    wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+    circuit = MNACircuit(wrapped, (;), spec)
+    sol = dc!(circuit)
 
     # With factor=2, R = rload * factor = 1000 * 2 = 2000Ω
     # I = 1A (from current source), V = I*R

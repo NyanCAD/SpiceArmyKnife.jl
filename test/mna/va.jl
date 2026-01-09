@@ -7,8 +7,9 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current, make_ode_problem
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit
+using CedarSim: dc!
 using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution, ContributionTag, JacobianTag
 using CedarSim.MNA: VoltageSource, Resistor  # Use MNA versions explicitly
 using ForwardDiff: Dual, value, partials
@@ -232,8 +233,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         """
 
         # Build circuit: VoltageSource + VA Resistor
-        function va_resistor_circuit(params, spec, t::Real=0.0)
-            ctx = MNAContext()
+        function va_resistor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
 
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -242,9 +247,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             return ctx
         end
 
-        ctx = va_resistor_circuit((;), MNASpec())
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        circuit = MNACircuit(va_resistor_circuit)
+        sol = dc!(circuit)
 
         # V = 5V, R = 2000Ω, I = 2.5mA
         # Voltage source current = -2.5mA (negative = sourcing)
@@ -268,8 +272,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         C_val = 1e-6
         V_val = 5.0
 
-        function va_rc_circuit(params, spec, t::Real=0.0)
-            ctx = MNAContext()
+        function va_rc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             cap = get_node!(ctx, :cap)
 
@@ -318,8 +326,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         endmodule
         """
 
-        function va_parallel_rc_circuit(params, spec, t::Real=0.0)
-            ctx = MNAContext()
+        function va_parallel_rc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
 
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -339,7 +351,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test isapprox(sys.C[vcc_idx, vcc_idx], 1e-6; atol=1e-9)
 
         # DC solution: I = V/R = 5/1000 = 5mA
-        sol = solve_dc(sys)
+        circuit = MNACircuit(va_parallel_rc_circuit)
+        sol = dc!(circuit)
         @test isapprox_deftol(voltage(sol, :vcc), 5.0)
         @test isapprox(current(sol, :I_V1), -0.005; atol=1e-5)
     end

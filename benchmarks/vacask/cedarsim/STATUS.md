@@ -57,7 +57,7 @@ PSP103 uses Verilog-A named blocks (`begin : evaluateblock`) with local variable
 
 ## Code Changes Made
 
-1. **Export `@mna_sp_str` macro** (`src/CedarSim.jl`)
+1. **Export `@sp_str` macro** (`src/CedarSim.jl`)
 2. **Add `imported_hdl_modules` to `parse_spice_to_mna`** (`src/spc/interface.jl`)
 3. **Fix `srcline` keyword** (`src/spc/interface.jl`)
 4. **Fix stamp! keyword argument mismatch** (`src/spc/codegen.jl`, `src/mna/devices.jl`) - Changed `mode` to `_sim_mode_`

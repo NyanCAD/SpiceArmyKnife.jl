@@ -478,9 +478,11 @@ end
 function (to_julia::MNAScope)(cs::VANode{BinaryExpression})
     op = Symbol(cs.op)
     if op == :(||)
-        return Expr(:call, (|), to_julia(cs.lhs), to_julia(cs.rhs))
+        # Use va_or which handles mixed Bool/Float64/Dual types
+        return Expr(:call, :va_or, to_julia(cs.lhs), to_julia(cs.rhs))
     elseif op == :(&&)
-        return Expr(:call, (&), to_julia(cs.lhs), to_julia(cs.rhs))
+        # Use va_and which handles mixed Bool/Float64/Dual types
+        return Expr(:call, :va_and, to_julia(cs.lhs), to_julia(cs.rhs))
     elseif op == Symbol("**")
         # Power operator (**) in Verilog-A: use `pow` from VerilogAEnvironment
         # which uses NaNMath.pow and handles ForwardDiff duals correctly

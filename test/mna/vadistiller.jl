@@ -13,8 +13,9 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current, make_ode_problem
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: voltage, current, make_ode_problem, MNACircuit
+using CedarSim: dc!
 using CedarSim.MNA: va_ddt, stamp_current_contribution!, evaluate_contribution
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using ForwardDiff: Dual, value, partials
@@ -45,8 +46,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test in voltage divider
-            function resistor_divider(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function resistor_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
 
@@ -57,9 +62,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = resistor_divider((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            circuit = MNACircuit(resistor_divider)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -82,8 +86,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             C_val = 1e-6
             V_val = 5.0
 
-            function rc_circuit(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function rc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 cap = get_node!(ctx, :cap)
 
@@ -141,8 +149,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Test forward bias: V=0.6V should give I ≈ 1e-4 A
             # Use Newton iteration DC solver for nonlinear devices
-            function diode_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function diode_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.6; name=:V1), ctx, anode, 0)
@@ -179,8 +191,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Forward bias test with internal node
-            function diode_rs_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function diode_rs_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 anode = get_node!(ctx, :anode)
 
                 stamp!(VoltageSource(0.7; name=:V1), ctx, anode, 0)
@@ -223,8 +239,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test: Vgs controls Ids
-            function vccs_circuit(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function vccs_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -241,9 +261,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = vccs_circuit((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            circuit = MNACircuit(vccs_circuit)
+            sol = dc!(circuit)
 
             # Ids = gm * Vgs = 1e-3 * 1.0 = 1mA
             # Vdrain = Vdd - Ids * Rd = 5 - 1e-3 * 1000 = 4V
@@ -265,8 +284,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
 
             # Common source amplifier
             # Use Newton iteration DC solver for nonlinear devices
-            function mos_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function mos_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -309,8 +332,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Common source amplifier with bulk tied to source
-            function nmos4_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function nmos4_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -360,8 +387,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # DC test - capacitors should not affect DC operating point
-            function moscap_dc_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function moscap_dc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -386,8 +417,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             using OrdinaryDiffEq
 
             # Transient test - verify C matrix is correctly stamped
-            function moscap_tran_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function moscap_tran_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -451,8 +486,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             endmodule
             """
 
-            function mosrsd_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function mosrsd_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -501,8 +540,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # DC test
-            function mosfull_dc_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function mosfull_dc_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -520,8 +563,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test isapprox(voltage(sol_dc, :drain), 3.875; atol=0.1)
 
             # Transient test
-            function mosfull_tran_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function mosfull_tran_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 gate = get_node!(ctx, :gate)
                 drain = get_node!(ctx, :drain)
@@ -563,8 +610,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             # Test a simple inverter with capacitive load
 
             # DC operating point
-            function inverter_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function inverter_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vdd = get_node!(ctx, :vdd)
                 vin = get_node!(ctx, :vin)
                 vout = get_node!(ctx, :vout)
@@ -622,8 +673,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
             # Test at default temp (27C = 300.15K)
-            function temp_resistor_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function temp_resistor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -662,8 +717,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             va = VerilogAParser.parse(IOBuffer(va_code))
             Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
-            function gmin_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function gmin_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
@@ -703,8 +762,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
             # With explicit R=2000 (R is "given")
-            sol_explicit = solve_dc((p,s,t=0.0; x=Float64[]) -> begin
-                ctx = MNAContext()
+            sol_explicit = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                 stamp!(VAOptionalParam(R=2000.0, Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
@@ -715,8 +778,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             @test isapprox(current(sol_explicit, :I_V1), -0.0025; atol=1e-6)
 
             # With only Ralt given (R is NOT "given")
-            sol_default = solve_dc((p,s,t=0.0; x=Float64[]) -> begin
-                ctx = MNAContext()
+            sol_default = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
                 stamp!(VAOptionalParam(Ralt=500.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
@@ -750,8 +817,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 
         # Test 1: Using the real parameter name (tnom)
-        sol_tnom = solve_dc((p,s,t=0.0; x=Float64[]) -> begin
-            ctx = MNAContext()
+        sol_tnom = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
             stamp!(VAAliasTest(tnom=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
@@ -762,8 +833,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
         @test isapprox(current(sol_tnom, :I_V1), -0.00466; atol=1e-4)
 
         # Test 2: Using the alias (tref) - should have same effect as tnom
-        sol_tref = solve_dc((p,s,t=0.0; x=Float64[]) -> begin
-            ctx = MNAContext()
+        sol_tref = solve_dc((p,s,t=0.0; x=Float64[], ctx=nothing) -> begin
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
             stamp!(VAAliasTest(tref=100.0), ctx, vcc, 0; _mna_x_=x, _mna_spec_=s)
@@ -799,8 +874,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Test in voltage divider circuit
-            function var_init_divider(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function var_init_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
                 mid = get_node!(ctx, :mid)
 
@@ -811,9 +890,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = var_init_divider((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            circuit = MNACircuit(var_init_divider)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 5.0)
             @test isapprox_deftol(voltage(sol, :mid), 2.5)  # Voltage divider
@@ -834,8 +912,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             endmodule
             """
 
-            function var_init_offset(params, spec, t::Real=0.0)
-                ctx = MNAContext()
+            function var_init_offset(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(4.5; name=:V1), ctx, vcc, 0)
@@ -844,9 +926,8 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
                 return ctx
             end
 
-            ctx = var_init_offset((;), MNASpec())
-            sys = assemble!(ctx)
-            sol = solve_dc(sys)
+            circuit = MNACircuit(var_init_offset)
+            sol = dc!(circuit)
 
             @test isapprox_deftol(voltage(sol, :vcc), 4.5)
             # Current should be (4.5 + 0.5) / 1000 = 5mA
@@ -872,8 +953,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             """
 
             # Voltage divider using internal node
-            function internal_resistor_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function internal_resistor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
@@ -903,8 +988,12 @@ isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
             endmodule
             """
 
-            function multi_internal_circuit(params, spec, t::Real=0.0; x=Float64[])
-                ctx = MNAContext()
+            function multi_internal_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    CedarSim.MNA.reset_for_restamping!(ctx)
+                end
                 vcc = get_node!(ctx, :vcc)
 
                 stamp!(VoltageSource(9.0; name=:V1), ctx, vcc, 0)

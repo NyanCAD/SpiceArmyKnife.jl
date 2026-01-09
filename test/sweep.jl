@@ -334,10 +334,11 @@ end
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    # Build and solve
-    ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    # Build and solve using MNACircuit + dc!
+    spec = CedarSim.MNA.MNASpec()
+    wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+    sol = CedarSim.dc!(circuit)
 
     # Verify voltage divider: out = 5 * 1k/(1k+1k) = 2.5V
     @test isapprox(voltage(sol, :vcc), 5.0; atol=deftol)
@@ -364,9 +365,10 @@ end
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    spec = CedarSim.MNA.MNASpec()
+    wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+    sol = CedarSim.dc!(circuit)
 
     # At DC, inductor is short, capacitor is open
     # So n1 = 10V (after R, but L is short)
@@ -396,9 +398,10 @@ end
     Base.eval(m, :(using CedarSim.SpectreEnvironment))
     circuit_fn = Base.eval(m, circuit_code)
 
-    ctx = Base.invokelatest(circuit_fn, (;), CedarSim.MNA.MNASpec())
-    sys = CedarSim.MNA.assemble!(ctx)
-    sol = CedarSim.MNA.solve_dc(sys)
+    spec = CedarSim.MNA.MNASpec()
+    wrapped = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
+    circuit = CedarSim.MNA.MNACircuit(wrapped, (;), spec)
+    sol = CedarSim.dc!(circuit)
 
     # V = I * R = 1mA * 1kΩ = 1V
     @test isapprox(voltage(sol, :out), 1.0; atol=deftol)

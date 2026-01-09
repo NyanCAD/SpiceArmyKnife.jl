@@ -38,8 +38,12 @@ endmodule
     # V1 sources this current (pushes out of positive terminal), so I_V1 = -60A
 
     # Builder accepts time and x keyword for Newton iteration
-    function VRcircuit(params, spec, t::Real=0.0; x=Float64[])
-        ctx = MNAContext()
+    function VRcircuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            CedarSim.MNA.reset_for_restamping!(ctx)
+        end
         vcc = get_node!(ctx, :vcc)
         vg = get_node!(ctx, :vg)
 

@@ -19,8 +19,9 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
-using CedarSim.MNA: voltage, current
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
+using CedarSim.MNA: voltage, current, MNACircuit
+using CedarSim: dc!
 using CedarSim.MNA: VoltageSource, Resistor
 
 include(joinpath(@__DIR__, "..", "common.jl"))
@@ -229,16 +230,23 @@ end
         endmodule
         """
 
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        mid = get_node!(ctx, :mid)
+        function directres_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
+            vcc = get_node!(ctx, :vcc)
+            mid = get_node!(ctx, :mid)
 
-        stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
-        stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
-        stamp!(directres(r=1000.0), ctx, mid, 0)
+            stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
+            stamp!(Resistor(1000.0; name=:R1), ctx, vcc, mid)
+            stamp!(directres(r=1000.0), ctx, mid, 0)
+            return ctx
+        end
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        circuit = MNACircuit(directres_circuit)
+        sol = dc!(circuit)
 
         @test isapprox_deftol(voltage(sol, :vcc), 10.0)
         @test isapprox_deftol(voltage(sol, :mid), 5.0)
@@ -254,18 +262,25 @@ end
         endmodule
         """
 
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        n1 = get_node!(ctx, :n1)
-        n2 = get_node!(ctx, :n2)
+        function chainres_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                CedarSim.MNA.reset_for_restamping!(ctx)
+            end
+            vcc = get_node!(ctx, :vcc)
+            n1 = get_node!(ctx, :n1)
+            n2 = get_node!(ctx, :n2)
 
-        stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
-        stamp!(chainres(r=1000.0), ctx, vcc, n1)
-        stamp!(chainres(r=2000.0), ctx, n1, n2)
-        stamp!(chainres(r=1000.0), ctx, n2, 0)
+            stamp!(VoltageSource(10.0; name=:V1), ctx, vcc, 0)
+            stamp!(chainres(r=1000.0), ctx, vcc, n1)
+            stamp!(chainres(r=2000.0), ctx, n1, n2)
+            stamp!(chainres(r=1000.0), ctx, n2, 0)
+            return ctx
+        end
 
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
+        circuit = MNACircuit(chainres_circuit)
+        sol = dc!(circuit)
 
         # Total = 4k, I = 10V/4k = 2.5mA
         @test isapprox(voltage(sol, :n1), 7.5; atol=0.01)

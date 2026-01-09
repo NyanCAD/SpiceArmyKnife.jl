@@ -2,9 +2,10 @@ module varegress
 
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
-using CedarSim.MNA: VoltageSource, Capacitor
+using CedarSim.MNA: VoltageSource, Capacitor, MNACircuit
+using CedarSim: dc!
 using OrdinaryDiffEq
 using Test
 
@@ -21,8 +22,12 @@ endmodule
 @testset "VA Resistor (normal port order)" begin
     # Circuit: V(1V) -- VAR(1kΩ) -- C(1nF) -- GND
     # This is an RC charging circuit
-    function circuit1(params, spec)
-        ctx = MNAContext()
+    function circuit1(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            CedarSim.MNA.reset_for_restamping!(ctx)
+        end
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)
 
@@ -35,9 +40,8 @@ endmodule
 
     # DC analysis - at steady state, no current through capacitor
     # V_out should equal V_vcc = 1V (no DC current through capacitor)
-    ctx = circuit1((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    circuit = MNACircuit(circuit1)
+    sol = dc!(circuit)
     @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
     @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
 
@@ -90,8 +94,12 @@ endmodule
 @testset "VA Resistor (reversed port order)" begin
     # Same circuit but with VAR_rev which uses I(n,p) <+ V(n,p)/R
     # This should behave identically - current still flows from vcc to out
-    function circuit2(params, spec)
-        ctx = MNAContext()
+    function circuit2(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            CedarSim.MNA.reset_for_restamping!(ctx)
+        end
         vcc = get_node!(ctx, :vcc)
         out = get_node!(ctx, :out)
 
@@ -103,9 +111,8 @@ endmodule
     end
 
     # DC analysis
-    ctx = circuit2((;), MNASpec())
-    sys = assemble!(ctx)
-    sol = solve_dc(sys)
+    circuit = MNACircuit(circuit2)
+    sol = dc!(circuit)
     @test isapprox(voltage(sol, :vcc), 1.0; atol=1e-10)
     @test isapprox(voltage(sol, :out), 1.0; atol=1e-10)
 

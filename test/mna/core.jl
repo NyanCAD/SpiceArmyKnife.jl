@@ -32,8 +32,10 @@ using CedarSim.MNA: make_ode_problem, make_ode_function
 using CedarSim.MNA: make_dae_problem, make_dae_function
 using CedarSim.MNA: reset_for_restamping!
 
-# Import CedarSim for tran! and solver comparison tests
+# Import CedarSim for macros and dc!/tran!
 using CedarSim
+using CedarSim: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
+using CedarSim.MNA: MNACircuit, MNASpec
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
 using VerilogAParser
 
@@ -145,26 +147,36 @@ using VerilogAParser
         # Simulate a simple diode with series resistance pattern:
         # V1 --[Rs]-- a_int --[Rd]-- gnd
         # Where Rs is 10Ω and Rd is 1000Ω (representing junction conductance)
+        #
+        # This test specifically tests alloc_internal_node! and is_internal_node,
+        # so it uses the builder pattern with direct stamping.
 
-        ctx = MNAContext()
-        anode = get_node!(ctx, :anode)
-        a_int = alloc_internal_node!(ctx, Symbol("D1.a_int"))
+        function internal_node_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            anode = get_node!(ctx, :anode)
+            a_int = alloc_internal_node!(ctx, Symbol("D1.a_int"))
 
-        # Voltage source at anode
-        stamp!(VoltageSource(5.0; name=:V1), ctx, anode, 0)
+            stamp!(VoltageSource(5.0; name=:V1), ctx, anode, 0)
+            stamp!(Resistor(10.0), ctx, anode, a_int)
+            stamp!(Resistor(1000.0), ctx, a_int, 0)
+            return ctx
+        end
 
-        # Series resistance: anode to a_int (Rs = 10Ω)
-        stamp!(Resistor(10.0), ctx, anode, a_int)
+        # Build once to get internal node info for assertions
+        ctx = internal_node_circuit((;), MNASpec())
+        a_int = 2  # Internal node is second node (anode=1, a_int=2)
 
-        # Junction as simple resistor: a_int to ground (Rd = 1000Ω)
-        stamp!(Resistor(1000.0), ctx, a_int, 0)
-
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
-
-        # Check internal node is marked correctly in solution
+        # Check internal node is marked correctly
         @test is_internal_node(ctx, a_int) == true
-        @test is_internal_node(ctx, anode) == false
+        @test is_internal_node(ctx, 1) == false  # anode
+
+        # Solve using unified dc! path
+        circuit = MNACircuit(internal_node_circuit)
+        sol = dc!(circuit)
 
         # Verify voltages using voltage divider
         # V(anode) = 5.0 (forced by voltage source)
@@ -482,22 +494,20 @@ using VerilogAParser
 
     #==========================================================================#
     # DC Analysis - Analytical Validation
+    #
+    # These tests use sp"..." SPICE macro to verify circuit behavior.
+    # The sp"..." macro generates a builder function that is used with dc!().
     #==========================================================================#
 
     @testset "DC: Voltage divider" begin
         # Classic voltage divider: 5V source, 1k/1k resistors
         # Expected: Vout = 5 * 1k/(1k+1k) = 2.5V
-
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        out = get_node!(ctx, :out)
-
-        stamp!(VoltageSource(5.0; name=:V1), ctx, vcc, 0)
-        stamp!(Resistor(1000.0), ctx, vcc, out)
-        stamp!(Resistor(1000.0), ctx, out, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        V1 vcc 0 DC 5
+        R1 vcc out 1k
+        R2 out 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :vcc) ≈ 5.0
         @test voltage(sol, :out) ≈ 2.5 atol=1e-10
     end
@@ -505,60 +515,38 @@ using VerilogAParser
     @testset "DC: Voltage divider (unequal)" begin
         # 5V source, 2k/1k resistors
         # Expected: Vout = 5 * 1k/(2k+1k) = 5/3 ≈ 1.6667V
-
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        out = get_node!(ctx, :out)
-
-        stamp!(VoltageSource(5.0), ctx, vcc, 0)
-        stamp!(Resistor(2000.0), ctx, vcc, out)
-        stamp!(Resistor(1000.0), ctx, out, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        V1 vcc 0 DC 5
+        R1 vcc out 2k
+        R2 out 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :out) ≈ 5.0 / 3.0 atol=1e-10
     end
 
     @testset "DC: Current source into resistor" begin
         # 1mA current source into 1k resistor
         # Expected: V = I * R = 0.001 * 1000 = 1V
-
-        ctx = MNAContext()
-        n1 = get_node!(ctx, :n1)
-
-        stamp!(CurrentSource(0.001), ctx, n1, 0)  # 1mA into n1
-        stamp!(Resistor(1000.0), ctx, n1, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        I1 0 n1 DC 1m
+        R1 n1 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :n1) ≈ 1.0 atol=1e-10
     end
 
     @testset "DC: Two voltage sources" begin
         # V1 = 5V at vcc, V2 = 3V at mid
         # R1 between vcc and mid, R2 between mid and gnd
-        # Current through R1: (5-3)/R1, through R2: 3/R2
-
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        mid = get_node!(ctx, :mid)
-
-        stamp!(VoltageSource(5.0), ctx, vcc, 0)
-        stamp!(VoltageSource(3.0), ctx, mid, 0)
-        stamp!(Resistor(1000.0), ctx, vcc, mid)
-        stamp!(Resistor(1000.0), ctx, mid, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        V1 vcc 0 DC 5
+        V2 mid 0 DC 3
+        R1 vcc mid 1k
+        R2 mid 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :vcc) ≈ 5.0
         @test voltage(sol, :mid) ≈ 3.0
-
-        # Check currents through sources
-        I_V1 = current(sol, :I_V)  # Current through V1
-        I_V2 = current(sol, Symbol("I_V"))  # Current through V2
-
-        # Actually need to track by name...
-        # For now, just verify voltages are correct
     end
 
     @testset "DC: VCCS amplifier" begin
@@ -566,17 +554,12 @@ using VerilogAParser
         # Output: into 1k resistor
         # Expected: Iout = gm * Vin = 0.01 * 1 = 10mA
         # Vout = Iout * R = 0.01 * 1000 = 10V
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
-        stamp!(VoltageSource(1.0), ctx, inp, 0)
-        stamp!(VCCS(0.01), ctx, out, 0, inp, 0)
-        stamp!(Resistor(1000.0), ctx, out, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        V1 inp 0 DC 1
+        G1 out 0 inp 0 0.01
+        R1 out 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :inp) ≈ 1.0
         @test voltage(sol, :out) ≈ 10.0 atol=1e-10
     end
@@ -584,41 +567,27 @@ using VerilogAParser
     @testset "DC: Inverting amplifier with VCVS" begin
         # Simple inverting amp model with gain = -10
         # Vin = 0.5V, Vout should be -5V
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
-        stamp!(VoltageSource(0.5), ctx, inp, 0)
-        stamp!(VCVS(-10.0), ctx, out, 0, inp, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        V1 inp 0 DC 0.5
+        E1 out 0 inp 0 -10.0
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :inp) ≈ 0.5
         @test voltage(sol, :out) ≈ -5.0 atol=1e-10
     end
 
     @testset "DC: Transresistance amplifier with CCVS" begin
         # CCVS: Vout = rm * I_in
-        # Current source I = 1mA through sensing branch (in_p -> in_n)
+        # Current source I = 1mA through sensing branch
         # rm = 1000 Ω
         # Expected: Vout = 1000 * 1e-3 = 1V
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
-        # Drive the sensing branch with a current source
-        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
-
-        # CCVS senses current in (inp, 0) and outputs voltage at (out, 0)
-        stamp!(CCVS(1000.0), ctx, out, 0, inp, 0)
-
-        # Need a load to close the output circuit
-        stamp!(Resistor(1e6), ctx, out, 0)  # High-impedance load
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        I1 0 inp DC 1m
+        H1 out 0 V_sense 1000.0
+        V_sense inp 0 DC 0
+        R1 out 0 1Meg
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :out) ≈ 1.0 atol=1e-6
     end
 
@@ -628,51 +597,30 @@ using VerilogAParser
         # Gain = 2
         # Output into 1k resistor
         # Expected: I_out = 2mA, V_out = 2mA * 1kΩ = 2V
-
-        ctx = MNAContext()
-        inp = get_node!(ctx, :inp)
-        out = get_node!(ctx, :out)
-
-        # Drive the sensing branch with a current source
-        stamp!(CurrentSource(1e-3), ctx, inp, 0)  # 1mA into inp
-
-        # CCCS senses current in (inp, 0) and outputs current at (out, 0)
-        stamp!(CCCS(2.0), ctx, out, 0, inp, 0)
-
-        # Load resistor
-        stamp!(Resistor(1000.0), ctx, out, 0)
-
-        sol = solve_dc(ctx)
-
+        circuit = MNACircuit(sp"""
+        I1 0 inp DC 1m
+        F1 out 0 V_sense 2.0
+        V_sense inp 0 DC 0
+        R1 out 0 1k
+        """i)
+        sol = dc!(circuit)
         @test voltage(sol, :out) ≈ 2.0 atol=1e-10
     end
 
     @testset "DC: Multi-node network" begin
         # Star network: center node connected to 3 voltage sources via resistors
         # V1 = 3V (R=1k), V2 = 6V (R=2k), V3 = 9V (R=3k)
-        # Center voltage by superposition:
         # Vcenter = (V1/R1 + V2/R2 + V3/R3) / (1/R1 + 1/R2 + 1/R3)
-        #         = (3/1 + 6/2 + 9/3) / (1/1 + 1/2 + 1/3)
-        #         = (3 + 3 + 3) / (1 + 0.5 + 0.333...)
         #         = 9 / 1.8333... ≈ 4.909V
-
-        ctx = MNAContext()
-        n1 = get_node!(ctx, :n1)
-        n2 = get_node!(ctx, :n2)
-        n3 = get_node!(ctx, :n3)
-        center = get_node!(ctx, :center)
-
-        stamp!(VoltageSource(3.0), ctx, n1, 0)
-        stamp!(VoltageSource(6.0), ctx, n2, 0)
-        stamp!(VoltageSource(9.0), ctx, n3, 0)
-
-        stamp!(Resistor(1000.0), ctx, n1, center)
-        stamp!(Resistor(2000.0), ctx, n2, center)
-        stamp!(Resistor(3000.0), ctx, n3, center)
-
-        sol = solve_dc(ctx)
-
-        # Analytical: 9 / (11/6) = 54/11 ≈ 4.909
+        circuit = MNACircuit(sp"""
+        V1 n1 0 DC 3
+        V2 n2 0 DC 6
+        V3 n3 0 DC 9
+        R1 n1 center 1k
+        R2 n2 center 2k
+        R3 n3 center 3k
+        """i)
+        sol = dc!(circuit)
         expected = 9.0 / (1.0 + 0.5 + 1.0/3.0)
         @test voltage(sol, :center) ≈ expected atol=1e-10
     end
@@ -775,9 +723,8 @@ using VerilogAParser
         @test prob.tspan == (0.0, 1e-3)
         @test length(prob.u0) == system_size(sys)
 
-        # Initial condition should be DC solution
-        dc_sol = solve_dc(sys)
-        @test prob.u0 ≈ dc_sol.x
+        # Initial condition should be DC solution (G\b)
+        @test prob.u0 ≈ sys.G \ sys.b
 
         # Mass matrix should be the C matrix
         @test prob.mass_matrix == sys.C
@@ -801,21 +748,20 @@ using VerilogAParser
         @test size(sys2.G) == (1, 1)
 
         # Very large resistance (should still work)
-        ctx3 = MNAContext()
-        n1 = get_node!(ctx3, :n1)
-        stamp!(VoltageSource(1.0), ctx3, n1, 0)
-        stamp!(Resistor(1e12), ctx3, n1, 0)  # 1 TΩ
-        sol3 = solve_dc(ctx3)
+        circuit3 = MNACircuit(sp"""
+        V1 n1 0 DC 1
+        R1 n1 0 1T
+        """i)
+        sol3 = dc!(circuit3)
         @test voltage(sol3, :n1) ≈ 1.0
 
         # Very small resistance
-        ctx4 = MNAContext()
-        n1 = get_node!(ctx4, :n1)
-        n2 = get_node!(ctx4, :n2)
-        stamp!(VoltageSource(5.0), ctx4, n1, 0)
-        stamp!(Resistor(1e-6), ctx4, n1, n2)  # 1 μΩ
-        stamp!(Resistor(1e-6), ctx4, n2, 0)
-        sol4 = solve_dc(ctx4)
+        circuit4 = MNACircuit(sp"""
+        V1 n1 0 DC 5
+        R1 n1 n2 1u
+        R2 n2 0 1u
+        """i)
+        sol4 = dc!(circuit4)
         @test voltage(sol4, :n2) ≈ 2.5 atol=1e-6
     end
 
@@ -824,26 +770,31 @@ using VerilogAParser
     #==========================================================================#
 
     @testset "Display functions" begin
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
-        out = get_node!(ctx, :out)
+        # Test display methods using sp"..." for circuit definition
+        circuit = MNACircuit(sp"""
+        V1 vcc 0 DC 5
+        R1 vcc out 1k
+        R2 out 0 1k
+        """i)
 
-        stamp!(VoltageSource(5.0), ctx, vcc, 0)
-        stamp!(Resistor(1000.0), ctx, vcc, out)
-        stamp!(Resistor(1000.0), ctx, out, 0)
+        # Build ctx for context display test
+        ctx = circuit.builder(circuit.params, circuit.spec, 0.0)
 
         # Should not error
         io = IOBuffer()
         show(io, ctx)
         show(io, MIME"text/plain"(), ctx)
 
-        sys = assemble!(ctx)
-        show(io, sys)
-        show(io, MIME"text/plain"(), sys)
-
-        sol = solve_dc(sys)
+        # Solve and test solution display
+        sol = dc!(circuit)
         show(io, sol)
         show(io, MIME"text/plain"(), sol)
+
+        # Also test MNASystem display
+        ctx2 = circuit.builder(circuit.params, circuit.spec, 0.0)
+        sys = assemble!(ctx2)
+        show(io, sys)
+        show(io, MIME"text/plain"(), sys)
 
         # Just check no errors
         @test true
@@ -1515,8 +1466,7 @@ using VerilogAParser
         # 2. Run transient (with sources at transient values)
 
         # First, get DC operating point (cap starts at 0V)
-        dcop_sys = assemble!(circuit_dcop)
-        dc_sol = solve_dc(dcop_sys)
+        dc_sol = dc!(circuit_dcop)
         V_cap_dc = voltage(dc_sol, :out)
         @test V_cap_dc ≈ 0.0  # Cap at 0V in DC mode
 
@@ -1576,13 +1526,17 @@ using VerilogAParser
         @test merged.C == 1e-6    # Uses default (unmodified)
 
         # Test 4: Use ParamLens in a circuit builder
-        function build_with_lens(lens, spec)
-            ctx = MNAContext()
+        function build_with_lens(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
             vcc = get_node!(ctx, :vcc)
             out = get_node!(ctx, :out)
 
-            # lens(; defaults...) returns params with lens overrides merged
-            p = lens(; Vcc=5.0, R1=1000.0, R2=1000.0)
+            # params.lens(; defaults...) returns params with lens overrides merged
+            p = params.lens(; Vcc=5.0, R1=1000.0, R2=1000.0)
 
             stamp!(VoltageSource(p.Vcc), ctx, vcc, 0)
             stamp!(Resistor(p.R1), ctx, vcc, out)
@@ -1592,16 +1546,14 @@ using VerilogAParser
         end
 
         # With identity lens: all defaults
-        ctx_default = build_with_lens(IdentityLens(), MNASpec())
-        sys_default = assemble!(ctx_default)
-        sol_default = solve_dc(sys_default)
+        circuit_default = MNACircuit(build_with_lens; lens=IdentityLens())
+        sol_default = dc!(circuit_default)
         @test voltage(sol_default, :out) ≈ 2.5  # 5V * 1k/(1k+1k)
 
         # With partial override: only R1 changed
         override_lens = ParamLens((params=(R1=3000.0,),))
-        ctx_override = build_with_lens(override_lens, MNASpec())
-        sys_override = assemble!(ctx_override)
-        sol_override = solve_dc(sys_override)
+        circuit_override = MNACircuit(build_with_lens; lens=override_lens)
+        sol_override = dc!(circuit_override)
         # Vout = 5V * R2/(R1+R2) = 5 * 1000/4000 = 1.25V
         @test voltage(sol_override, :out) ≈ 1.25 rtol=1e-6
 
@@ -1703,8 +1655,7 @@ using VerilogAParser
     # High-Level dc!/tran! API (integration with CedarSim sweep API)
     #==========================================================================#
 
-    # dc!/tran! are exported from CedarSim (via sweeps.jl), not MNA module
-    using CedarSim: dc!, tran!
+    # dc!/tran! are already imported at the top of this file from CedarSim
     using CedarSim.MNA: MNASolutionAccessor, scope, NodeRef, ScopedSystem
 
     @testset "dc! and tran! API with MNACircuit" begin
@@ -1880,31 +1831,43 @@ using VerilogAParser
     end
 
     @testset "PWL/SIN stamp! methods" begin
-        using CedarSim.MNA: MNASpec
+        using CedarSim.MNA: MNASpec, SinVoltageSource
 
-        # Test PWL voltage source stamping
-        ctx = MNAContext()
-        vcc = get_node!(ctx, :vcc)
+        # Test PWL voltage source stamping via builder pattern
+        # The builder stamps a PWL at t=0.5ms where the value is 2.5V
+        function pwl_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            vcc = get_node!(ctx, :vcc)
+            pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
+            stamp!(pwl, ctx, vcc, 0, 0.5e-3, :tran)
+            return ctx
+        end
 
-        pwl = PWLVoltageSource([0.0, 1e-3], [0.0, 5.0]; name=:Vpwl)
-        stamp!(pwl, ctx, vcc, 0, 0.5e-3, :tran)
-
-        sys = assemble!(ctx)
-        sol = solve_dc(sys)
-
+        circuit = MNACircuit(pwl_circuit)
+        sol = dc!(circuit)
         # At t=0.5ms, PWL value = 2.5V
         @test voltage(sol, :vcc) ≈ 2.5 atol=1e-10
 
-        # Test SIN voltage source stamping
-        ctx2 = MNAContext()
-        vcc2 = get_node!(ctx2, :vcc)
+        # Test SIN voltage source stamping via builder pattern
+        # At t=0.25ms (1/4 period of 1kHz), sin = 5*sin(90°) = 5
+        function sin_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            vcc = get_node!(ctx, :vcc)
+            sin_src = SinVoltageSource(0.0, 5.0, 1000.0; name=:Vsin)
+            stamp!(sin_src, ctx, vcc, 0, 0.25e-3, :tran)
+            return ctx
+        end
 
-        sin_src = SinVoltageSource(0.0, 5.0, 1000.0; name=:Vsin)
-        # At t=0.25ms, sin = 5*sin(90°) = 5
-        stamp!(sin_src, ctx2, vcc2, 0, 0.25e-3, :tran)
-
-        sys2 = assemble!(ctx2)
-        sol2 = solve_dc(sys2)
+        circuit2 = MNACircuit(sin_circuit)
+        sol2 = dc!(circuit2)
         @test voltage(sol2, :vcc) ≈ 5.0 atol=1e-10
     end
 

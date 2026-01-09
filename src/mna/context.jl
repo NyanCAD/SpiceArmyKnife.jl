@@ -376,6 +376,9 @@ end
 
 get_current_idx(ctx::MNAContext, name::String) = get_current_idx(ctx, Symbol(name))
 
+# Note: get_current_idx(::DirectStampContext, ...) is defined in value_only.jl
+# after DirectStampContext is defined
+
 """
     has_current(ctx::MNAContext, name::Symbol) -> Bool
 

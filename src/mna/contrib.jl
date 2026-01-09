@@ -1068,3 +1068,72 @@ end
 
 stamp_reactive_with_detection!(ctx::MNAContext, p::Int, n::Int, contrib_fn, x::AbstractVector, name::String) =
     stamp_reactive_with_detection!(ctx, p, n, contrib_fn, x, Symbol(name))
+
+#==============================================================================#
+# DirectStampContext Methods
+#
+# These methods enable the unified DC solve path (dc_solve_with_ctx) to work
+# with nonlinear B-sources that use stamp_current_contribution!.
+#==============================================================================#
+
+"""
+    stamp_contribution!(ctx::DirectStampContext, ...)
+
+DirectStampContext version of stamp_contribution! for compiled DC solve.
+Uses the same stamping pattern but stamps to precompiled sparse matrices.
+"""
+function stamp_contribution!(
+    ctx::DirectStampContext,
+    p::Int, n::Int,
+    I_val::Real, I_jac_p::Real, I_jac_n::Real,
+    q_val::Real, q_jac_p::Real, q_jac_n::Real;
+    Vp::Real=0.0, Vn::Real=0.0, has_reactive::Bool=true
+)
+    # Stamp conductance (Jacobian of resistive current)
+    stamp_G!(ctx, p, p,  I_jac_p)
+    stamp_G!(ctx, p, n,  I_jac_n)
+    stamp_G!(ctx, n, p, -I_jac_p)
+    stamp_G!(ctx, n, n, -I_jac_n)
+
+    # Only stamp capacitance if the device has reactive (ddt) components
+    if has_reactive
+        stamp_C!(ctx, p, p,  q_jac_p)
+        stamp_C!(ctx, p, n,  q_jac_n)
+        stamp_C!(ctx, n, p, -q_jac_p)
+        stamp_C!(ctx, n, n, -q_jac_n)
+    end
+
+    # Stamp RHS using Newton companion model
+    b_companion = I_val - I_jac_p * Vp - I_jac_n * Vn
+    stamp_b!(ctx, p, -b_companion)
+    stamp_b!(ctx, n,  b_companion)
+
+    return nothing
+end
+
+"""
+    stamp_current_contribution!(ctx::DirectStampContext, ...)
+
+DirectStampContext version of stamp_current_contribution! for compiled DC solve.
+"""
+function stamp_current_contribution!(
+    ctx::DirectStampContext,
+    p::Int, n::Int,
+    contrib_fn,
+    x::AbstractVector
+)
+    # Get node voltages (ground = 0)
+    Vp = p == 0 ? 0.0 : x[p]
+    Vn = n == 0 ? 0.0 : x[n]
+
+    # Evaluate contribution and extract all derivatives
+    result = evaluate_contribution(contrib_fn, Vp, Vn)
+
+    # Stamp into matrices with operating point voltages for companion model
+    stamp_contribution!(ctx, p, n,
+        result.I, result.dI_dVp, result.dI_dVn,
+        result.q, result.dq_dVp, result.dq_dVn;
+        Vp=Vp, Vn=Vn, has_reactive=result.has_reactive)
+
+    return nothing
+end

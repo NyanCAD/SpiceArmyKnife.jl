@@ -44,6 +44,7 @@ mutable struct DirectStampContext
     node_to_idx::Dict{Symbol,Int}
     n_nodes::Int
     n_currents::Int
+    current_names::Vector{Symbol}  # For get_current_idx lookups (CCVS/CCCS)
 
     # Direct references to sparse matrix storage (these are the actual nzval arrays)
     G_nzval::Vector{Float64}
@@ -95,6 +96,7 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         ctx.node_to_idx,
         ctx.n_nodes,
         ctx.n_currents,
+        ctx.current_names,
         G_nzval,
         C_nzval,
         G_mapping,
@@ -107,6 +109,33 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         copy(ctx.charge_is_vdep),
         1
     )
+end
+
+"""
+    get_current_idx(ctx::DirectStampContext, name::Symbol) -> CurrentIndex
+
+Get the index of a current variable by name in DirectStampContext (for CCVS/CCCS restamping).
+"""
+function get_current_idx(ctx::DirectStampContext, name::Symbol)::CurrentIndex
+    idx = findfirst(==(name), ctx.current_names)
+    idx === nothing && error("Current variable $name not found in DirectStampContext")
+    return CurrentIndex(idx)
+end
+
+get_current_idx(ctx::DirectStampContext, name::String) = get_current_idx(ctx, Symbol(name))
+
+"""
+    resolve_index(ctx::DirectStampContext, idx::MNAIndex) -> Int
+
+Convert an MNA index (NodeIndex, CurrentIndex, ChargeIndex) to system row/column.
+This mirrors the MNAContext version for DirectStampContext compatibility.
+"""
+@inline resolve_index(ctx::DirectStampContext, ::GroundIndex)::Int = 0
+@inline resolve_index(ctx::DirectStampContext, idx::NodeIndex)::Int = idx.idx
+@inline resolve_index(ctx::DirectStampContext, idx::CurrentIndex)::Int = ctx.n_nodes + idx.k
+# ChargeIndex for DirectStampContext (charges come after currents)
+@inline function resolve_index(ctx::DirectStampContext, idx::ChargeIndex)::Int
+    return ctx.n_nodes + ctx.n_currents + idx.k
 end
 
 """

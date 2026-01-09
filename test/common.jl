@@ -244,7 +244,7 @@ function make_mna_spice_circuit(spice_code::String; temp::Real=27.0, imported_hd
     # Wrap in invokelatest to handle world age issues.
     # This is needed because circuit_fn was defined via eval and is called from
     # ODE solver callbacks which are in an older world.
-    # For production performance, use the mna_sp"..." macro instead.
+    # For production performance, use the sp"..." macro instead.
     wrapped_fn = (args...; kwargs...) -> Base.invokelatest(circuit_fn, args...; kwargs...)
 
     spec = MNASpec(temp=Float64(temp), mode=:tran)

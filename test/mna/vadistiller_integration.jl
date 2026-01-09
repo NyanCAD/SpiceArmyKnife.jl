@@ -15,7 +15,7 @@
 using Test
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!, solve_dc
+using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
@@ -80,8 +80,12 @@ end
             load_va_model("resistor.va")
 
             @testset "sp_resistor divider" begin
-                function sp_resistor_divider(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_resistor_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
@@ -92,9 +96,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_resistor_divider((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                circuit = MNACircuit(sp_resistor_divider)
+                sol = dc!(circuit)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 2.5)
@@ -103,8 +106,12 @@ end
             load_va_model("capacitor.va")
 
             @testset "sp_capacitor DC" begin
-                function sp_capacitor_circuit(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_capacitor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
@@ -115,9 +122,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_capacitor_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                circuit = MNACircuit(sp_capacitor_circuit)
+                sol = dc!(circuit)
 
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
@@ -126,8 +132,12 @@ end
             load_va_model("inductor.va")
 
             @testset "sp_inductor DC" begin
-                function sp_inductor_circuit(params, spec, t::Real=0.0)
-                    ctx = MNAContext()
+                function sp_inductor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                    if ctx === nothing
+                        ctx = MNAContext()
+                    else
+                        CedarSim.MNA.reset_for_restamping!(ctx)
+                    end
                     vcc = get_node!(ctx, :vcc)
                     mid = get_node!(ctx, :mid)
 
@@ -138,9 +148,8 @@ end
                     return ctx
                 end
 
-                ctx = sp_inductor_circuit((;), MNASpec())
-                sys = assemble!(ctx)
-                sol = solve_dc(sys)
+                circuit = MNACircuit(sp_inductor_circuit)
+                sol = dc!(circuit)
                 @test isapprox(voltage(sol, :mid), 0.0; atol=0.01)
             end
         end

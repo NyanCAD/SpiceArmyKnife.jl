@@ -1333,40 +1333,28 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
                                u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
+    # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
 
     # Detect differential variables using the same detection context
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
     n = length(diff_vars)
 
-    # Get initial conditions via DC solve using the SAME detection context
-    # This ensures u0 has exactly the same size as diff_vars.
-    # We use dc_solve_with_ctx which does proper Newton iteration using
-    # the pre-built detection context structure.
-    # Note: CedarDCOp (the default initializealg in tran!) will refine this and
-    # handle du0 properly during IDA initialization.
+    # Compile circuit structure using the detection context
+    # Structure (sparsity pattern) is correct from detection passes
+    # CedarDCOp will compute the actual DC operating point during solve()
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
+
+    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
     if u0 === nothing
-        dc_spec = with_mode(circuit.spec, :dcop)
-        u0, _ = dc_solve_with_ctx(circuit.builder, circuit.params, dc_spec, ctx)
+        u0 = zeros(n)
     end
-    # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
     if du0 === nothing
         du0 = zeros(n)
     end
 
-    # Compile circuit structure using the same detection context
-    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
-    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
-    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
-    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
-    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
-    ws = create_workspace(cs; ctx=ctx)
-
-    # Initialize workspace at t=0 with the DC operating point
-    # This is required for IDA's initialization to work properly
+    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
     fast_rebuild!(ws, u0, 0.0)
 
     residual! = make_workspace_dae_residual()

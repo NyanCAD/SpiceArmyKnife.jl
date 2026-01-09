@@ -243,26 +243,38 @@ function SciMLBase.initialize_dae!(integrator::OrdinaryDiffEq.ODEIntegrator,
     end
 
     u0 = integrator.u
+    cs = ws.structure
+
+    # Check if u0 already satisfies the DC residual (same optimization as IDA path)
+    # This avoids redundant DC solve if ODEProblem already computed valid u0
+    tmp = similar(u0)
+    fast_rebuild!(ws, u0, 0.0)
+    mul!(tmp, cs.G, u0)
+    tmp .-= ws.dctx.b
+
+    if norm(tmp) < abstol
+        return  # Already converged - skip DC solve
+    end
 
     # Switch to dcop/tranop mode for the solve
     mode = alg isa CedarDCOp ? :dcop : :tranop
-    original_spec = ws.structure.spec
+    original_spec = cs.spec
     dc_spec = with_mode(original_spec, mode)
 
     # Create a temporary compiled structure with dcop mode
     cs_dcop = CompiledStructure(
-        ws.structure.builder,
-        ws.structure.params,
+        cs.builder,
+        cs.params,
         dc_spec,
-        ws.structure.n_nodes,
-        ws.structure.n_currents,
-        ws.structure.G,
-        ws.structure.C,
-        ws.structure.n_b_deferred
+        cs.n_nodes,
+        cs.n_currents,
+        cs.G,
+        cs.C,
+        cs.n_b_deferred
     )
 
-    # Call the shared Newton iteration
-    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, zeros(length(u0));
+    # Use existing u0 as starting point (it's likely close to the solution)
+    u_sol, converged = MNA._dc_newton_compiled(cs_dcop, ws, copy(u0);
                                                 abstol=abstol, maxiters=100,
                                                 nlsolve=alg.nlsolve)
 

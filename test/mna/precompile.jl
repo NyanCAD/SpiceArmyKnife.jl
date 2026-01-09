@@ -1,5 +1,5 @@
 #==============================================================================#
-# Tests for Precompiled Circuit Optimization
+# Tests for Compiled Circuit Optimization (CompiledStructure + EvalWorkspace)
 #==============================================================================#
 
 using Test
@@ -10,7 +10,9 @@ using LinearAlgebra
 using CedarSim.MNA: MNAContext, get_node!, resolve_index, get_rhs, reset_for_restamping!
 using CedarSim.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
 using CedarSim.MNA: MNASpec, DCSolution, solve_dc, voltage, current
-using CedarSim.MNA: PrecompiledCircuit, compile_circuit, fast_residual!, system_size
+using CedarSim.MNA: compile_structure, create_workspace, EvalWorkspace, CompiledStructure
+using CedarSim.MNA: fast_residual!, fast_rebuild!, system_size
+using CedarSim.MNA: MNACircuit, compile
 import CedarSim.MNA as MNA
 
 @testset "COO to CSC Mapping" begin
@@ -65,28 +67,12 @@ end
     @test S[2, 2] ≈ 3.0
 end
 
-@testset "update_sparse_from_coo!" begin
-    I = [1, 2, 1, 3]
-    J = [1, 1, 2, 3]
-    V = [1.0, 2.0, 3.0, 4.0]
-
-    S = sparse(I, J, V, 3, 3)
-    mapping = MNA.compute_coo_to_nz_mapping(I, J, S)
-
-    # Update with new values
-    V2 = [10.0, 20.0, 30.0, 40.0]
-    MNA.update_sparse_from_coo!(S, V2, mapping, length(V2))
-
-    S_expected = sparse(I, J, V2, 3, 3)
-    @test S ≈ S_expected
-end
-
 @testset "Compile simple RC circuit" begin
     function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -98,31 +84,34 @@ end
         return ctx
     end
 
-    pc = compile_circuit(build_rc, (V=5.0, R=1000.0, C=1e-6), MNASpec())
+    # Use MNACircuit + compile() which returns EvalWorkspace
+    circuit = MNACircuit(build_rc; V=5.0, R=1000.0, C=1e-6)
+    ws = compile(circuit)
+    cs = ws.structure
 
-    @test pc.n == 3  # vin, out, I_V1
-    @test pc.n_nodes == 2
-    @test pc.n_currents == 1
-    @test :vin in pc.node_names
-    @test :out in pc.node_names
+    @test system_size(ws) == 3  # vin, out, I_V1
+    @test cs.n_nodes == 2
+    @test cs.n_currents == 1
+    @test :vin in cs.node_names
+    @test :out in cs.node_names
 
     # Check G matrix structure
-    @test nnz(pc.G) > 0
+    @test nnz(cs.G) > 0
 
     # Test fast rebuild
     u = zeros(3)
-    MNA.fast_rebuild!(pc, u, 0.0)
+    fast_rebuild!(ws, u, 0.0)
 
     # G matrix should have entries for resistor and voltage source
-    @test nnz(pc.G) >= 4  # At least resistor pattern
+    @test nnz(cs.G) >= 4  # At least resistor pattern
 end
 
-@testset "PrecompiledCircuit DC solution" begin
+@testset "EvalWorkspace DC solution" begin
     function build_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
         mid = get_node!(ctx, :mid)
@@ -134,23 +123,25 @@ end
         return ctx
     end
 
-    # Test via compile_circuit
-    pc = compile_circuit(build_divider, (V=10.0, R1=1000.0, R2=1000.0), MNASpec(mode=:dcop))
+    # Use MNACircuit + compile()
+    circuit = MNACircuit(build_divider; V=10.0, R1=1000.0, R2=1000.0, spec=MNASpec(mode=:dcop))
+    ws = compile(circuit)
+    cs = ws.structure
 
     # DC solve using builder
-    sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
+    sol = solve_dc(cs.builder, cs.params, MNASpec(mode=:dcop))
 
     # Check voltage divider: V_mid = V * R2 / (R1 + R2) = 10 * 0.5 = 5.0
     @test voltage(sol, :mid) ≈ 5.0 atol=1e-10
     @test voltage(sol, :vin) ≈ 10.0 atol=1e-10
 end
 
-@testset "PrecompiledCircuit with DC solve" begin
+@testset "EvalWorkspace with DC solve" begin
     function build_rc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -163,12 +154,14 @@ end
     end
 
     # Compile circuit
-    pc = compile_circuit(build_rc, (V=5.0, R=1000.0, C=1e-6), MNASpec())
+    circuit = MNACircuit(build_rc; V=5.0, R=1000.0, C=1e-6)
+    ws = compile(circuit)
+    cs = ws.structure
 
-    @test system_size(pc) == 3
+    @test system_size(ws) == 3
 
     # DC solve using builder
-    sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
+    sol = solve_dc(cs.builder, cs.params, MNASpec(mode=:dcop))
     @test voltage(sol, :vin) ≈ 5.0 atol=1e-10
     @test voltage(sol, :out) ≈ 5.0 atol=1e-10  # No load, so V_out = V_in
 end
@@ -178,7 +171,7 @@ end
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -190,18 +183,20 @@ end
         return ctx
     end
 
-    pc = compile_circuit(build_rc, (V=5.0, R=1000.0, C=1e-6), MNASpec())
+    circuit = MNACircuit(build_rc; V=5.0, R=1000.0, C=1e-6)
+    ws = compile(circuit)
+    cs = ws.structure
 
-    n = pc.n
+    n = system_size(ws)
     u = zeros(n)
     du = zeros(n)
     resid = zeros(n)
 
     # At DC operating point (u from DC solve), residual should be ~0
-    dc_sol = solve_dc(pc.builder, pc.params, MNASpec(mode=:dcop))
+    dc_sol = solve_dc(cs.builder, cs.params, MNASpec(mode=:dcop))
     u .= dc_sol.x
 
-    fast_residual!(resid, du, u, pc, 0.0)
+    fast_residual!(resid, du, u, ws, 0.0)
 
     # Residual at DC operating point should be near zero (du=0)
     @test norm(resid) < 1e-10
@@ -212,7 +207,7 @@ end
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
         out = get_node!(ctx, :out)
@@ -224,30 +219,32 @@ end
         return ctx
     end
 
-    pc = compile_circuit(build_diode_circuit, (V=5.0, R=1000.0), MNASpec(mode=:dcop))
+    circuit = MNACircuit(build_diode_circuit; V=5.0, R=1000.0, spec=MNASpec(mode=:dcop))
+    ws = compile(circuit)
+    cs = ws.structure
 
-    @test pc.n == 3
-    @test pc.n_nodes == 2
+    @test system_size(ws) == 3
+    @test cs.n_nodes == 2
 
     # Test that structure matches at different operating points
     u0 = zeros(3)
-    MNA.fast_rebuild!(pc, u0, 0.0)
-    G_nnz_0 = nnz(pc.G)
+    fast_rebuild!(ws, u0, 0.0)
+    G_nnz_0 = nnz(cs.G)
 
     u1 = [5.0, 0.6, 0.0]  # Diode forward biased
-    MNA.fast_rebuild!(pc, u1, 0.0)
-    G_nnz_1 = nnz(pc.G)
+    fast_rebuild!(ws, u1, 0.0)
+    G_nnz_1 = nnz(cs.G)
 
     # Structure should be same (nonlinear just changes values)
     @test G_nnz_0 == G_nnz_1
 end
 
-@testset "alter with compiled circuit" begin
+@testset "Compiling different parameter sets" begin
     function build_r(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         vin = get_node!(ctx, :vin)
 
@@ -258,11 +255,14 @@ end
     end
 
     # Test that compiling different parameter sets works
-    pc1 = compile_circuit(build_r, (V=10.0, R=1000.0), MNASpec(mode=:dcop))
-    pc2 = compile_circuit(build_r, (V=10.0, R=500.0), MNASpec(mode=:dcop))
+    circuit1 = MNACircuit(build_r; V=10.0, R=1000.0, spec=MNASpec(mode=:dcop))
+    circuit2 = MNACircuit(build_r; V=10.0, R=500.0, spec=MNASpec(mode=:dcop))
 
-    sol1 = solve_dc(pc1.builder, pc1.params, MNASpec(mode=:dcop))
-    sol2 = solve_dc(pc2.builder, pc2.params, MNASpec(mode=:dcop))
+    ws1 = compile(circuit1)
+    ws2 = compile(circuit2)
+
+    sol1 = solve_dc(ws1.structure.builder, ws1.structure.params, MNASpec(mode=:dcop))
+    sol2 = solve_dc(ws2.structure.builder, ws2.structure.params, MNASpec(mode=:dcop))
 
     # Current I = V/R
     I1 = current(sol1, :I_V1)
@@ -277,7 +277,7 @@ end
         if ctx === nothing
             ctx = MNAContext()
         else
-            reset_for_restamping!(ctx)
+            MNA.reset_for_restamping!(ctx)
         end
         N = params.N
 
@@ -296,26 +296,23 @@ end
     end
 
     N = 50
-    params = (V=5.0, R=1000.0, C=1e-12, N=N)
-    spec = MNASpec()
+    circuit = MNACircuit(build_large_ladder; V=5.0, R=1000.0, C=1e-12, N=N)
+    ws = compile(circuit)
 
-    # Compile once
-    pc = compile_circuit(build_large_ladder, params, spec)
-
-    @test pc.n == N + 2  # N nodes + vin + current variable
+    @test system_size(ws) == N + 2  # N nodes + vin + current variable
 
     # Time multiple evaluations
-    n = pc.n
+    n = system_size(ws)
     u = rand(n)
     du = zeros(n)
     resid = zeros(n)
 
     # Warmup
-    fast_residual!(resid, du, u, pc, 0.0)
+    fast_residual!(resid, du, u, ws, 0.0)
 
     # Multiple iterations (simulating Newton steps)
     for i in 1:10
-        fast_residual!(resid, du, u, pc, Float64(i) * 1e-9)
+        fast_residual!(resid, du, u, ws, Float64(i) * 1e-9)
     end
 
     # Verify residual is finite (no NaN/Inf)

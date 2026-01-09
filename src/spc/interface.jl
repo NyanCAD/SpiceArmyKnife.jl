@@ -223,7 +223,7 @@ end
     solve_spice_mna(spice_code::String; temp=27.0)
 
 Parse SPICE code, build MNA circuit, and solve DC operating point.
-Returns (MNASystem, DCSolution).
+Returns (MNAData, DCSolution).
 
 # Example
 ```julia

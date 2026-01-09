@@ -6,7 +6,7 @@
 # - AC Analysis: Small-signal frequency response ((G + jωC)*x = b)
 # - Transient: ODEProblem formulation for DifferentialEquations.jl
 #
-# The solvers work with the MNASystem assembled from MNAContext.
+# The solvers work with the MNAData assembled from MNAContext.
 #==============================================================================#
 
 using LinearAlgebra
@@ -17,7 +17,7 @@ using Accessors
 
 export DCSolution, ACSolution
 export solve_dc, solve_dc!, solve_ac
-export make_ode_problem, make_dae_problem  # For static MNASystem
+export make_ode_problem, make_dae_problem  # For static MNAData
 export voltage, current, magnitude_db, phase_deg
 
 #==============================================================================#
@@ -119,11 +119,11 @@ struct DCSolution
 end
 
 """
-    DCSolution(sys::MNASystem, x::Vector{Float64})
+    DCSolution(sys::MNAData, x::Vector{Float64})
 
 Create a DC solution from a system and solution vector.
 """
-DCSolution(sys::MNASystem, x::Vector{Float64}) =
+DCSolution(sys::MNAData, x::Vector{Float64}) =
     DCSolution(copy(x), sys.node_names, sys.current_names, sys.n_nodes)
 
 # Accessors
@@ -273,14 +273,13 @@ using ADTypes
 #==============================================================================#
 # Unified DC Solve
 #
-# ONE implementation shared by:
+# The core Newton iteration (_dc_newton_compiled) is shared by:
 # - solve_dc(circuit::MNACircuit) for standalone DC analysis
-# - DAEProblem/ODEProblem constructors for initial u0
-# - CedarDCOp for DAE initialization
+# - CedarDCOp for DAE/ODE transient initialization
 #
 # The flow is:
 # 1. build_with_detection() discovers all states via multi-pass detection
-# 2. dc_solve_with_ctx() does Newton iteration using that detected context
+# 2. _dc_newton_compiled does Newton iteration to solve F(u) = G*u - b = 0
 #==============================================================================#
 
 # Common Newton iteration core for compiled DC solve
@@ -291,7 +290,7 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 
     # Check if linear solution is good enough
     resid = zeros(n)
-    fast_rebuild!(ws, u0, 0.0)
+    fast_rebuild!(ws, cs, u0, 0.0)
     mul!(resid, cs.G, u0)
     resid .-= ws.dctx.b
     if norm(resid) < abstol
@@ -300,14 +299,14 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 
     # Need Newton iteration with compiled evaluation
     function residual!(F, u, p)
-        fast_rebuild!(ws, u, 0.0)
+        fast_rebuild!(ws, cs, u, 0.0)
         mul!(F, cs.G, u)
         F .-= ws.dctx.b
         return nothing
     end
 
     function jacobian!(J, u, p)
-        fast_rebuild!(ws, u, 0.0)
+        fast_rebuild!(ws, cs, u, 0.0)
         copyto!(J, cs.G)
         return nothing
     end
@@ -426,7 +425,7 @@ end
 #==============================================================================#
 
 """
-    solve_ac(sys::MNASystem, freqs::AbstractVector{<:Real}) -> ACSolution
+    solve_ac(sys::MNAData, freqs::AbstractVector{<:Real}) -> ACSolution
 
 Solve AC small-signal analysis at given frequencies.
 
@@ -435,7 +434,7 @@ For each frequency f, solves: (G + j*2π*f*C) * x = b
 This linearizes around the DC operating point, so DC analysis
 should be performed first if the circuit contains nonlinear elements.
 """
-function solve_ac(sys::MNASystem, freqs::AbstractVector{<:Real})
+function solve_ac(sys::MNAData, freqs::AbstractVector{<:Real})
     n = system_size(sys)
     nf = length(freqs)
 
@@ -455,11 +454,11 @@ function solve_ac(sys::MNASystem, freqs::AbstractVector{<:Real})
 end
 
 """
-    solve_ac(sys::MNASystem; fstart, fstop, points_per_decade) -> ACSolution
+    solve_ac(sys::MNAData; fstart, fstop, points_per_decade) -> ACSolution
 
 Solve AC analysis with logarithmically spaced frequencies.
 """
-function solve_ac(sys::MNASystem; fstart::Real, fstop::Real, points_per_decade::Int=10)
+function solve_ac(sys::MNAData; fstart::Real, fstop::Real, points_per_decade::Int=10)
     # Generate log-spaced frequencies
     decades = log10(fstop / fstart)
     n_points = max(2, round(Int, decades * points_per_decade) + 1)
@@ -472,7 +471,7 @@ end
 #==============================================================================#
 
 """
-    make_ode_function(sys::MNASystem) -> ODEFunction
+    make_ode_function(sys::MNAData) -> ODEFunction
 
 Create an ODEFunction for use with DifferentialEquations.jl.
 
@@ -486,7 +485,7 @@ This returns an ODEFunction with mass_matrix = C.
 - For constant C with nonzero diagonal, use implicit ODE solver
 - For time-dependent sources, use `make_ode_function_timed` instead
 """
-function make_ode_function(sys::MNASystem)
+function make_ode_function(sys::MNAData)
     G = sys.G
     C = sys.C
     b = sys.b
@@ -527,7 +526,7 @@ function make_ode_function(sys::MNASystem)
 end
 
 """
-    make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+    make_ode_problem(sys::MNAData, tspan::Tuple{Real,Real};
                      u0::Union{Nothing,Vector{Float64}}=nothing) -> NamedTuple
 
 Create an ODEProblem-like structure for transient analysis.
@@ -554,11 +553,11 @@ sol = solve(prob, Rodas5())
 ```
 
 # Arguments
-- `sys::MNASystem`: The assembled MNA system
+- `sys::MNAData`: The assembled MNA system
 - `tspan`: Time span (tstart, tstop)
 - `u0`: Initial condition (default: DC solution)
 """
-function make_ode_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+function make_ode_problem(sys::MNAData, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
@@ -585,7 +584,7 @@ end
 # NOTE: Builder-based make_ode_problem removed - use MNACircuit + ODEProblem instead
 
 """
-    make_dae_function(sys::MNASystem) -> NamedTuple
+    make_dae_function(sys::MNAData) -> NamedTuple
 
 Create a DAE function for use with DAE solvers (e.g., Sundials IDA).
 
@@ -611,7 +610,7 @@ prob = DAEProblem(dae_data.f!, dae_data.du0, dae_data.u0, tspan;
 sol = solve(prob, IDA())
 ```
 """
-function make_dae_function(sys::MNASystem)
+function make_dae_function(sys::MNAData)
     G = sys.G
     C = sys.C
     b = sys.b
@@ -660,20 +659,20 @@ function make_dae_function(sys::MNASystem)
 end
 
 """
-    make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+    make_dae_problem(sys::MNAData, tspan::Tuple{Real,Real};
                      u0::Union{Nothing,Vector{Float64}}=nothing) -> NamedTuple
 
 Create a DAEProblem-like structure for transient analysis with DAE solvers.
 
 # Arguments
-- `sys::MNASystem`: The assembled MNA system
+- `sys::MNAData`: The assembled MNA system
 - `tspan`: Time span (tstart, tstop)
 - `u0`: Initial condition (default: DC solution)
 
 # Returns
 NamedTuple with fields for DAEProblem construction.
 """
-function make_dae_problem(sys::MNASystem, tspan::Tuple{Real,Real};
+function make_dae_problem(sys::MNAData, tspan::Tuple{Real,Real};
                           u0::Union{Nothing,Vector{Float64}}=nothing)
     n = system_size(sys)
 
@@ -740,9 +739,9 @@ export alter
 #==============================================================================#
 
 """
-    eval_circuit(builder, params, spec; t=0.0, u=nothing) -> MNASystem
+    eval_circuit(builder, params, spec; t=0.0, u=nothing) -> MNAData
 
-Out-of-place circuit evaluation that returns a new MNASystem.
+Out-of-place circuit evaluation that returns a new MNAData.
 
 This is the GPU-compatible API that builds fresh matrices each call.
 For ensemble GPU solving and parameter sweeps, this avoids mutation
@@ -790,12 +789,12 @@ export eval_circuit
 #==============================================================================#
 
 """
-    check_singular(sys::MNASystem) -> Bool
+    check_singular(sys::MNAData) -> Bool
 
 Check if the G matrix is singular (no DC solution possible).
 Returns true if singular.
 """
-function check_singular(sys::MNASystem)
+function check_singular(sys::MNAData)
     n = system_size(sys)
     n == 0 && return false
     try
@@ -807,12 +806,12 @@ function check_singular(sys::MNASystem)
 end
 
 """
-    condition_number(sys::MNASystem) -> Float64
+    condition_number(sys::MNAData) -> Float64
 
 Compute the condition number of the G matrix.
 Large values indicate ill-conditioning.
 """
-function condition_number(sys::MNASystem)
+function condition_number(sys::MNAData)
     n = system_size(sys)
     n == 0 && return 1.0
     # For sparse matrices, compute via SVD of small systems or estimate
@@ -836,7 +835,7 @@ end
     MNASolutionAccessor
 
 Provides symbolic access to ODE solution via node names.
-Wraps an ODESolution with the MNASystem for name resolution.
+Wraps an ODESolution with the MNAData for name resolution.
 
 # Example
 ```julia
@@ -848,7 +847,7 @@ acc[:out]  # Voltage trajectory at node :out
 """
 struct MNASolutionAccessor{S}
     sol::S
-    sys::MNASystem
+    sys::MNAData
 end
 
 export MNASolutionAccessor
@@ -930,11 +929,11 @@ sol[s.vcc]     # Accesses node :vcc
 ```
 """
 struct ScopedSystem
-    sys::MNASystem
+    sys::MNAData
     path::Vector{Symbol}
 end
 
-ScopedSystem(sys::MNASystem) = ScopedSystem(sys, Symbol[])
+ScopedSystem(sys::MNAData) = ScopedSystem(sys, Symbol[])
 
 function Base.getproperty(s::ScopedSystem, name::Symbol)
     if name === :sys || name === :path
@@ -963,11 +962,11 @@ function voltage(acc::MNASolutionAccessor, ref::NodeRef, t::Real)
 end
 
 """
-    scope(sys::MNASystem) -> ScopedSystem
+    scope(sys::MNAData) -> ScopedSystem
 
 Create a scoped view of the system for hierarchical node access.
 """
-scope(sys::MNASystem) = ScopedSystem(sys)
+scope(sys::MNAData) = ScopedSystem(sys)
 
 export scope
 
@@ -1124,9 +1123,9 @@ function system_size(circuit::MNACircuit)
 end
 
 """
-    assemble!(circuit::MNACircuit) -> MNASystem
+    assemble!(circuit::MNACircuit) -> MNAData
 
-Build and assemble the circuit into an MNASystem.
+Build and assemble the circuit into an MNAData.
 
 This is useful for accessing node names and solution accessors after simulation.
 Note that time-dependent sources are evaluated at t=0.
@@ -1225,7 +1224,7 @@ function with_temp(circuit::MNACircuit, temp::Real)
 end
 
 """
-    eval_circuit(circuit::MNACircuit; t=0.0, u=nothing) -> MNASystem
+    eval_circuit(circuit::MNACircuit; t=0.0, u=nothing) -> MNAData
 
 Out-of-place evaluation from MNACircuit wrapper.
 """
@@ -1262,7 +1261,7 @@ function detect_differential_vars(circuit::MNACircuit; ctx::Union{MNAContext, No
 end
 
 """
-    detect_differential_vars(sys::MNASystem) -> BitVector
+    detect_differential_vars(sys::MNAData) -> BitVector
 
 Determine which variables are differential from the C matrix structure.
 
@@ -1274,7 +1273,7 @@ Note: Sparse matrices can contain explicit zeros when constructed from COO forma
 For example, a VA device without ddt() terms may stamp 0.0 into C. We must ignore
 these to correctly distinguish algebraic vs differential variables for IDA.
 """
-function detect_differential_vars(sys::MNASystem)
+function detect_differential_vars(sys::MNAData)
     n = system_size(sys)
     C = sys.C
     diff_vars = falses(n)
@@ -1333,40 +1332,28 @@ function SciMLBase.DAEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real};
                                u0=nothing, du0=nothing, explicit_jacobian::Bool=true, kwargs...)
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
+    # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
 
     # Detect differential variables using the same detection context
     diff_vars = detect_differential_vars(circuit; ctx=ctx)
     n = length(diff_vars)
 
-    # Get initial conditions via DC solve using the SAME detection context
-    # This ensures u0 has exactly the same size as diff_vars.
-    # We use dc_solve_with_ctx which does proper Newton iteration using
-    # the pre-built detection context structure.
-    # Note: CedarDCOp (the default initializealg in tran!) will refine this and
-    # handle du0 properly during IDA initialization.
+    # Compile circuit structure using the detection context
+    # Structure (sparsity pattern) is correct from detection passes
+    # CedarDCOp will compute the actual DC operating point during solve()
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
+    ws = create_workspace(cs; ctx=ctx)
+
+    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
     if u0 === nothing
-        dc_spec = with_mode(circuit.spec, :dcop)
-        u0, _ = dc_solve_with_ctx(circuit.builder, circuit.params, dc_spec, ctx)
+        u0 = zeros(n)
     end
-    # du0 = zeros is fine; CedarDCOp sets du0=0 and lets IDADefaultInit handle it
     if du0 === nothing
         du0 = zeros(n)
     end
 
-    # Compile circuit structure using the same detection context
-    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
-    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
-    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
-    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
-    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
-    reset_for_restamping!(ctx)
-    circuit.builder(circuit.params, circuit.spec, 0.0; x=u0, ctx=ctx)
-    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
-    ws = create_workspace(cs; ctx=ctx)
-
-    # Initialize workspace at t=0 with the DC operating point
-    # This is required for IDA's initialization to work properly
+    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
     fast_rebuild!(ws, u0, 0.0)
 
     residual! = make_workspace_dae_residual()
@@ -1406,39 +1393,28 @@ The circuit is automatically compiled for ~10x faster evaluation.
 - `tspan`: Time span for simulation `(t0, tf)`
 
 # Keyword Arguments
-- `u0`: Initial state (default: DC solution)
+- `u0`: Initial state (default: computed by CedarDCOp during solve)
 
 # Solver Recommendations
 - Use `Rodas5P()` - fast Rosenbrock method, handles singular mass matrices
 - Use `RadauIIA5()` - fully implicit Runge-Kutta, very stable
 - Use `QNDF()` or `FBDF()` - BDF methods, good for stiff problems
 
-# Important: Constant Mass Matrix
-The mass matrix (C) is evaluated once at the initial DC operating point and
-remains constant during integration. This means:
-
-- **Fixed capacitors**: Work correctly - capacitance doesn't change
-- **Voltage-dependent capacitors** (junction capacitance, nonlinear caps):
-  Will be approximated using the initial capacitance value
-
-For circuits with voltage-dependent capacitance, use `DAEProblem` instead.
-The DAE formulation rebuilds both G and C matrices at each Newton iteration,
-correctly handling nonlinear capacitance.
+# Mass Matrix and Voltage-Dependent Capacitors
+The mass matrix C is constant during integration. Voltage-dependent capacitors
+(junction capacitance, nonlinear caps) are automatically handled via charge
+formulation - the detection pass rewrites `ddt(C(V)*V)` as `ddt(Q(V))` where
+Q is the charge state variable.
 
 # Example
 ```julia
-# Simple RC circuit with fixed capacitor
 circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
 prob = ODEProblem(circuit, (0.0, 1e-3))
 sol = solve(prob, Rodas5P())
-
-# For circuits with voltage-dependent capacitance, use DAEProblem:
-prob_dae = DAEProblem(circuit, (0.0, 1e-3))
-sol = solve(prob_dae, IDA())  # Correctly handles nonlinear C(V)
 ```
 
 # See Also
-- `DAEProblem(circuit, tspan)` - Recommended for nonlinear circuits with IDA
+- `DAEProblem(circuit, tspan)` - Alternative using Sundials IDA
 """
 function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; u0=nothing, kwargs...)
     builder = circuit.builder
@@ -1447,52 +1423,46 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
 
     # First run multi-pass detection to get consistent results
     # This ctx will be reused for ALL subsequent operations to ensure consistency
+    # Detection uses random x values to correctly identify voltage-dependent capacitors
     ctx = build_with_detection(circuit)
+    n = system_size(ctx)
 
-    # Get initial conditions via DC solve using the SAME detection context
-    # This ensures u0 has exactly the same size as the mass matrix.
-    if u0 === nothing
-        dc_spec = with_mode(base_spec, :dcop)
-        u0, _ = dc_solve_with_ctx(builder, params, dc_spec, ctx)
-    end
-
-    # Compile circuit structure using the same detection context
-    # IMPORTANT: Use u0 (the DC operating point) instead of ZERO_VECTOR!
-    # At x=0, reactive branches like ddt(Q(V)) may return scalar 0.0 instead of
-    # Duals with ContributionTag, because Q(0) is constant. This causes has_reactive=false
-    # and stamp_C! to not be called. But during fast_rebuild! with x=u0, the reactive
-    # branches produce Duals and stamp_C! IS called, causing structure mismatch.
-    reset_for_restamping!(ctx)
-    builder(params, base_spec, 0.0; x=u0, ctx=ctx)
+    # Compile circuit structure using the detection context
+    # Structure (sparsity pattern) is correct from detection passes
+    # Note: Voltage-dependent capacitors are rewritten as charge formulation,
+    # so the C matrix is constant regardless of operating point.
+    # CedarDCOp will compute the actual DC operating point during solve()
     cs = compile_structure(builder, params, base_spec; ctx=ctx)
     ws = create_workspace(cs; ctx=ctx)
 
-    # Initialize workspace at t=0 with the DC operating point
+    # Use zeros as placeholder - CedarDCOp will compute actual DC solution
+    if u0 === nothing
+        u0 = zeros(n)
+    end
+
+    # Initialize workspace at t=0 (values will be updated by CedarDCOp)
     fast_rebuild!(ws, u0, 0.0)
 
     # RHS function using EvalWorkspace with DirectStampContext
     # This is the zero-allocation path that preserves the detection cache
+    # The workspace is passed as p for CedarDCOp initialization
     function rhs!(du, u, p, t)
-        fast_rebuild!(ws, u, real_time(t))
+        fast_rebuild!(p, u, real_time(t))
         # du = b - G*u
-        mul!(du, cs.G, u)
+        mul!(du, p.structure.G, u)
         du .*= -1
-        du .+= ws.dctx.b
+        du .+= p.dctx.b
         return nothing
     end
 
     # Jacobian using EvalWorkspace
     function jac!(J, u, p, t)
-        fast_rebuild!(ws, u, real_time(t))
-        copyto!(J, -cs.G)
+        fast_rebuild!(p, u, real_time(t))
+        copyto!(J, -p.structure.G)
         return nothing
     end
 
-    # Note: Mass matrix cs.C is evaluated at the initial DC operating point and
-    # remains constant during integration. For voltage-dependent capacitance
-    # (junction capacitance), use DAEProblem instead - it rebuilds the C matrix
-    # at each step via fast_rebuild!.
-
+    # Mass matrix C is constant - voltage-dependent capacitors use charge formulation
     f = SciMLBase.ODEFunction(
         rhs!;
         mass_matrix = cs.C,
@@ -1500,7 +1470,8 @@ function SciMLBase.ODEProblem(circuit::MNACircuit, tspan::Tuple{<:Real,<:Real}; 
         jac_prototype = -cs.G
     )
 
-    return SciMLBase.ODEProblem(f, u0, Float64.(tspan); kwargs...)
+    # Pass workspace as p for CedarDCOp initialization
+    return SciMLBase.ODEProblem(f, u0, Float64.(tspan), ws; kwargs...)
 end
 
 # NOTE: make_nonlinear_dae_* removed - use MNACircuit + DAEProblem instead
@@ -1561,13 +1532,16 @@ end
 #==============================================================================#
 
 """
-    compile(circuit::MNACircuit) -> PrecompiledCircuit
+    compile(circuit::MNACircuit) -> EvalWorkspace
 
 Compile a circuit for fast transient evaluation.
 
 This is called automatically by `DAEProblem` and `tran!`, so you typically
 don't need to call it directly. However, you can call it explicitly for
 benchmarking or to reuse the compiled structure across multiple simulations.
+
+Returns an `EvalWorkspace` containing a `CompiledStructure` with the fixed
+sparsity pattern and a `DirectStampContext` for zero-allocation stamping.
 
 # Performance
 Compilation discovers the circuit structure once, then reuses it for every
@@ -1577,43 +1551,29 @@ Newton iteration. This provides ~10x speedup for nonlinear transient analysis.
 The circuit structure (nodes, currents, which matrix entries exist) must be
 constant. Only values can change based on operating point. This is enforced
 by assertions at runtime.
+
+# Example
+```julia
+circuit = MNACircuit(build_rc; R=1000.0, C=1e-6)
+ws = compile(circuit)
+
+# Access compiled structure
+system_size(ws)  # Number of unknowns
+ws.structure.G   # Conductance matrix
+ws.structure.C   # Capacitance matrix
+
+# Fast evaluation
+fast_rebuild!(ws, u, t)
+fast_residual!(resid, du, u, ws, t)
+```
 """
 function compile(circuit::MNACircuit)
-    return compile_circuit(circuit.builder, circuit.params, circuit.spec)
+    ctx = build_with_detection(circuit)
+    cs = compile_structure(circuit.builder, circuit.params, circuit.spec; ctx=ctx)
+    return create_workspace(cs; ctx=ctx)
 end
 
 export compile
-
-"""
-    make_compiled_dae_residual(pc::PrecompiledCircuit) -> Function
-
-Create a fast DAE residual function using precompiled circuit.
-
-This is ~10x faster than the uncompiled version because it:
-1. Reuses the fixed sparsity pattern
-2. Updates matrix values in-place
-3. Avoids allocating new MNAContext each iteration
-"""
-function make_compiled_dae_residual(pc::PrecompiledCircuit)
-    function dae_residual!(resid, du, u, p, t)
-        fast_residual!(resid, du, u, pc, real_time(t))
-        return nothing
-    end
-    return dae_residual!
-end
-
-"""
-    make_compiled_dae_jacobian(pc::PrecompiledCircuit) -> Function
-
-Create a fast DAE Jacobian function using precompiled circuit.
-"""
-function make_compiled_dae_jacobian(pc::PrecompiledCircuit)
-    function dae_jac!(J, du, u, p, gamma, t)
-        fast_jacobian!(J, du, u, pc, gamma, real_time(t))
-        return nothing
-    end
-    return dae_jac!
-end
 
 #==============================================================================#
 # EvalWorkspace-based DAE Functions (Zero-Allocation Path)

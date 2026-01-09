@@ -354,7 +354,7 @@ sweepify(x::SweepLike) = x
 sweepify(x) = Sweep(x)
 
 
-using .MNA: MNACircuit, MNASystem, assemble!, solve_dc, make_ode_problem
+using .MNA: MNACircuit, MNAData, assemble!, solve_dc, make_ode_problem
 
 """
     CircuitSweep
@@ -525,13 +525,11 @@ function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
 end
 
 # ODE solver dispatch (Rodas5P, etc.)
-# Uses CheckInit() since we already have a valid DC operating point as u0.
-# CheckInit validates that the initial conditions are consistent with the mass matrix.
-# The u0 is computed via dc_solve_core (shared with CedarDCOp and dc!) ensuring
-# consistent initialization across all solver types.
+# Uses CedarDCOp for consistent initialization across both ODE and DAE paths.
+# CedarDCOp performs a full DC solve to ensure proper operating point.
 function _tran_dispatch(circuit::MNA.MNACircuit, tspan::Tuple{<:Real,<:Real},
                         solver::SciMLBase.AbstractODEAlgorithm;
-                        abstol=1e-10, reltol=1e-8, initializealg=OrdinaryDiffEq.CheckInit(), kwargs...)
+                        abstol=1e-10, reltol=1e-8, initializealg=MNA.CedarDCOp(), kwargs...)
     prob = SciMLBase.ODEProblem(circuit, tspan)
     return SciMLBase.solve(prob, solver; abstol=abstol, reltol=reltol, initializealg=initializealg, kwargs...)
 end

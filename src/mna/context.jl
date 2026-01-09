@@ -7,7 +7,7 @@
 # - Node/current allocation: get_node!, alloc_current!
 #==============================================================================#
 
-export MNAContext, MNASystem
+export MNAContext, MNAData
 export MNAIndex, NodeIndex, CurrentIndex, ChargeIndex, GroundIndex
 export ZeroVector, ZERO_VECTOR
 export get_node!, alloc_current!, get_current_idx, has_current, resolve_index

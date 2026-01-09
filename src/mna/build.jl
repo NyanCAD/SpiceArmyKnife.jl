@@ -8,15 +8,18 @@
 using SparseArrays
 using LinearAlgebra
 
-export MNASystem, assemble!, assemble_G, assemble_C, get_rhs
+export MNAData, assemble!, assemble_G, assemble_C, get_rhs
 
 """
-    MNASystem{T}
+    MNAData{T}
 
-Assembled MNA system ready for analysis.
+Assembled MNA data (matrices and metadata) ready for analysis.
 
 Contains the sparse G and C matrices and RHS vector b representing:
     G*x + C*dx/dt = b
+
+Note: Previously named `MNAData`. The name was changed to avoid confusion with
+SciML's "System" types. `MNAData` is kept as a deprecated alias.
 
 # Fields
 - `G::SparseMatrixCSC{T,Int}`: Conductance matrix (resistive/algebraic part)
@@ -36,7 +39,7 @@ The solution vector x is ordered as:
 - **AC**: Solve (G + jωC)*x = b for each frequency ω
 - **Transient**: Form ODEProblem with mass matrix C
 """
-struct MNASystem{T<:Real}
+struct MNAData{T<:Real}
     G::SparseMatrixCSC{T,Int}
     C::SparseMatrixCSC{T,Int}
     b::Vector{T}
@@ -48,17 +51,17 @@ struct MNASystem{T<:Real}
     n_charges::Int
 end
 
-# Backwards-compatible constructor (no charges)
-function MNASystem{T}(G, C, b, node_names, current_names, n_nodes, n_currents) where {T<:Real}
-    MNASystem{T}(G, C, b, node_names, current_names, Symbol[], n_nodes, n_currents, 0)
+# Constructor without charges (for backwards compat with older callers)
+function MNAData{T}(G, C, b, node_names, current_names, n_nodes, n_currents) where {T<:Real}
+    MNAData{T}(G, C, b, node_names, current_names, Symbol[], n_nodes, n_currents, 0)
 end
 
 """
-    system_size(sys::MNASystem) -> Int
+    system_size(data::MNAData) -> Int
 
 Return the total system size (number of unknowns).
 """
-system_size(sys::MNASystem) = sys.n_nodes + sys.n_currents + sys.n_charges
+system_size(data::MNAData) = data.n_nodes + data.n_currents + data.n_charges
 
 #==============================================================================#
 # Matrix Assembly
@@ -176,10 +179,10 @@ function get_rhs(ctx::MNAContext)
 end
 
 """
-    assemble!(ctx::MNAContext) -> MNASystem
+    assemble!(ctx::MNAContext) -> MNAData
 
 Assemble the complete MNA system from the context.
-Returns an MNASystem ready for analysis.
+Returns an MNAData ready for analysis.
 
 # Note on C Matrix Stamping
 C matrix stamping is determined by TYPE, not VALUE. Devices with ddt() terms
@@ -203,7 +206,7 @@ function assemble!(ctx::MNAContext)
 
     ctx.finalized = true
 
-    return MNASystem{Float64}(
+    return MNAData{Float64}(
         G, C, b,
         copy(ctx.node_names),
         copy(ctx.current_names),
@@ -219,54 +222,54 @@ end
 #==============================================================================#
 
 """
-    node_voltage_indices(sys::MNASystem) -> UnitRange{Int}
+    node_voltage_indices(sys::MNAData) -> UnitRange{Int}
 
 Return the indices in the solution vector corresponding to node voltages.
 """
-node_voltage_indices(sys::MNASystem) = 1:sys.n_nodes
+node_voltage_indices(sys::MNAData) = 1:sys.n_nodes
 
 """
-    current_variable_indices(sys::MNASystem) -> UnitRange{Int}
+    current_variable_indices(sys::MNAData) -> UnitRange{Int}
 
 Return the indices in the solution vector corresponding to current variables.
 """
-current_variable_indices(sys::MNASystem) = (sys.n_nodes + 1):(sys.n_nodes + sys.n_currents)
+current_variable_indices(sys::MNAData) = (sys.n_nodes + 1):(sys.n_nodes + sys.n_currents)
 
 """
-    charge_variable_indices(sys::MNASystem) -> UnitRange{Int}
+    charge_variable_indices(sys::MNAData) -> UnitRange{Int}
 
 Return the indices in the solution vector corresponding to charge variables.
 """
-charge_variable_indices(sys::MNASystem) = (sys.n_nodes + sys.n_currents + 1):(sys.n_nodes + sys.n_currents + sys.n_charges)
+charge_variable_indices(sys::MNAData) = (sys.n_nodes + sys.n_currents + 1):(sys.n_nodes + sys.n_currents + sys.n_charges)
 
 """
-    get_node_index(sys::MNASystem, name::Symbol) -> Int
+    get_node_index(sys::MNAData, name::Symbol) -> Int
 
 Get the solution vector index for a node by name.
 Returns 0 if the node is ground.
 """
-function get_node_index(sys::MNASystem, name::Symbol)
+function get_node_index(sys::MNAData, name::Symbol)
     (name === :gnd || name === Symbol("0")) && return 0
     idx = findfirst(==(name), sys.node_names)
     return idx === nothing ? error("Unknown node: $name") : idx
 end
 
 """
-    get_current_index(sys::MNASystem, name::Symbol) -> Int
+    get_current_index(sys::MNAData, name::Symbol) -> Int
 
 Get the solution vector index for a current variable by name.
 """
-function get_current_index(sys::MNASystem, name::Symbol)
+function get_current_index(sys::MNAData, name::Symbol)
     idx = findfirst(==(name), sys.current_names)
     return idx === nothing ? error("Unknown current: $name") : sys.n_nodes + idx
 end
 
 """
-    get_charge_index(sys::MNASystem, name::Symbol) -> Int
+    get_charge_index(sys::MNAData, name::Symbol) -> Int
 
 Get the solution vector index for a charge variable by name.
 """
-function get_charge_index(sys::MNASystem, name::Symbol)
+function get_charge_index(sys::MNAData, name::Symbol)
     idx = findfirst(==(name), sys.charge_names)
     return idx === nothing ? error("Unknown charge: $name") : sys.n_nodes + sys.n_currents + idx
 end
@@ -275,17 +278,17 @@ end
 # Pretty Printing
 #==============================================================================#
 
-function Base.show(io::IO, sys::MNASystem)
-    print(io, "MNASystem(")
+function Base.show(io::IO, sys::MNAData)
+    print(io, "MNAData(")
     print(io, "size=$(system_size(sys)), ")
     print(io, "G_nnz=$(nnz(sys.G)), ")
     print(io, "C_nnz=$(nnz(sys.C))")
     print(io, ")")
 end
 
-function Base.show(io::IO, ::MIME"text/plain", sys::MNASystem{T}) where T
+function Base.show(io::IO, ::MIME"text/plain", sys::MNAData{T}) where T
     n = system_size(sys)
-    println(io, "MNASystem{$T}:")
+    println(io, "MNAData{$T}:")
     println(io, "  System size: $n")
     println(io, "  Voltage nodes: $(sys.n_nodes)")
     println(io, "  Current variables: $(sys.n_currents)")
@@ -346,21 +349,21 @@ function show_matrix(io::IO, M::SparseMatrixCSC, names::Vector{Symbol}=Symbol[])
 end
 
 """
-    show_G(sys::MNASystem)
+    show_G(sys::MNAData)
 
 Display the G matrix (for debugging small circuits).
 """
-function show_G(sys::MNASystem)
+function show_G(sys::MNAData)
     all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
     show_matrix(stdout, sys.G, all_names)
 end
 
 """
-    show_C(sys::MNASystem)
+    show_C(sys::MNAData)
 
 Display the C matrix (for debugging small circuits).
 """
-function show_C(sys::MNASystem)
+function show_C(sys::MNAData)
     all_names = vcat(sys.node_names, sys.current_names, sys.charge_names)
     show_matrix(stdout, sys.C, all_names)
 end

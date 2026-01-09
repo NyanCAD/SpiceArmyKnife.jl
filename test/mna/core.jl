@@ -17,7 +17,7 @@ using SparseArrays
 using SciMLBase: ReturnCode
 
 # Import MNA module - use explicit imports to avoid conflicts with CedarSim types
-using CedarSim.MNA: MNAContext, MNASystem, get_node!, alloc_current!, resolve_index
+using CedarSim.MNA: MNAContext, MNAData, get_node!, alloc_current!, resolve_index
 using CedarSim.MNA: alloc_internal_node!, is_internal_node, n_internal_nodes
 using CedarSim.MNA: stamp_G!, stamp_C!, stamp_b!, stamp_conductance!, stamp_capacitance!
 using CedarSim.MNA: stamp!, system_size
@@ -790,7 +790,7 @@ using VerilogAParser
         show(io, sol)
         show(io, MIME"text/plain"(), sol)
 
-        # Also test MNASystem display
+        # Also test MNAData display
         ctx2 = circuit.builder(circuit.params, circuit.spec, 0.0)
         sys = assemble!(ctx2)
         show(io, sys)
@@ -1177,7 +1177,7 @@ using VerilogAParser
 
         # Test out-of-place eval_circuit
         sys = eval_circuit(circuit)
-        @test sys isa MNASystem
+        @test sys isa MNAData
     end
 
     @testset "MNACircuit with RC circuit" begin
@@ -1647,7 +1647,7 @@ using VerilogAParser
         sys = eval_circuit(build_temp_dependent,
                           (Vcc=10.0, R0=1000.0, tc=0.004, R2=1000.0),
                           MNASpec(temp=27.0))
-        @test sys isa MNASystem
+        @test sys isa MNAData
         @test sys.n_nodes == 2
     end
 

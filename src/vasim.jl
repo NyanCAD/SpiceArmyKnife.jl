@@ -1740,11 +1740,14 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
     # If a short circuit is detected, alias to external node instead of allocating
     # Internal node names need to be unique per instance
     # We use _mna_instance_ as a prefix to create names like "xu1_xm_PSP103VA_GP"
+    #
+    # OPTIMIZATION: Use component-based alloc_internal_node!(ctx, base_name, instance_name)
+    # For DirectStampContext, this avoids Symbol interpolation entirely (counter-based access)
+    # For MNAContext, the function builds the full name from components
     internal_node_alloc = Expr(:block)
     for (i, (int_sym, int_param)) in enumerate(zip(internal_nodes, internal_node_params))
-        # Create runtime node name with conditional prefix (empty prefix -> no underscore)
-        alloc_name_suffix = QuoteNode(Symbol(symname, "_", int_sym))
-        alloc_name_expr = :(_mna_instance_ == Symbol("") ? $alloc_name_suffix : Symbol(_mna_instance_, "_", $alloc_name_suffix))
+        # Base name is the device type + internal node name (compile-time constant)
+        base_name = QuoteNode(Symbol(symname, "_", int_sym))
 
         if haskey(short_circuits, int_sym)
             # This internal node can be aliased to an external node when condition is true
@@ -1761,17 +1764,17 @@ function generate_mna_stamp_method_nterm(symname, ps, port_args, internal_nodes,
                     :($int_param = if !(iszero($condition))
                         $ext_param  # Alias to external node
                     else
-                        CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)
+                        CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)
                     end))
             else
                 # External node not found in ports, fall back to regular allocation
                 push!(internal_node_alloc.args,
-                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)))
+                    :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
             end
         else
             # Regular allocation (no short circuit detected)
             push!(internal_node_alloc.args,
-                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $alloc_name_expr)))
+                :($int_param = CedarSim.MNA.alloc_internal_node!(ctx, $base_name, _mna_instance_)))
         end
     end
 

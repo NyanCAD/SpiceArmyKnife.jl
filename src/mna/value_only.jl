@@ -74,6 +74,10 @@ mutable struct DirectStampContext
     # Charge detection cache
     charge_is_vdep::Vector{Bool}
     charge_detection_pos::Int
+
+    # Internal node indices for counter-based allocation (avoids Symbol interpolation)
+    internal_node_indices::Vector{Int}
+    internal_node_pos::Int
 end
 
 """
@@ -92,6 +96,10 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
     n_C = length(ctx.C_V)
     n_b_deferred = length(ctx.b_V)
 
+    # Collect internal node indices in allocation order for counter-based access
+    # This avoids Symbol interpolation overhead during restamping
+    internal_node_indices = findall(ctx.internal_node_flags)
+
     DirectStampContext(
         ctx.node_to_idx,
         ctx.n_nodes,
@@ -107,7 +115,9 @@ function create_direct_stamp_context(ctx::MNAContext, G_nzval::Vector{Float64},
         1, 1, 1, 1, 1,  # positions
         n_G, n_C, n_b_deferred,
         copy(ctx.charge_is_vdep),
-        1
+        1,
+        internal_node_indices,
+        1  # internal_node_pos
     )
 end
 
@@ -151,6 +161,7 @@ Reset counters and zero sparse matrix values for a new iteration.
     dctx.current_pos = 1
     dctx.charge_pos = 1
     dctx.charge_detection_pos = 1
+    dctx.internal_node_pos = 1
 
     # Zero sparse matrices and b vector
     fill!(dctx.G_nzval, 0.0)
@@ -173,7 +184,20 @@ end
 @inline get_node!(dctx::DirectStampContext, idx::Int) = idx
 
 @inline function alloc_internal_node!(dctx::DirectStampContext, name::Symbol)::Int
-    return dctx.node_to_idx[name]
+    # Counter-based access - ignores name to avoid dict lookup overhead
+    # The name is still passed from the call site (unavoidable with current codegen)
+    # but we don't use it. This eliminates the dict lookup cost.
+    pos = dctx.internal_node_pos
+    dctx.internal_node_pos = pos + 1
+    return dctx.internal_node_indices[pos]
+end
+
+# Component-based version: avoids Symbol interpolation at call site
+# For DirectStampContext, we use counter-based access and ignore the components
+@inline function alloc_internal_node!(dctx::DirectStampContext, base_name::Symbol, instance_name::Symbol)::Int
+    pos = dctx.internal_node_pos
+    dctx.internal_node_pos = pos + 1
+    return dctx.internal_node_indices[pos]
 end
 
 @inline alloc_internal_node!(dctx::DirectStampContext, name::String) = alloc_internal_node!(dctx, Symbol(name))

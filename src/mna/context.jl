@@ -451,6 +451,13 @@ end
 
 alloc_internal_node!(ctx::MNAContext, name::String) = alloc_internal_node!(ctx, Symbol(name))
 
+# Component-based version: builds Symbol from instance_name and base_name
+# For MNAContext, we concatenate: instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+function alloc_internal_node!(ctx::MNAContext, base_name::Symbol, instance_name::Symbol)::Int
+    name = instance_name == Symbol("") ? base_name : Symbol(instance_name, "_", base_name)
+    return alloc_internal_node!(ctx, name)
+end
+
 """
     is_internal_node(ctx::MNAContext, idx::Int) -> Bool
 

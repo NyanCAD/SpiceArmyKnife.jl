@@ -5,7 +5,8 @@
 - **Julia is NOT pre-installed** - install juliaup first:
   - Run: `curl -fsSL https://install.julialang.org | sh -s -- -y`
   - Then source the profile: `. ~/.bashrc`
-  - Set Julia 1.11 as default: `~/.juliaup/bin/juliaup default 1.11`
+  - Add Julia 1.11: `~/.juliaup/bin/juliaup add 1.11`
+  - Set as default: `~/.juliaup/bin/juliaup default 1.11`
   - Use `~/.juliaup/bin/julia` to run Julia
 - **Use Julia 1.11** - this is what CI uses and what the Manifest.toml is locked to
   - Julia 1.12 has threading bugs that cause segfaults during artifact downloads
@@ -30,79 +31,77 @@
 
 ### Key MNA Components
 
-- `MNASim`: Parameterized circuit simulation wrapper
-- `MNAContext`: Circuit builder context for stamping components
+- `MNACircuit`: Parameterized circuit simulation wrapper
+- `MNAContext`: Circuit builder context for stamping (structure discovery)
+- `DirectStampContext`: Zero-allocation context for fast restamping during solve
 - `alter()`: Create new simulation with modified parameters
 - `dc!()` / `tran!()`: DC and transient analysis
 - `CircuitSweep`: Parameter sweep over MNA circuits
 
-## MNA Documentation
+See `doc/` for design documents. Check `git log --oneline -20 --name-only` for recently changed files relevant to current work.
 
-Read these files in `doc/` for detailed design information:
+## CI and Testing
 
-| File | Description |
-|------|-------------|
-| `doc/mna_design.md` | **Start here.** Core design decisions, key principles, sign conventions, and why we're migrating from DAECompiler |
-| `doc/mna_architecture.md` | Detailed architecture: out-of-place evaluation, explicit parameter passing, GPU compatibility design |
-| `doc/mna_ad_stamping.md` | Advanced: how to use ForwardDiff to extract Jacobians and handle Verilog-A contributions without AST analysis |
-| `doc/mna_changelog.md` | Migration progress tracker - shows which phases are complete and what's remaining |
+### Workflow
 
-## Testing
+1. **Sanity check** - run the specific test file for what you changed
+2. **Commit and push** - CI runs `test-core` + `test-integration` in parallel
+3. **Run full tests locally** - `all` tests + benchmarks while CI runs
 
-Run MNA tests directly:
+### Commands
+
 ```bash
-~/.juliaup/bin/julia --project=. -e 'using Pkg; Pkg.test(test_args=["mna"])'
+# Specific test file (sanity check)
+~/.juliaup/bin/julia --project=test test/mna/core.jl
+
+# All tests (core + integration)
+~/.juliaup/bin/julia --project=test test/runtests.jl all
+
+# Benchmarks
+~/.juliaup/bin/julia --project=. benchmarks/vacask/run_benchmarks.jl
+
+# Parser tests
+~/.juliaup/bin/julia --project=SpectreNetlistParser.jl -e 'using Pkg; Pkg.test()'
+~/.juliaup/bin/julia --project=VerilogAParser.jl -e 'using Pkg; Pkg.test()'
 ```
 
-Or run specific test files directly:
-```bash
-~/.juliaup/bin/julia --project=. test/mna/core.jl    # 297 core MNA tests
-~/.juliaup/bin/julia --project=. test/mna/va.jl      # 49 VA integration tests
-~/.juliaup/bin/julia --project=. test/sweep.jl
-```
+### Test Files
+
+| File | What it tests |
+|------|---------------|
+| `test/mna/core.jl` | MNA stamping, matrix assembly, DC/AC |
+| `test/mna/va.jl` | VA contribution stamping |
+| `test/basic.jl` | SPICE codegen, simple circuits |
+| `test/transients.jl` | PWL/SIN sources |
+| `test/sweep.jl` | Parameter sweeps |
+| `test/mna/vadistiller.jl` | VADistiller models |
+| `test/mna/vadistiller_integration.jl` | Large VA models (BSIM4) |
+| `test/mna/audio_integration.jl` | BJT circuits |
 
 ## Gotchas and Patterns
+
+### Builder Function Signature
+MNA builder functions have signature:
+```julia
+function circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+```
+- `params`: NamedTuple of circuit parameters
+- `spec`: MNASpec with temp and mode
+- `t`: Current time for time-dependent sources
+- `x`: Solution vector for nonlinear devices
+- `ctx`: MNAContext or DirectStampContext (reused across rebuilds)
 
 ### ParamLens Pattern
 SPICE-generated circuits use `ParamLens` for hierarchical parameter access:
 ```julia
-function build_circuit(params, spec)
-    lens = ParamLens(params)
-    # lens.subcircuit(; R=default) merges defaults with overrides
-    p = lens.inner(; R1=1000.0, R2=1000.0)
-    # Use p.R1, p.R2 in stamps...
-end
+lens = ParamLens(params)
+p = lens.inner(; R1=1000.0, R2=1000.0)  # merges defaults with overrides
 ```
 
-The params structure must use `(subcircuit=(params=(...),))` for ParamLens to merge correctly.
+### Verilog-A Gotcha
+Disciplines (electrical, V(), I()) are IMPLICIT in VerilogAParser.
+Do NOT use `include "disciplines.vams"` - causes parser bugs.
 
-### Builder Function Signature
-All MNA builder functions take `(params, spec)`:
-- `params`: NamedTuple of circuit parameters (or convert to ParamLens)
-- `spec`: MNASpec with temp and mode
-
-### Nested Parameter Sweeps
-Use var-strings for nested paths in sweeps:
-```julia
-sweep = ProductSweep(var"inner.params.R1" = 100.0:200.0)
-cs = CircuitSweep(builder, sweep; inner=(params=(R1=100.0,),))
-```
-
-### Phase 4 Status (Complete)
-SPICE codegen now emits MNA `stamp!` calls. Key files:
-- `src/spc/codegen.jl` - Main codegen with `make_mna_circuit()`, `cg_mna_instance!()`
-- `src/spc/interface.jl` - High-level `sp_str` macro generates MNA builders
-- `src/mna/devices.jl` - Device types including time-dependent sources (PWL, SIN)
-
-### Phase 5 Status (Complete)
-VA→MNA integration via `va_str` macro. Key files:
-- `src/vasim.jl` - `make_mna_device()`, `make_mna_module()`, s-dual stamping
-- `src/mna/contrib.jl` - `va_ddt()`, `stamp_current_contribution!()`, `evaluate_contribution()`
-
-**Important:** Disciplines (electrical, V(), I()) are IMPLICIT in VerilogAParser.
-Do NOT use `include "disciplines.vams"` - it causes parser bugs with IOBuffer sources.
-
-Working VA pattern:
 ```julia
 va"""
 module VAResistor(p, n);

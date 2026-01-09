@@ -12,7 +12,7 @@
 
 using CedarSim
 using CedarSim.MNA
-using CedarSim.MNA: CedarUICOp
+using CedarSim.MNA: CedarDCOp
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
@@ -66,10 +66,9 @@ function run_benchmark(solver; dtmax=0.05e-9, maxiters=10_000_000)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
-    # Use CedarUICOp for oscillator initialization
-    # Ring oscillators don't have a stable DC equilibrium - CedarUICOp uses
-    # pseudo-transient relaxation to initialize and let the circuit dynamics evolve
-    init = CedarUICOp()
+    # Use CedarDCOp for initialization - it now uses CedarRobustNLSolve() which
+    # includes LevenbergMarquardt and PseudoTransient for difficult circuits
+    init = CedarDCOp()
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (dtmax=$dtmax)...")

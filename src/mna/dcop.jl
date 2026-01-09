@@ -39,7 +39,7 @@ devices (diodes, MOSFETs, voltage-dependent capacitors).
 
 # Arguments
 - `abstol`: Tolerance for the DC solve (default: 1e-10)
-- `nlsolve`: Nonlinear solver to use (default: `RobustMultiNewton()`)
+- `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
 
 # Example
 ```julia
@@ -47,13 +47,15 @@ sol = tran!(circuit, (0.0, 1e-3))  # Uses CedarDCOp by default
 ```
 
 # Solver Details
-Uses `RobustMultiNewton()` by default with explicit Jacobians from the G matrix.
+Uses `CedarRobustNLSolve()` by default which combines RobustMultiNewton algorithms
+with LevenbergMarquardt and PseudoTransient for maximum robustness on difficult
+circuits (oscillators, singular Jacobians).
 """
 struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     nlsolve::NLSOLVE
 end
-CedarDCOp(;abstol=1e-10, nlsolve=RobustMultiNewton()) = CedarDCOp(abstol, nlsolve)
+CedarDCOp(;abstol=1e-10, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, nlsolve)
 
 """
     CedarTranOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -65,7 +67,7 @@ struct CedarTranOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     nlsolve::NLSOLVE
 end
-CedarTranOp(;abstol=1e-10, nlsolve=RobustMultiNewton()) = CedarTranOp(abstol, nlsolve)
+CedarTranOp(;abstol=1e-10, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, nlsolve)
 
 """
     CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm

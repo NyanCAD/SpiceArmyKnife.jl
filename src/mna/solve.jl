@@ -273,13 +273,36 @@ using ADTypes
 #==============================================================================#
 # DC Operating Point Solver
 #
-# Uses RobustMultiNewton which provides a well-tuned poly algorithm with
-# 6 trust region variants. The key improvement is using explicit Jacobians
-# from the G matrix rather than finite differencing.
+# Uses CedarRobustNLSolve() which provides a comprehensive poly algorithm:
+# - RobustMultiNewton's 6 trust region variants
+# - LevenbergMarquardt for GMIN-like regularization
+# - PseudoTransient for continuation on difficult circuits
 #
 # The explicit Jacobian is provided via NonlinearFunction's jac parameter,
-# so we use RobustMultiNewton() without autodiff - it will use our Jacobian.
+# so we don't need autodiff - NonlinearSolve will use our Jacobian.
 #==============================================================================#
+
+"""
+    CedarRobustNLSolve()
+
+Create a robust nonlinear solver for circuit DC analysis.
+
+Combines all algorithms from RobustMultiNewton with LevenbergMarquardt
+and PseudoTransient for maximum robustness on difficult circuits
+(oscillators, singular Jacobians, etc.).
+
+The algorithm order is:
+1. RobustMultiNewton algorithms (6 trust region / Newton variants)
+2. LevenbergMarquardt (GMIN-like regularization via damping)
+3. PseudoTransient (pseudo-transient continuation)
+"""
+function CedarRobustNLSolve()
+    rmn = RobustMultiNewton()
+    algs = (rmn.algs..., LevenbergMarquardt(), PseudoTransient())
+    return NonlinearSolvePolyAlgorithm(algs)
+end
+
+export CedarRobustNLSolve
 
 #==============================================================================#
 # Unified DC Solve
@@ -296,7 +319,7 @@ using ADTypes
 # Common Newton iteration core for compiled DC solve
 function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::AbstractVector;
                               abstol::Real=1e-10, maxiters::Int=100,
-                              nlsolve=RobustMultiNewton())
+                              nlsolve=CedarRobustNLSolve())
     n = length(u0)
 
     # Check if linear solution is good enough
@@ -333,7 +356,7 @@ function _dc_newton_compiled(cs::CompiledStructure, ws::EvalWorkspace, u0::Abstr
 end
 
 """
-    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=RobustMultiNewton())
+    dc_solve_with_ctx(builder, params, spec, ctx; abstol=1e-10, maxiters=100, nlsolve=CedarRobustNLSolve())
 
 DC solve using a pre-built detection context.
 
@@ -342,11 +365,12 @@ which is critical for DAE/ODE problem creation where u0 must match differential_
 
 The context is used to determine the system structure, then compiled for Newton iteration.
 
-Uses `RobustMultiNewton()` by default with explicit Jacobians from the G matrix.
+Uses `CedarRobustNLSolve()` by default which combines RobustMultiNewton algorithms
+with LevenbergMarquardt (GMIN-like regularization) and PseudoTransient for difficult circuits.
 """
 function dc_solve_with_ctx(builder, params, spec, ctx::MNAContext;
                             abstol::Real=1e-10, maxiters::Int=100,
-                            nlsolve=RobustMultiNewton())
+                            nlsolve=CedarRobustNLSolve())
     n = system_size(ctx)
 
     if n == 0

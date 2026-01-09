@@ -6,12 +6,12 @@
 #
 # Benchmark target: High complexity digital circuit (154k variables)
 #
-# STATUS: NOT WORKING - requires fixes to sparse Jacobian handling
+# STATUS: Uses CedarUICOp initialization (pseudo-transient relaxation)
 #
-# Known Issues (January 2026):
-# 1. DC operating point solve fails with SingularException - this is expected
-#    for digital circuits that don't have a valid DC solution. ngspice handles
-#    this with 'uic' (use initial conditions) to skip DC and start from zeros.
+# Notes:
+# Digital circuits often don't have a valid DC solution. ngspice handles
+# this with 'uic' (use initial conditions). CedarUICOp provides similar
+# functionality using pseudo-transient relaxation.
 #
 # Usage: julia runme.jl [solver]
 #   solver: IDA, FBDF, or Rodas5P (default)
@@ -19,6 +19,7 @@
 
 using CedarSim
 using CedarSim.MNA
+using CedarSim.MNA: CedarUICOp
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
@@ -69,13 +70,18 @@ function run_benchmark(solver; reltol=1e-3, maxiters=10_000_000)
     n = MNA.system_size(circuit)
     println("Circuit size: $n variables")
 
+    # Use CedarUICOp for initialization - digital circuits often don't have
+    # a valid DC solution. ngspice handles this with 'uic' (use initial conditions)
+    # CedarUICOp uses pseudo-transient relaxation to initialize
+    init = CedarUICOp()
+
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (reltol=$reltol)...")
-    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, maxiters=$maxiters, dense=false) samples=3 evals=1 seconds=300
+    bench = @benchmark tran!($circuit, $tspan; solver=$solver, reltol=$reltol, maxiters=$maxiters, initializealg=$init, dense=false) samples=3 evals=1 seconds=300
 
     # Also run once to get solution statistics
     circuit = setup_simulation()
-    sol = tran!(circuit, tspan; solver=solver, reltol=reltol, maxiters=maxiters, dense=false)
+    sol = tran!(circuit, tspan; solver=solver, reltol=reltol, maxiters=maxiters, initializealg=init, dense=false)
 
     println("\n=== Results ($solver_name) ===")
     @printf("Timepoints: %d\n", length(sol.t))

@@ -35,8 +35,9 @@ using CedarSim.MNA: reset_for_restamping!
 # Import CedarSim for macros and dc!/tran!
 using CedarSim
 using CedarSim: dc!, tran!  # explicit import to avoid Julia 1.12 conflict
-using CedarSim.MNA: MNACircuit, MNASpec
+using CedarSim.MNA: MNACircuit, MNASpec, CedarUICOp
 using OrdinaryDiffEq: Rodas5P, QNDF, FBDF
+import Sundials
 using VerilogAParser
 
 @testset "MNA Core Tests" begin
@@ -2036,6 +2037,54 @@ using VerilogAParser
             @test isapprox(V_ida, V_rodas; rtol=0.01) || (t, V_ida, V_rodas)
             @test isapprox(V_ida, V_qndf; rtol=0.01) || (t, V_ida, V_qndf)
             @test isapprox(V_ida, V_fbdf; rtol=0.01) || (t, V_ida, V_fbdf)
+        end
+    end
+
+    #==========================================================================#
+    # CedarUICOp: Use Initial Conditions for Oscillators
+    #
+    # Tests pseudo-transient relaxation initialization for circuits without
+    # stable DC operating points (e.g., oscillators).
+    #==========================================================================#
+
+    @testset "CedarUICOp initialization" begin
+        # Simple RC circuit for basic UIC tests
+        function build_rc_uic(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+            if ctx === nothing
+                ctx = MNAContext()
+            else
+                reset_for_restamping!(ctx)
+            end
+            vdd = get_node!(ctx, :vdd)
+            out = get_node!(ctx, :out)
+
+            stamp!(VoltageSource(params.V), ctx, vdd, 0)
+            stamp!(Resistor(params.R), ctx, vdd, out)
+            stamp!(Capacitor(params.C), ctx, out, 0)
+            return ctx
+        end
+
+        spec = MNASpec(temp=300.0)
+        circuit = MNACircuit(build_rc_uic; spec=spec, V=5.0, R=1000.0, C=1e-9)
+        τ = 1e-9 * 1000.0  # RC time constant = 1μs
+
+        @testset "ODE path (Rodas5P)" begin
+            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(), initializealg=CedarUICOp())
+            @test sol.retcode == ReturnCode.Success
+            # After 5τ, capacitor should be mostly charged to 5V (>99%)
+            @test sol(5τ)[2] > 4.9  # out voltage
+        end
+
+        @testset "DAE path (IDA)" begin
+            sol = tran!(circuit, (0.0, 5τ); initializealg=CedarUICOp())
+            @test sol.retcode == ReturnCode.Success
+            @test sol(5τ)[2] > 4.9
+        end
+
+        @testset "Custom parameters" begin
+            sol = tran!(circuit, (0.0, 5τ); solver=Rodas5P(),
+                        initializealg=CedarUICOp(warmup_steps=20, dt=1e-11))
+            @test sol.retcode == ReturnCode.Success
         end
     end
 

@@ -12,12 +12,12 @@
 
 using CedarSim
 using CedarSim.MNA
+using CedarSim.MNA: CedarUICOp
 using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
 using VerilogAParser
-using DiffEqBase: BrownFullBasicInit
 
 # Load the PSP103 model
 const psp103_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "psp103v4", "psp103.va")
@@ -66,10 +66,10 @@ function run_benchmark(solver; dtmax=0.05e-9, maxiters=10_000_000)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
-    # Use BrownFullBasicInit with relaxed tolerance for DAE initialization
-    # Ring oscillators don't have a stable equilibrium, so we need to accept
-    # approximate initial conditions and let the current pulse kick-start oscillation
-    init = BrownFullBasicInit(abstol=1e-3)
+    # Use CedarUICOp for oscillator initialization
+    # Ring oscillators don't have a stable DC equilibrium - CedarUICOp uses
+    # pseudo-transient relaxation to initialize and let the circuit dynamics evolve
+    init = CedarUICOp()
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (dtmax=$dtmax)...")

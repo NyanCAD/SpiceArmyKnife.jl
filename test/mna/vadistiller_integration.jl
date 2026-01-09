@@ -350,8 +350,8 @@ eval(ring_oscillator_code)
         GC.gc()
 
         # Group 5: MOSFETs (mos1, mos2, mos3, mos6, mos9)
+        # Note: mos1.va is pre-loaded at module level for SPICE ring oscillator test
         @testset "VADistiller MOSFETs" begin
-            load_va_model("mos1.va")
 
             @testset "sp_mos1" begin
                 function sp_mos1_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())

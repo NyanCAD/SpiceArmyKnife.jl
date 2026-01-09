@@ -62,6 +62,35 @@ function load_va_model(filename::String)
     GC.gc()
 end
 
+#==============================================================================#
+# Pre-load sp_mos1 for SPICE-based oscillator test
+# This is loaded early so we can parse the SPICE circuit at module level
+# (avoids world age issues with eval inside testsets)
+#==============================================================================#
+
+let
+    filepath = joinpath(vadistiller_path, "mos1.va")
+    va = VerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+end
+
+# Ring oscillator circuit defined via SPICE (parsed at module level)
+const ring_oscillator_code = parse_spice_to_mna("""
+* 3-stage CMOS Ring Oscillator
+Vdd vdd 0 DC 3.3
+XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+C1 out1 0 10f
+C2 out2 0 10f
+C3 in1 0 10f
+.END
+"""; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
+eval(ring_oscillator_code)
+
 @testset "VADistiller Integration Tests" begin
 
     #==========================================================================#
@@ -692,47 +721,8 @@ end
         @testset "3-stage CMOS ring oscillator" begin
             # Ring oscillator using sp_mos1 - tests CedarUICOp initialization
             # for oscillators without stable DC equilibrium
-            function build_ring_osc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
-                if ctx === nothing
-                    ctx = MNAContext()
-                else
-                    reset_for_restamping!(ctx)
-                end
-                vdd = get_node!(ctx, :vdd)
-                out1 = get_node!(ctx, :out1)
-                out2 = get_node!(ctx, :out2)
-                in1 = get_node!(ctx, :in1)
-
-                # Power supply
-                stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
-
-                # Stage 1: Inverter (in1 -> out1)
-                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
-                       ctx, out1, in1, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
-                       ctx, out1, in1, 0, 0; _mna_spec_=spec, _mna_x_=x)
-
-                # Stage 2: Inverter (out1 -> out2)
-                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
-                       ctx, out2, out1, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
-                       ctx, out2, out1, 0, 0; _mna_spec_=spec, _mna_x_=x)
-
-                # Stage 3: Inverter (out2 -> in1) - feedback
-                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
-                       ctx, in1, out2, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
-                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
-                       ctx, in1, out2, 0, 0; _mna_spec_=spec, _mna_x_=x)
-
-                # Load capacitors
-                stamp!(Capacitor(10e-15; name=:C1), ctx, out1, 0)
-                stamp!(Capacitor(10e-15; name=:C2), ctx, out2, 0)
-                stamp!(Capacitor(10e-15; name=:C3), ctx, in1, 0)
-
-                return ctx
-            end
-
-            circuit = MNACircuit(build_ring_osc; Vdd=3.3)
+            # Circuit is defined via SPICE at module level (ring_oscillator)
+            circuit = MNACircuit(ring_oscillator)
             tspan = (0.0, 200e-9)
 
             # Use CedarUICOp for oscillator initialization (no stable DC point)

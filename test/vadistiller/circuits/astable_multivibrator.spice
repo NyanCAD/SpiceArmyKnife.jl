@@ -1,0 +1,36 @@
+* BJT Astable Multivibrator (Free-Running Oscillator)
+*
+* Classic cross-coupled BJT oscillator circuit.
+* Two transistors alternately switch on/off, creating square wave outputs.
+*
+* Oscillation frequency ≈ 1/(1.4 * Rb * C) when symmetric
+* With Rb=20k and C=0.1uF: f ≈ 357 Hz, period ≈ 2.8ms
+*
+* Note: Small asymmetry added (0.099u vs 0.101u capacitors) to break
+* symmetry and ensure oscillation startup in simulation.
+*
+* Reference: Electronics-Tutorials, Analog Devices ADALM2000 Lab
+
+* Power supply
+Vcc vcc 0 DC 5.0
+
+* Collector load resistors
+Rc1 vcc q1_coll 470
+Rc2 vcc q2_coll 470
+
+* Base bias resistors (from Vcc)
+Rb1 vcc q1_base 20k
+Rb2 vcc q2_base 20k
+
+* Cross-coupling capacitors (slight asymmetry for oscillation startup)
+* C1: Q1 collector to Q2 base
+C1 q1_coll q2_base 0.099u
+* C2: Q2 collector to Q1 base
+C2 q2_coll q1_base 0.101u
+
+* BJT transistors (sp_bjt: collector, base, emitter, substrate)
+* Using sp_bjt with typical 2N3904-like parameters
+XQ1 q1_coll q1_base 0 0 sp_bjt bf=100 is=1e-14
+XQ2 q2_coll q2_base 0 0 sp_bjt bf=100 is=1e-14
+
+.END

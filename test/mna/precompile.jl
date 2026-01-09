@@ -7,7 +7,7 @@ using SparseArrays
 using LinearAlgebra
 
 # Import MNA module - use CedarSim.MNA
-using CedarSim.MNA: MNAContext, get_node!, resolve_index, get_rhs
+using CedarSim.MNA: MNAContext, get_node!, resolve_index, get_rhs, reset_for_restamping!
 using CedarSim.MNA: stamp!, Resistor, Capacitor, VoltageSource, Diode
 using CedarSim.MNA: MNASpec, DCSolution, solve_dc, voltage, current
 using CedarSim.MNA: PrecompiledCircuit, compile_circuit, fast_residual!, system_size
@@ -318,8 +318,8 @@ end
         fast_residual!(resid, du, u, pc, Float64(i) * 1e-9)
     end
 
-    # Just verify it completes without error
-    @test true
+    # Verify residual is finite (no NaN/Inf)
+    @test all(isfinite, resid)
 end
 
 println("All precompile tests passed!")

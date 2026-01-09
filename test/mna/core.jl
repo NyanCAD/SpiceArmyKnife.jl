@@ -796,8 +796,8 @@ using VerilogAParser
         show(io, sys)
         show(io, MIME"text/plain"(), sys)
 
-        # Just check no errors
-        @test true
+        # Verify output was produced (non-empty)
+        @test length(take!(io)) > 0
     end
 
     #==========================================================================#

@@ -226,7 +226,12 @@ end
                 end
 
                 sol = solve_dc(sp_bjt_circuit, (;), MNASpec())
-                @test true  # If we get here, it worked
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Collector voltage should be between 0 and Vcc (5V)
+                v_collector = sol.x[3]  # collector node
+                @test 0.0 < v_collector < 5.0
             end
         end
 
@@ -252,7 +257,12 @@ end
                 end
 
                 sol = solve_dc(sp_jfet_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (10V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 10.0
             end
 
             load_va_model("mes1.va")
@@ -273,7 +283,12 @@ end
                 end
 
                 sol = solve_dc(sp_mes_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
 
             load_va_model("jfet2.va")
@@ -294,7 +309,12 @@ end
                 end
 
                 sol = solve_dc(sp_jfet2_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (10V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 10.0
             end
         end
 
@@ -320,7 +340,12 @@ end
                 end
 
                 sol = solve_dc(sp_mos1_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
 
             load_va_model("mos2.va")
@@ -341,7 +366,12 @@ end
                 end
 
                 sol = solve_dc(sp_mos2_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
 
             load_va_model("mos3.va")
@@ -362,7 +392,12 @@ end
                 end
 
                 sol = solve_dc(sp_mos3_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
 
             load_va_model("mos6.va")
@@ -383,7 +418,12 @@ end
                 end
 
                 sol = solve_dc(sp_mos6_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
 
             load_va_model("mos9.va")
@@ -404,7 +444,12 @@ end
                 end
 
                 sol = solve_dc(sp_mos9_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (5V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 5.0
             end
         end
 
@@ -456,7 +501,12 @@ end
                 end
 
                 sol = solve_dc(sp_bsim3v3_circuit, (;), MNASpec())
-                @test true
+                # Verify solution was produced and is valid
+                @test length(sol.x) > 0
+                @test !any(isnan, sol.x)
+                # Drain voltage should be between 0 and Vdd (1.8V)
+                v_drain = sol.x[2]  # drain node
+                @test 0.0 < v_drain < 1.8
             end
         end
 

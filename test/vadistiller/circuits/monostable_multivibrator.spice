@@ -1,0 +1,45 @@
+* Monostable Multivibrator (One-Shot) using sp_bjt
+*
+* A monostable multivibrator has one stable state. When triggered,
+* it produces a single output pulse of fixed duration, then returns
+* to stable state. Pulse width determined by R*C time constant.
+*
+* Circuit topology:
+* - Q1 normally ON (saturated), Q2 normally OFF
+* - Trigger pulse turns Q1 OFF momentarily
+* - C1 charges through R1, keeping Q2 ON for time ~ 0.7*R1*C1
+* - When C1 charges enough, Q2 turns OFF and Q1 turns back ON
+*
+* Expected pulse width: T ≈ 0.7 * R1 * C1 = 0.7 * 10k * 10u = 70ms
+*
+* Note: This circuit requires proper initialization and may need
+* source stepping or CedarUICOp for numerical stability.
+
+* Power supply
+Vcc vcc 0 DC 5.0
+
+* Trigger input (normally low, pulse high to trigger)
+* For testing, use a short pulse at t=1ms
+Vtrig trig 0 DC 0 PULSE 0 5 1m 1u 1u 10u 1
+
+* Biasing resistors
+R1 vcc q1_base 10k
+R2 vcc q2_base 10k
+Rc1 vcc q1_coll 1k
+Rc2 vcc q2_coll 1k
+
+* Timing capacitor (determines pulse width)
+C1 q1_coll q2_base 10u
+
+* Coupling capacitor for trigger
+Ctrig trig q1_base 100n
+
+* Transistors: sp_bjt(collector, base, emitter, substrate)
+* Q1 is normally ON, Q2 is normally OFF
+XQ1 q1_coll q1_base 0 0 sp_bjt bf=100 is=1e-15
+XQ2 q2_coll q2_base 0 0 sp_bjt bf=100 is=1e-15
+
+* Output taken from Q2 collector
+* Normally high (Q2 OFF), goes low during pulse (Q2 ON)
+
+.END

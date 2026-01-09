@@ -19,13 +19,13 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!
+using CedarSim.MNA: reset_for_restamping!, CedarUICOp
 using ForwardDiff: Dual, value, partials
-using OrdinaryDiffEq: QNDF
+using OrdinaryDiffEq: QNDF, Rodas5P
 using VerilogAParser
 using Sundials: IDA
 using SciMLBase
-using CedarSim: tran!, dc!
+using CedarSim: tran!, dc!, parse_spice_to_mna
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -61,6 +61,35 @@ function load_va_model(filename::String)
     end
     GC.gc()
 end
+
+#==============================================================================#
+# Pre-load sp_mos1 for SPICE-based oscillator test
+# This is loaded early so we can parse the SPICE circuit at module level
+# (avoids world age issues with eval inside testsets)
+#==============================================================================#
+
+let
+    filepath = joinpath(vadistiller_path, "mos1.va")
+    va = VerilogAParser.parsefile(filepath)
+    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
+end
+
+# Ring oscillator circuit defined via SPICE (parsed at module level)
+const ring_oscillator_code = parse_spice_to_mna("""
+* 3-stage CMOS Ring Oscillator
+Vdd vdd 0 DC 3.3
+XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+C1 out1 0 10f
+C2 out2 0 10f
+C3 in1 0 10f
+.END
+"""; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
+eval(ring_oscillator_code)
 
 @testset "VADistiller Integration Tests" begin
 
@@ -321,8 +350,8 @@ end
         GC.gc()
 
         # Group 5: MOSFETs (mos1, mos2, mos3, mos6, mos9)
+        # Note: mos1.va is pre-loaded at module level for SPICE ring oscillator test
         @testset "VADistiller MOSFETs" begin
-            load_va_model("mos1.va")
 
             @testset "sp_mos1" begin
                 function sp_mos1_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
@@ -450,6 +479,47 @@ end
                 # Drain voltage should be between 0 and Vdd (5V)
                 v_drain = sol.x[2]  # drain node
                 @test 0.0 < v_drain < 5.0
+            end
+
+            @testset "3-stage CMOS ring oscillator" begin
+                # Ring oscillator using sp_mos1 - tests CedarUICOp initialization
+                # for oscillators without stable DC equilibrium
+                # Circuit is defined via SPICE at module level (ring_oscillator)
+                circuit = MNACircuit(ring_oscillator)
+                tspan = (0.0, 200e-9)
+
+                # Use CedarUICOp for oscillator initialization (no stable DC point)
+                sol = tran!(circuit, tspan;
+                            solver=Rodas5P(),
+                            initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                            abstol=1e-9, reltol=1e-6,
+                            dtmax=1e-9)
+
+                @test sol.retcode == SciMLBase.ReturnCode.Success
+
+                sys = assemble!(circuit)
+                acc = MNASolutionAccessor(sol, sys)
+
+                # Sample in last half after startup transient
+                times = range(100e-9, 200e-9; length=500)
+                V_out1 = [voltage(acc, :out1, t) for t in times]
+
+                out1_min, out1_max = extrema(V_out1)
+
+                # Verify significant voltage swing (oscillation occurring)
+                @test (out1_max - out1_min) > 2.0
+                @test out1_max > 2.5  # Near Vdd
+                @test out1_min < 0.8  # Near ground
+
+                # Verify oscillation frequency by counting crossings
+                midpoint = (out1_max + out1_min) / 2
+                crossings = sum(
+                    (V_out1[i-1] < midpoint && V_out1[i] >= midpoint) ||
+                    (V_out1[i-1] > midpoint && V_out1[i] <= midpoint)
+                    for i in 2:length(V_out1)
+                )
+                # Should have multiple oscillation cycles in 100ns window
+                @test crossings > 10
             end
         end
 

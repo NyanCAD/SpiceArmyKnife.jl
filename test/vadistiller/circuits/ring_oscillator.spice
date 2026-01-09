@@ -1,0 +1,33 @@
+* 3-stage CMOS Ring Oscillator
+*
+* Classic ring oscillator using sp_mos1 MOSFETs.
+* Each stage is a CMOS inverter. Output of last stage
+* feeds back to first stage, creating oscillation.
+*
+* Oscillation frequency depends on inverter delay.
+* With these parameters: ~1.8 GHz
+*
+* Reference: Standard digital CMOS design
+
+* Power supply
+Vdd vdd 0 DC 3.3
+
+* Stage 1: Inverter (in1 -> out1)
+* PMOS: type=-1, NMOS: type=1
+XMP1 out1 in1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN1 out1 in1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Stage 2: Inverter (out1 -> out2)
+XMP2 out2 out1 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN2 out2 out1 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Stage 3: Inverter (out2 -> in1) - feedback
+XMP3 in1 out2 vdd vdd sp_mos1 type=-1 vto=-0.7 kp=50e-6 w=2e-6 l=1e-6
+XMN3 in1 out2 0 0 sp_mos1 type=1 vto=0.7 kp=100e-6 w=1e-6 l=1e-6
+
+* Load capacitors (represent gate capacitance and wiring)
+C1 out1 0 10f
+C2 out2 0 10f
+C3 in1 0 10f
+
+.END

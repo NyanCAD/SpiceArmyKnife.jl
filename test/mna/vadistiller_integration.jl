@@ -19,13 +19,13 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!
+using CedarSim.MNA: reset_for_restamping!, CedarUICOp
 using ForwardDiff: Dual, value, partials
-using OrdinaryDiffEq: QNDF
+using OrdinaryDiffEq: QNDF, Rodas5P
 using VerilogAParser
 using Sundials: IDA
 using SciMLBase
-using CedarSim: tran!, dc!
+using CedarSim: tran!, dc!, parse_spice_to_mna
 
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
@@ -687,6 +687,86 @@ end
             @test !isnan(vc_t0) && !isnan(vc_pos) && !isnan(vc_neg)
             @test vc_t0 > 0.0 && vc_t0 < 12.5
             @test vc_pos < vc_neg + 0.5
+        end
+
+        @testset "3-stage CMOS ring oscillator" begin
+            # Ring oscillator using sp_mos1 - tests CedarUICOp initialization
+            # for oscillators without stable DC equilibrium
+            function build_ring_osc(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
+                if ctx === nothing
+                    ctx = MNAContext()
+                else
+                    reset_for_restamping!(ctx)
+                end
+                vdd = get_node!(ctx, :vdd)
+                out1 = get_node!(ctx, :out1)
+                out2 = get_node!(ctx, :out2)
+                in1 = get_node!(ctx, :in1)
+
+                # Power supply
+                stamp!(VoltageSource(params.Vdd; name=:Vdd), ctx, vdd, 0)
+
+                # Stage 1: Inverter (in1 -> out1)
+                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
+                       ctx, out1, in1, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
+                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
+                       ctx, out1, in1, 0, 0; _mna_spec_=spec, _mna_x_=x)
+
+                # Stage 2: Inverter (out1 -> out2)
+                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
+                       ctx, out2, out1, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
+                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
+                       ctx, out2, out1, 0, 0; _mna_spec_=spec, _mna_x_=x)
+
+                # Stage 3: Inverter (out2 -> in1) - feedback
+                stamp!(sp_mos1(; type=-1, vto=-0.7, kp=50e-6, w=2e-6, l=1e-6),
+                       ctx, in1, out2, vdd, vdd; _mna_spec_=spec, _mna_x_=x)
+                stamp!(sp_mos1(; type=1, vto=0.7, kp=100e-6, w=1e-6, l=1e-6),
+                       ctx, in1, out2, 0, 0; _mna_spec_=spec, _mna_x_=x)
+
+                # Load capacitors
+                stamp!(Capacitor(10e-15; name=:C1), ctx, out1, 0)
+                stamp!(Capacitor(10e-15; name=:C2), ctx, out2, 0)
+                stamp!(Capacitor(10e-15; name=:C3), ctx, in1, 0)
+
+                return ctx
+            end
+
+            circuit = MNACircuit(build_ring_osc; Vdd=3.3)
+            tspan = (0.0, 200e-9)
+
+            # Use CedarUICOp for oscillator initialization (no stable DC point)
+            sol = tran!(circuit, tspan;
+                        solver=Rodas5P(),
+                        initializealg=CedarUICOp(warmup_steps=20, dt=1e-15),
+                        abstol=1e-9, reltol=1e-6,
+                        dtmax=1e-9)
+
+            @test sol.retcode == SciMLBase.ReturnCode.Success
+
+            sys = assemble!(circuit)
+            acc = MNASolutionAccessor(sol, sys)
+
+            # Sample in last half after startup transient
+            times = range(100e-9, 200e-9; length=500)
+            V_out1 = [voltage(acc, :out1, t) for t in times]
+
+            out1_min, out1_max = extrema(V_out1)
+
+            # Verify significant voltage swing (oscillation occurring)
+            @test (out1_max - out1_min) > 2.0
+            @test out1_max > 2.5  # Near Vdd
+            @test out1_min < 0.8  # Near ground
+
+            # Verify oscillation frequency by counting crossings
+            midpoint = (out1_max + out1_min) / 2
+            crossings = sum(
+                (V_out1[i-1] < midpoint && V_out1[i] >= midpoint) ||
+                (V_out1[i-1] > midpoint && V_out1[i] <= midpoint)
+                for i in 2:length(V_out1)
+            )
+            # Should have multiple oscillation cycles in 100ns window
+            @test crossings > 10
         end
 
     end  # Tier 7

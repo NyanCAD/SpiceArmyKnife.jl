@@ -9,10 +9,12 @@ using SpectreNetlistParser
 using CedarSim.SpectreEnvironment
 using Test
 using SciMLBase
-import CMC
 
-const bsimcmg_path = joinpath(Base.pkgdir(CMC), "cmc_models/bsimcmg107/bsimcmg.va")
-const bsimcmg = load_VA_model(bsimcmg_path)
+# Use pre-parsed BSIM-CMG model from CMCModels package
+using CMCModels
+
+# Re-export for compatibility with existing code
+const bsimcmg = sp_bsimcmg
 
 sa = SpectreNetlistParser.parsefile(joinpath(dirname(pathof(SpectreNetlistParser)), "../test/examples/7nm_TT.scs"));
 eval(CedarSim.make_spectre_netlist(sa))

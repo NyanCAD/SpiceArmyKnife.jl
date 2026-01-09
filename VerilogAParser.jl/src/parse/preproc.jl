@@ -11,7 +11,7 @@ Base.:-(a::VirtPos, b::Integer) = VirtPos(a.pos - UInt32(b))
 Base.:-(a::VirtPos, b::VirtPos) = a.pos - b.pos
 Base.isless(a::VirtPos, b::VirtPos) = isless(a.pos, b.pos)
 Base.isfinite(a::VirtPos) = true
-UInt32(pos::VirtPos) = pos.pos
+Base.UInt32(pos::VirtPos) = pos.pos
 
 # Scalar Behavior otherwise
 Base.length(a::VirtPos) = 1

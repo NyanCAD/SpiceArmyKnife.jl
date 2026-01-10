@@ -17,24 +17,9 @@ using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
-using VerilogAParser
 
-# Load the PSP103 model
-const psp103_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "psp103v4", "psp103.va")
-
-# Parse and eval the PSP103 model
-if isfile(psp103_path)
-    println("Loading PSP103 from: ", psp103_path)
-    va = VerilogAParser.parsefile(psp103_path)
-    if !va.ps.errored
-        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-        println("PSP103VA_module loaded successfully")
-    else
-        error("Failed to parse PSP103 VA model")
-    end
-else
-    error("PSP103 VA model not found at $psp103_path")
-end
+# Import pre-parsed PSP103 model from PSPModels package
+using PSPModels
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")

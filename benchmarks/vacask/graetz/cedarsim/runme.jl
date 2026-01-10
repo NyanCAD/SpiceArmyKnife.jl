@@ -17,21 +17,9 @@ using Sundials: IDA
 using OrdinaryDiffEq: FBDF, Rodas5P
 using BenchmarkTools
 using Printf
-using VerilogAParser
 
-# Load the vadistiller diode model
-const diode_va_path = joinpath(@__DIR__, "..", "..", "..", "..", "test", "vadistiller", "models", "diode.va")
-
-if isfile(diode_va_path)
-    va = VerilogAParser.parsefile(diode_va_path)
-    if !va.ps.errored
-        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-    else
-        error("Failed to parse diode VA model")
-    end
-else
-    error("Diode VA model not found at $diode_va_path")
-end
+# Import pre-parsed diode model from VADistillerModels package
+using VADistillerModels
 
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")

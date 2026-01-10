@@ -1,15 +1,14 @@
 #==============================================================================#
 # MNA Phase 6+: VADistiller Integration Tests (Heavy Models)
 #
-# These tests load large Verilog-A models from files and are separated from
-# the core vadistiller tests to reduce memory pressure during CI.
+# These tests use pre-parsed models from VADistillerModels package.
 #
 # Memory optimization: Tier 7 uses only QNDF solver to avoid JIT compilation
 # overhead from multiple ODE solvers. Tier 8 uses IDA for DAE tests with
 # voltage-dependent capacitors. See doc/vadistiller_memory_analysis.md.
 #
 # Run with: julia --project=. -e 'using Pkg; Pkg.test(test_args=["integration"])'
-# Or directly: julia --project=. test/mna/vadistiller_integration.jl
+# Or directly: julia --project=test test/mna/vadistiller_integration.jl
 #==============================================================================#
 
 using Test
@@ -22,56 +21,19 @@ using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
 using CedarSim.MNA: reset_for_restamping!, CedarUICOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
-using VerilogAParser
 using Sundials: IDA
 using SciMLBase
 using CedarSim: tran!, dc!, parse_spice_to_mna
 
+# Import pre-parsed models from VADistillerModels package
+using VADistillerModels
+
 const deftol = 1e-6
 isapprox_deftol(a, b) = isapprox(a, b; atol=deftol, rtol=deftol)
-
-# Path to vadistiller models
-const vadistiller_path = joinpath(@__DIR__, "..", "vadistiller", "models")
 
 # Memory tracking helper for diagnosing OOM issues
 function mem_mb()
     return round(Sys.total_memory() - Sys.free_memory(); digits=0) / 1024 / 1024
-end
-
-function with_memory_tracking(f, name::String)
-    GC.gc()
-    mem_before = mem_mb()
-    t0 = time()
-    result = f()
-    elapsed = time() - t0
-    GC.gc()
-    mem_after = mem_mb()
-    @info "$name" elapsed_s=round(elapsed; digits=2) mem_before_mb=round(mem_before; digits=0) mem_after_mb=round(mem_after; digits=0) mem_delta_mb=round(mem_after - mem_before; digits=0)
-    return result
-end
-
-# Load a VA model file with memory tracking
-function load_va_model(filename::String)
-    filepath = joinpath(vadistiller_path, filename)
-    with_memory_tracking("Loading $filename") do
-        va_code = read(filepath, String)
-        va = VerilogAParser.parse(IOBuffer(va_code))
-        Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-        va = nothing  # Help GC
-    end
-    GC.gc()
-end
-
-#==============================================================================#
-# Pre-load sp_mos1 for SPICE-based oscillator test
-# This is loaded early so we can parse the SPICE circuit at module level
-# (avoids world age issues with eval inside testsets)
-#==============================================================================#
-
-let
-    filepath = joinpath(vadistiller_path, "mos1.va")
-    va = VerilogAParser.parsefile(filepath)
-    Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 end
 
 # Ring oscillator circuit defined via SPICE (parsed at module level)
@@ -106,8 +68,6 @@ eval(ring_oscillator_code)
 
         # Group 1: Simple passives (resistor, capacitor, inductor)
         @testset "VADistiller passives" begin
-            load_va_model("resistor.va")
-
             @testset "sp_resistor divider" begin
                 function sp_resistor_divider(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
                     if ctx === nothing
@@ -132,8 +92,6 @@ eval(ring_oscillator_code)
                 @test isapprox_deftol(voltage(sol, :mid), 2.5)
             end
 
-            load_va_model("capacitor.va")
-
             @testset "sp_capacitor DC" begin
                 function sp_capacitor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
                     if ctx === nothing
@@ -157,8 +115,6 @@ eval(ring_oscillator_code)
                 @test isapprox_deftol(voltage(sol, :vcc), 5.0)
                 @test isapprox_deftol(voltage(sol, :mid), 5.0)  # Open circuit at DC
             end
-
-            load_va_model("inductor.va")
 
             @testset "sp_inductor DC" begin
                 function sp_inductor_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=nothing)
@@ -187,8 +143,6 @@ eval(ring_oscillator_code)
 
         # Group 2: Diode
         @testset "VADistiller sp_diode" begin
-            load_va_model("diode.va")
-
             @testset "Basic diode circuit" begin
                 function sp_diode_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -235,8 +189,6 @@ eval(ring_oscillator_code)
 
         # Group 3: BJT
         @testset "VADistiller sp_bjt" begin
-            load_va_model("bjt.va")
-
             @testset "Basic BJT circuit" begin
                 function sp_bjt_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -268,8 +220,6 @@ eval(ring_oscillator_code)
 
         # Group 4: JFETs and MESFETs
         @testset "VADistiller 3-terminal FETs" begin
-            load_va_model("jfet1.va")
-
             @testset "sp_jfet1" begin
                 function sp_jfet_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -294,8 +244,6 @@ eval(ring_oscillator_code)
                 @test 0.0 < v_drain < 10.0
             end
 
-            load_va_model("mes1.va")
-
             @testset "sp_mes1" begin
                 function sp_mes_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -319,8 +267,6 @@ eval(ring_oscillator_code)
                 v_drain = sol.x[2]  # drain node
                 @test 0.0 < v_drain < 5.0
             end
-
-            load_va_model("jfet2.va")
 
             @testset "sp_jfet2" begin
                 function sp_jfet2_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
@@ -377,8 +323,6 @@ eval(ring_oscillator_code)
                 @test 0.0 < v_drain < 5.0
             end
 
-            load_va_model("mos2.va")
-
             @testset "sp_mos2" begin
                 function sp_mos2_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -402,8 +346,6 @@ eval(ring_oscillator_code)
                 v_drain = sol.x[2]  # drain node
                 @test 0.0 < v_drain < 5.0
             end
-
-            load_va_model("mos3.va")
 
             @testset "sp_mos3" begin
                 function sp_mos3_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
@@ -429,8 +371,6 @@ eval(ring_oscillator_code)
                 @test 0.0 < v_drain < 5.0
             end
 
-            load_va_model("mos6.va")
-
             @testset "sp_mos6" begin
                 function sp_mos6_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -454,8 +394,6 @@ eval(ring_oscillator_code)
                 v_drain = sol.x[2]  # drain node
                 @test 0.0 < v_drain < 5.0
             end
-
-            load_va_model("mos9.va")
 
             @testset "sp_mos9" begin
                 function sp_mos9_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
@@ -527,8 +465,6 @@ eval(ring_oscillator_code)
 
         # Group 6: VDMOS (5-terminal with thermal nodes)
         @testset "VADistiller sp_vdmos" begin
-            load_va_model("vdmos.va")
-
             @testset "sp_vdmos circuit" begin
                 function sp_vdmos_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -553,8 +489,6 @@ eval(ring_oscillator_code)
 
         # Group 7: BSIM3v3 (large model - 4K lines)
         @testset "VADistiller sp_bsim3v3" begin
-            load_va_model("bsim3v3.va")
-
             @testset "sp_bsim3v3 circuit" begin
                 function sp_bsim3v3_circuit(params, spec, t::Real=0.0; x=Float64[], ctx=MNAContext())
                     reset_for_restamping!(ctx)
@@ -584,8 +518,6 @@ eval(ring_oscillator_code)
 
         # Group 8: BSIM4v8 (largest model - 10K lines)
         @testset "VADistiller sp_bsim4v8" begin
-            load_va_model("bsim4v8.va")
-
             @testset "sp_bsim4v8 string parameters" begin
                 @test fieldtype(sp_bsim4v8, :version) == CedarSim.DefaultOr{String}
 

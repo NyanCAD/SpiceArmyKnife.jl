@@ -1,0 +1,14 @@
+name = "VADistillerModels"
+uuid = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
+authors = ["JuliaHub, Inc. and other contributors"]
+version = "0.1.0"
+
+[deps]
+CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
+ForwardDiff = "f6369f11-7733-5829-9624-2563aa707210"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+VerilogAParser = "b333aca1-b97d-47c9-9908-8e5a8c115e58"
+
+[sources]
+CedarSim = {path = "../.."}
+VerilogAParser = {path = "../../VerilogAParser.jl"}

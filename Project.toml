@@ -100,4 +100,10 @@ julia = "1.11"
 LoadMKL_JLL = false
 
 [workspace]
-projects = ["SpectreNetlistParser.jl", "VerilogAParser.jl"]
+projects = [
+    "SpectreNetlistParser.jl",
+    "VerilogAParser.jl",
+    "models/VADistillerModels.jl",
+    "models/PSPModels.jl",
+    "models/CMCModels.jl",
+]

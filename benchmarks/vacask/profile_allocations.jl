@@ -11,8 +11,10 @@ Pkg.activate(joinpath(@__DIR__, "..", ".."))
 
 using CedarSim
 using CedarSim.MNA
-using VerilogAParser
 using Printf
+
+# Import pre-parsed models from VADistillerModels package
+using VADistillerModels
 
 println("=" ^ 70)
 println("Memory Allocation Profiler")
@@ -23,15 +25,7 @@ println("=" ^ 70)
 #==============================================================================#
 
 println("\nLoading circuits...")
-
-# Load VA diode model
-const diode_va_path = joinpath(@__DIR__, "..", "..", "test", "vadistiller", "models", "diode.va")
-const va = VerilogAParser.parsefile(diode_va_path)
-if va.ps.errored
-    error("Failed to parse diode VA model")
-end
-Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
-println("  Loaded: sp_diode VA model")
+println("  Loaded: sp_diode from VADistillerModels package")
 
 # Load Graetz circuit (4 diodes)
 const graetz_spice_file = joinpath(@__DIR__, "graetz", "cedarsim", "runme.sp")

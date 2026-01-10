@@ -6,7 +6,7 @@
 # GitHub Actions Job Summaries.
 #
 # Usage:
-#   julia --project=. benchmarks/vacask/run_benchmarks.jl [output_file]
+#   julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl [output_file]
 #
 # If output_file is provided, markdown is written there.
 # Otherwise, it's written to stdout.

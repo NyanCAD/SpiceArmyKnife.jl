@@ -87,42 +87,64 @@ export sp_jfet1_module, sp_jfet2_module, sp_mes1_module
 export sp_mos1_module, sp_mos2_module, sp_mos3_module, sp_mos6_module, sp_mos9_module
 export sp_vdmos_module, sp_bsim3v3_module, sp_bsim4v8_module
 
-# Precompile stamp! methods for both MNAContext and DirectStampContext
-# Use module-qualified names since types are created via Core.eval
+# Precompile stamp! methods for all three method variants:
+# 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
+# 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
+# 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
 # Note: Complex models (BSIM3v3, BSIM4v8, VDMOS) skipped due to compile-time issues
 @compile_workload begin
+    using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
-    # Helper to precompile both context types for a device
+    # Helper to precompile all three method variants for a device
     function precompile_device(builder, params)
-        # Phase 1: MNAContext (structure discovery)
-        ctx = builder(params, spec, 0.0)
+        # Phase 1a: MNAContext + ZeroVector (stamp! called without _mna_x_)
+        ctx1 = builder(params, spec, 0.0; use_zero_vector=true)
+
+        # Phase 1b: MNAContext + Vector{Float64} (stamp! called with _mna_x_=Float64[])
+        ctx2 = builder(params, spec, 0.0; use_zero_vector=false)
 
         # Phase 2: Compile structure and create DirectStampContext workspace
-        cs = compile_structure(builder, params, spec; ctx=ctx)
-        ws = create_workspace(cs; ctx=ctx)
+        cs = compile_structure(builder, params, spec; ctx=ctx2)
+        ws = create_workspace(cs; ctx=ctx2)
 
-        # Phase 3: DirectStampContext (value-only restamping)
+        # Phase 3: DirectStampContext + Vector{Float64} (runtime restamping)
         reset_direct_stamp!(ws.dctx)
         fast_rebuild!(ws, zeros(cs.n), 0.0)
     end
 
     # 2-terminal device builder template
-    function resistor_builder(params, spec, t=0.0; x=Float64[], ctx=nothing)
-        ctx = ctx === nothing ? MNAContext() : ctx
+    function resistor_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         n1 = get_node!(ctx, :n1)
-        stamp!(sp_resistor_module.sp_resistor(), ctx, n1, 0; _mna_spec_=spec)
+        if use_zero_vector
+            stamp!(sp_resistor_module.sp_resistor(), ctx, n1, 0; _mna_spec_=spec)
+        else
+            stamp!(sp_resistor_module.sp_resistor(), ctx, n1, 0; _mna_spec_=spec, _mna_x_=x)
+        end
         return ctx
     end
     precompile_device(resistor_builder, NamedTuple())
 
     # 4-terminal MOSFET builder (most common usage)
-    function mos1_builder(params, spec, t=0.0; x=Float64[], ctx=nothing)
-        ctx = ctx === nothing ? MNAContext() : ctx
+    function mos1_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         d = get_node!(ctx, :d)
         g = get_node!(ctx, :g)
         s = get_node!(ctx, :s)
-        stamp!(sp_mos1_module.sp_mos1(), ctx, d, g, s, 0; _mna_spec_=spec)
+        if use_zero_vector
+            stamp!(sp_mos1_module.sp_mos1(), ctx, d, g, s, 0; _mna_spec_=spec)
+        else
+            stamp!(sp_mos1_module.sp_mos1(), ctx, d, g, s, 0; _mna_spec_=spec, _mna_x_=x)
+        end
         return ctx
     end
     precompile_device(mos1_builder, NamedTuple())

@@ -65,37 +65,65 @@ export JUNCAP200, PSP103VA, PSP103TVA, PSPNQS103VA
 # Export module references for SPICE integration
 export JUNCAP200_module, PSP103VA_module, PSP103TVA_module, PSPNQS103VA_module
 
-# Precompile stamp! methods for both MNAContext and DirectStampContext
+# Precompile stamp! methods for all three method variants:
+# 1. MNAContext + ZeroVector (default when _mna_x_ not passed)
+# 2. MNAContext + Vector{Float64} (when tests pass _mna_x_=x with x=Float64[])
+# 3. DirectStampContext + Vector{Float64} (fast_rebuild! runtime path)
 # Note: PSPNQS103VA skipped - requires idt() function not yet supported
 # Note: PSP103TVA skipped - requires ln_1p_d() function not yet supported
 @compile_workload begin
+    using CedarSim.MNA: reset_for_restamping!, ZERO_VECTOR
     spec = MNASpec()
 
-    # Helper to precompile both context types for a device
+    # Helper to precompile all three method variants for a device
     function precompile_device(builder, params)
-        ctx = builder(params, spec, 0.0)
-        cs = compile_structure(builder, params, spec; ctx=ctx)
-        ws = create_workspace(cs; ctx=ctx)
+        # Phase 1a: MNAContext + ZeroVector (stamp! called without _mna_x_)
+        ctx1 = builder(params, spec, 0.0; use_zero_vector=true)
+
+        # Phase 1b: MNAContext + Vector{Float64} (stamp! called with _mna_x_=Float64[])
+        ctx2 = builder(params, spec, 0.0; use_zero_vector=false)
+
+        # Phase 2: Compile structure and create DirectStampContext workspace
+        cs = compile_structure(builder, params, spec; ctx=ctx2)
+        ws = create_workspace(cs; ctx=ctx2)
+
+        # Phase 3: DirectStampContext + Vector{Float64} (runtime restamping)
         reset_direct_stamp!(ws.dctx)
         fast_rebuild!(ws, zeros(cs.n), 0.0)
     end
 
     # JUNCAP200 (2-terminal diode)
-    function juncap_builder(params, spec, t=0.0; x=Float64[], ctx=nothing)
-        ctx = ctx === nothing ? MNAContext() : ctx
+    function juncap_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         a = get_node!(ctx, :a)
-        stamp!(JUNCAP200_module.JUNCAP200(), ctx, a, 0; _mna_spec_=spec)
+        if use_zero_vector
+            stamp!(JUNCAP200_module.JUNCAP200(), ctx, a, 0; _mna_spec_=spec)
+        else
+            stamp!(JUNCAP200_module.JUNCAP200(), ctx, a, 0; _mna_spec_=spec, _mna_x_=x)
+        end
         return ctx
     end
     precompile_device(juncap_builder, NamedTuple())
 
     # PSP103VA (4-terminal MOSFET)
-    function psp_builder(params, spec, t=0.0; x=Float64[], ctx=nothing)
-        ctx = ctx === nothing ? MNAContext() : ctx
+    function psp_builder(params, spec, t=0.0; x=Float64[], ctx=nothing, use_zero_vector=false)
+        if ctx === nothing
+            ctx = MNAContext()
+        else
+            reset_for_restamping!(ctx)
+        end
         d = get_node!(ctx, :d)
         g = get_node!(ctx, :g)
         s = get_node!(ctx, :s)
-        stamp!(PSP103VA_module.PSP103VA(), ctx, d, g, s, 0; _mna_spec_=spec)
+        if use_zero_vector
+            stamp!(PSP103VA_module.PSP103VA(), ctx, d, g, s, 0; _mna_spec_=spec)
+        else
+            stamp!(PSP103VA_module.PSP103VA(), ctx, d, g, s, 0; _mna_spec_=spec, _mna_x_=x)
+        end
         return ctx
     end
     precompile_device(psp_builder, NamedTuple())

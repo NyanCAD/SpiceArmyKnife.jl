@@ -21,10 +21,6 @@ using Printf
 # Import pre-parsed PSP103 model from PSPModels package
 using PSPModels
 
-# Alias for compatibility with existing code
-const PSP103VA_module = sp_psp103va_module
-println("PSP103VA loaded from PSPModels package")
-
 # Load and parse the SPICE netlist from file
 const spice_file = joinpath(@__DIR__, "runme.sp")
 const spice_code = read(spice_file, String)

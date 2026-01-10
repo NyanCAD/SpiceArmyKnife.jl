@@ -3,6 +3,7 @@ BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CedarSim = "9075980a-f0c7-46d2-945a-cc5bead5ad4a"
 OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+PSPModels = "abf2981e-f194-4833-b9e6-388029af7f41"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Sundials = "c3572dad-4567-51f8-b174-8c6c989267f4"
@@ -10,4 +11,5 @@ VADistillerModels = "2129788e-3e5d-4aba-9c60-0ef5ee775297"
 
 [sources]
 CedarSim = {path = ".."}
+PSPModels = {path = "../models/PSPModels.jl"}
 VADistillerModels = {path = "../models/VADistillerModels.jl"}

@@ -5,7 +5,8 @@ using .VerilogACSTParser: parse, parsefile, EXPR, Node
 
 using SnoopPrecompile
 @precompile_all_calls begin
-    parsefile(joinpath(@__DIR__, "../cmc_models/bsimcmg107/bsimcmg.va"))
+    # Use BSIM-CMG from CMCModels package location
+    parsefile(joinpath(@__DIR__, "../../models/CMCModels.jl/va/bsimcmg.va"))
 end
 
 end

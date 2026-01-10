@@ -2,8 +2,8 @@ import VerilogAParser
 using AbstractTrees
 using VerilogAParser.VerilogACSTParser: virtrange
 
-# Use local cmc_models directory
-const local_cmc_dir = joinpath(dirname(@__DIR__), "cmc_models")
+# Use CMCModels package location for BSIM-CMG models
+const cmc_models_dir = joinpath(dirname(dirname(@__DIR__)), "models", "CMCModels.jl", "va")
 
 macro_va = VerilogAParser.parse("""
     `define f(arg) arg
@@ -16,11 +16,11 @@ macro_va = VerilogAParser.parse("""
     endmodule
     """)
 
-# Test with local bsimcmg107 model
+# Test with local bsimcmg model
 test_vas = [macro_va]
-bsimcmg107_path = joinpath(local_cmc_dir, "bsimcmg107/bsimcmg.va")
-if isfile(bsimcmg107_path)
-    push!(test_vas, VerilogAParser.parsefile(bsimcmg107_path))
+bsimcmg_path = joinpath(cmc_models_dir, "bsimcmg.va")
+if isfile(bsimcmg_path)
+    push!(test_vas, VerilogAParser.parsefile(bsimcmg_path))
 end
 
 for va in test_vas

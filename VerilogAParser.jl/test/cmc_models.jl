@@ -1,17 +1,17 @@
 import VerilogAParser
 
-# Use local cmc_models directory
-const local_cmc_dir = joinpath(dirname(@__DIR__), "cmc_models")
+# Use CMCModels package location for BSIM-CMG models
+const cmc_models_dir = joinpath(dirname(dirname(@__DIR__)), "models", "CMCModels.jl", "va")
 
 # Only test models available locally
 # Full CMC test suite requires the CMC package
 models = [
-    "bsimcmg107/bsimcmg.va",
+    "bsimcmg.va",
 ]
 
 @testset "CMC Models (local)" begin
     for model in models
-        model_path = joinpath(local_cmc_dir, model)
+        model_path = joinpath(cmc_models_dir, model)
         if isfile(model_path)
             @testset "$model" begin
                 local va = VerilogAParser.parsefile(model_path)

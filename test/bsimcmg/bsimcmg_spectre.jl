@@ -11,10 +11,8 @@ using Test
 using SciMLBase
 
 # Use pre-parsed BSIM-CMG model from CMCModels package
-using CMCModels
-
-# Re-export for compatibility with existing code
-const bsimcmg = sp_bsimcmg
+# The exported type is `bsimcmg` (matches VA module name)
+using CMCModels: bsimcmg
 
 sa = SpectreNetlistParser.parsefile(joinpath(dirname(pathof(SpectreNetlistParser)), "../test/examples/7nm_TT.scs"));
 eval(CedarSim.make_spectre_netlist(sa))

@@ -15,11 +15,11 @@ ctx = MNAContext()
 d = get_node!(ctx, :d)
 g = get_node!(ctx, :g)
 e = get_node!(ctx, :e)
-stamp!(sp_bsimcmg(), ctx, d, g, 0, e; _mna_spec_=spec, _mna_x_=Float64[])
+stamp!(bsimcmg(), ctx, d, g, 0, e; _mna_spec_=spec, _mna_x_=Float64[])
 ```
 
 # Exported Models
-- `sp_bsimcmg`: BSIM-CMG 107 multi-gate MOSFET (4-terminal: D, G, S, E)
+- `bsimcmg`: BSIM-CMG 107 multi-gate MOSFET (4-terminal: D, G, S, E)
 
 # Model Details
 BSIM-CMG (Berkeley Short-channel IGFET Model - Common Multi-Gate) is the
@@ -49,10 +49,15 @@ let
     Core.eval(@__MODULE__, CedarSim.make_mna_module(va))
 end
 
-# Export device type
-export sp_bsimcmg
+# Export device type (name matches VA module declaration)
+export bsimcmg
 
 # Export module reference for SPICE integration
-export sp_bsimcmg_module
+export bsimcmg_module
+
+# Precompile stamp! methods for BSIM-CMG with MNAContext
+# Note: BSIM-CMG precompilation skipped - model has EGISL parameter dependency issue
+# The model still works when used with explicit parameter values from netlists
+# TODO: Fix parameter default handling in make_mna_device for CMC models
 
 end # module

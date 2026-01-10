@@ -3,6 +3,7 @@ module CedarSim
 using DiffEqBase
 using DynamicScope
 using VectorPrisms
+using StaticArrays
 
 # MNA Phase 1: Core MNA engine
 include("mna/MNA.jl")

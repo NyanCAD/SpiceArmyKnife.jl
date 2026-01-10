@@ -2543,9 +2543,8 @@ function make_mna_circuit(ast; circuit_name::Symbol=:circuit, imported_hdl_modul
         using CedarSim.MNA: VCVS, VCCS, CCVS, CCCS  # Controlled sources
         using CedarSim.MNA: MNAContext, MNASpec, DirectStampContext, get_node!, stamp!, reset_for_restamping!, ZERO_VECTOR
         using CedarSim.MNA: get_current_idx  # For CCVS/CCCS current sensing
-        using CedarSim: ParamLens, IdentityLens
+        using CedarSim: ParamLens, IdentityLens, StaticArrays
         using CedarSim.SpectreEnvironment
-        using StaticArrays
 
         # Subcircuit builders
         $(subckt_defs...)

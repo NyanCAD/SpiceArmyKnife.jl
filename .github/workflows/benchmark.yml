@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          julia --project=. -e '
+          julia --project=benchmarks -e '
             using Pkg
             Pkg.instantiate()
             Pkg.precompile()
@@ -43,7 +43,7 @@ jobs:
 
       - name: Run VACASK benchmarks
         run: |
-          julia --project=. benchmarks/vacask/run_benchmarks.jl benchmark_results.md
+          julia --project=benchmarks benchmarks/vacask/run_benchmarks.jl benchmark_results.md
 
       - name: Publish benchmark results
         run: cat benchmark_results.md >> $GITHUB_STEP_SUMMARY

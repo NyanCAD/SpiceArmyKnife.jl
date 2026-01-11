@@ -51,9 +51,11 @@ function run_benchmark(solver; dtmax=0.05e-9, maxiters=10_000_000)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
-    # Use CedarDCOp for initialization - it now uses CedarRobustNLSolve() which
-    # includes LevenbergMarquardt and PseudoTransient for difficult circuits
-    init = CedarDCOp()
+    # Use CedarDCOp with Shampine refinement for ring oscillators
+    # DC solve gets close to equilibrium, then Shampine takes a small step
+    # to find a consistent DAE state (oscillators have no stable DC equilibrium)
+    # The current pulse in the SPICE file (i0) kick-starts the oscillation
+    init = CedarDCOp(use_shampine=true)
 
     # Benchmark the actual simulation (not setup)
     println("\nBenchmarking transient analysis with $solver_name (dtmax=$dtmax)...")

@@ -30,9 +30,8 @@ export CedarDCOp, CedarTranOp, CedarUICOp
 
 Initialization algorithm for MNA circuits that:
 1. For Sundials IDA: Switches to :dcop mode, solves DC steady state with
-   robust nonlinear solver, then calls IDADefaultInit
-2. For OrdinaryDiffEq: Delegates to ShampineCollocationInit which handles
-   voltage-dependent capacitors well
+   robust nonlinear solver, then calls DefaultInit (CheckInit) or ShampineCollocationInit
+2. For OrdinaryDiffEq: Same DC solve followed by DefaultInit or ShampineCollocationInit
 
 This is the recommended initialization algorithm for circuits with nonlinear
 devices (diodes, MOSFETs, voltage-dependent capacitors).
@@ -43,12 +42,17 @@ devices (diodes, MOSFETs, voltage-dependent capacitors).
   nodes (like BJT excess phase) may need more iterations to converge at tight
   tolerances.
 - `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
+- `use_shampine`: Use ShampineCollocationInit after DC solve (default: false).
+  This can help oscillators where DC solve gets close but doesn't fully satisfy
+  the DAE constraints - Shampine takes a small step to find a consistent state.
 
 # Example
 ```julia
 sol = tran!(circuit, (0.0, 1e-3))  # Uses CedarDCOp by default
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(abstol=1e-8))  # Tighter
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(maxiters=1000))  # More iters
+# For oscillators - DC solve + Shampine refinement:
+sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(use_shampine=true))
 ```
 
 # Solver Details
@@ -60,21 +64,31 @@ struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     maxiters::Int
     nlsolve::NLSOLVE
+    use_shampine::Bool
 end
-CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, maxiters, nlsolve)
+CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false) =
+    CedarDCOp(abstol, maxiters, nlsolve, use_shampine)
 
 """
     CedarTranOp <: DiffEqBase.DAEInitializationAlgorithm
 
 Similar to CedarDCOp but uses :tranop mode which may preserve some
 operating-point-dependent behavior.
+
+# Arguments
+- `abstol`: Tolerance for the DC solve (default: 1e-9)
+- `maxiters`: Maximum Newton iterations (default: 500)
+- `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
+- `use_shampine`: Use ShampineCollocationInit after DC solve (default: false)
 """
 struct CedarTranOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
     maxiters::Int
     nlsolve::NLSOLVE
+    use_shampine::Bool
 end
-CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, maxiters, nlsolve)
+CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve(), use_shampine=false) =
+    CedarTranOp(abstol, maxiters, nlsolve, use_shampine)
 
 """
     CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -91,6 +105,8 @@ Uses SciML's DImplicitEuler (DAE path) or ImplicitEuler (ODE path) with
 # Arguments
 - `warmup_steps::Int`: Number of warmup steps (default: 10)
 - `dt::Float64`: Fixed timestep for warmup (default: 1e-12)
+- `use_shampine::Bool`: Use ShampineCollocationInit instead of CheckInit (default: false).
+  Shampine takes a small step and adjusts both u and du, which can help for oscillators.
 
 # When to Use
 - Oscillator circuits with no stable DC operating point
@@ -101,19 +117,23 @@ Uses SciML's DImplicitEuler (DAE path) or ImplicitEuler (ODE path) with
 ```julia
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarUICOp())
 sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarUICOp(warmup_steps=20, dt=1e-11))
+# For oscillators - use Shampine which modifies both u and du:
+sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarUICOp(warmup_steps=50, use_shampine=true))
 ```
 
 # Algorithm
 1. Create warmup integrator with DImplicitEuler/ImplicitEuler (adaptive=false)
 2. Take `warmup_steps` fixed-dt steps with `force_dtmin=true`
 3. Extract relaxed state (u, du) from warmup integrator
-4. Hand off to main solver's DefaultInit for final consistency check
+4. Apply CheckInit or ShampineCollocationInit for final consistency
 """
 struct CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm
     warmup_steps::Int
     dt::Float64
+    use_shampine::Bool
 end
-CedarUICOp(; warmup_steps::Int=10, dt::Float64=1e-12) = CedarUICOp(warmup_steps, dt)
+CedarUICOp(; warmup_steps::Int=10, dt::Float64=1e-12, use_shampine::Bool=false) =
+    CedarUICOp(warmup_steps, dt, use_shampine)
 
 #==============================================================================#
 # Sundials Integration
@@ -166,8 +186,14 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
     copyto!(integrator.uprev, integrator.u)
     integrator.u_modified = true
 
-    # Let DefaultInit handle the rest
-    return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
+    # Use Shampine or DefaultInit for final consistency
+    if alg.use_shampine
+        # ShampineCollocationInit takes a small step to find consistent state
+        # Good for oscillators where DC solve gets close but doesn't fully converge
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+    else
+        return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
+    end
 end
 
 #==============================================================================#
@@ -211,7 +237,14 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
         integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.InitialFailure)
     end
 
-    return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
+    # Use Shampine or DefaultInit for final consistency
+    if alg.use_shampine
+        # ShampineCollocationInit takes a small step to find consistent state
+        # Good for oscillators where DC solve gets close but doesn't fully converge
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+    else
+        return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
+    end
 end
 
 #==============================================================================#
@@ -266,8 +299,15 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator, alg::Ceda
     copyto!(integrator.uprev, integrator.u)
     integrator.u_modified = true
 
-    # Let DefaultInit validate/fix consistency for the main solver
-    return SciMLBase.initialize_dae!(integrator, Sundials.DefaultInit())
+    # Apply final consistency check: CheckInit or ShampineCollocationInit
+    if alg.use_shampine
+        # ShampineCollocationInit takes a small step and adjusts both u and du
+        # Good for oscillators where we need to refine the approximated derivatives
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+    else
+        # CheckInit validates without modifying - may fail for oscillators with high residual
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+    end
 end
 
 function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
@@ -292,7 +332,12 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator, alg::CedarUICOp)
     # For mass matrix ODE, we use the finite difference from the last step as du estimate
     integrator.u .= warmup_int.u
 
-    # The mass matrix ODE doesn't directly give us du, but after warmup
-    # the algebraic constraints should be satisfied.
-    return SciMLBase.initialize_dae!(integrator, DiffEqBase.DefaultInit())
+    # Apply final consistency check: CheckInit or ShampineCollocationInit
+    if alg.use_shampine
+        # ShampineCollocationInit takes a small step and adjusts both u and du
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.ShampineCollocationInit())
+    else
+        # CheckInit validates without modifying
+        return SciMLBase.initialize_dae!(integrator, OrdinaryDiffEq.CheckInit())
+    end
 end

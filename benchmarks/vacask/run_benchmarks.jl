@@ -20,7 +20,7 @@ using Statistics
 using BenchmarkTools
 using SciMLBase: ReturnCode
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, Rodas5P
+using OrdinaryDiffEq: FBDF, ROS34PW2
 
 const BENCHMARK_DIR = @__DIR__
 
@@ -28,7 +28,7 @@ const BENCHMARK_DIR = @__DIR__
 const SOLVERS = [
     ("IDA", () -> IDA(max_error_test_failures=20)),
     ("FBDF", () -> FBDF()),
-    ("Rodas5P", () -> Rodas5P()),
+    ("ROS34PW2", () -> ROS34PW2()),  # A-stable Rosenbrock-W, stiffly accurate
 ]
 
 # Results storage

@@ -8,13 +8,13 @@
 # Benchmark target: ~1 million timepoints, ~2 million NR iterations
 #
 # Usage: julia runme.jl [solver]
-#   solver: IDA (default), FBDF, or Rodas5P
+#   solver: IDA (default), FBDF, or ROS34PW2
 #==============================================================================#
 
 using CedarSim
 using CedarSim.MNA
 using Sundials: IDA
-using OrdinaryDiffEq: FBDF, Rodas5P
+using OrdinaryDiffEq: FBDF, ROS34PW2
 using BenchmarkTools
 using Printf
 
@@ -77,10 +77,10 @@ if abspath(PROGRAM_FILE) == @__FILE__
         IDA(max_nonlinear_iters=100, max_error_test_failures=20)
     elseif solver_name == "FBDF"
         FBDF()
-    elseif solver_name == "Rodas5P"
-        Rodas5P()
+    elseif solver_name == "ROS34PW2"
+        ROS34PW2()
     else
-        error("Unknown solver: $solver_name. Use IDA, FBDF, or Rodas5P")
+        error("Unknown solver: $solver_name. Use IDA, FBDF, or ROS34PW2")
     end
     run_benchmark(solver)
 end

@@ -51,8 +51,9 @@ function run_benchmark(solver; dtmax=0.05e-9, maxiters=10_000_000)
     # Setup the simulation outside the timed region
     circuit = setup_simulation()
 
-    # Use CedarDCOp for initialization - it now uses CedarRobustNLSolve() which
-    # includes LevenbergMarquardt and PseudoTransient for difficult circuits
+    # TODO: Ring oscillators need special initialization (no stable DC equilibrium)
+    # CedarDCOp + use_shampine or CedarUICOp both timeout/OOM on this circuit
+    # For now, use default CedarDCOp - the current pulse (i0) may help kick-start
     init = CedarDCOp()
 
     # Benchmark the actual simulation (not setup)

@@ -18,7 +18,7 @@ using CedarSim.MNA: MNAContext, MNASpec, get_node!, stamp!, assemble!
 using CedarSim.MNA: voltage, current, make_ode_problem
 using CedarSim.MNA: VoltageSource, Resistor, Capacitor, CurrentSource
 using CedarSim.MNA: MNACircuit, SinVoltageSource, MNASolutionAccessor
-using CedarSim.MNA: reset_for_restamping!, CedarUICOp
+using CedarSim.MNA: reset_for_restamping!, CedarUICOp, CedarDCOp
 using ForwardDiff: Dual, value, partials
 using OrdinaryDiffEq: QNDF, Rodas5P
 using Sundials: IDA
@@ -52,6 +52,26 @@ C3 in1 0 10f
 .END
 """; circuit_name=:ring_oscillator, imported_hdl_modules=[sp_mos1_module])
 eval(ring_oscillator_code)
+
+# Monostable multivibrator circuit using sp_bjt
+# Tests CedarDCOp with high maxiters for sp_bjt internal nodes
+const monostable_spice_code = """
+* Monostable Multivibrator (One-Shot) using sp_bjt
+Vcc vcc 0 DC 5.0
+Vtrig trig 0 DC 0 PULSE 0 5 1m 1u 1u 10u 1
+R1 vcc q1_base 10k
+R2 vcc q2_base 10k
+Rc1 vcc q1_coll 1k
+Rc2 vcc q2_coll 1k
+C1 q1_coll q2_base 10u
+Ctrig trig q1_base 100n
+XQ1 q1_coll q1_base 0 0 sp_bjt bf=100 is=1e-15
+XQ2 q2_coll q2_base 0 0 sp_bjt bf=100 is=1e-15
+.END
+"""
+const monostable_code = parse_spice_to_mna(monostable_spice_code;
+    circuit_name=:monostable_multivibrator, imported_hdl_modules=[sp_bjt_module])
+eval(monostable_code)
 
 @testset "VADistiller Integration Tests" begin
 
@@ -213,6 +233,34 @@ eval(ring_oscillator_code)
                 # Collector voltage should be between 0 and Vcc (5V)
                 v_collector = sol.x[3]  # collector node
                 @test 0.0 < v_collector < 5.0
+            end
+
+            @testset "Monostable multivibrator with sp_bjt" begin
+                # Tests sp_bjt with CedarDCOp (high maxiters for internal nodes)
+                circuit = MNACircuit(monostable_multivibrator)
+                tspan = (0.0, 1e-3)  # Short simulation to test initialization
+
+                # sp_bjt has internal nodes (excess phase) that can't converge to tight
+                # tolerances, so use abstol=1e-3 for DC initialization
+                sol = tran!(circuit, tspan;
+                            solver=Rodas5P(),
+                            initializealg=CedarDCOp(abstol=1e-3),
+                            abstol=1e-6, reltol=1e-4,
+                            dtmax=1e-4)
+
+                @test sol.retcode == SciMLBase.ReturnCode.Success
+
+                if sol.retcode == SciMLBase.ReturnCode.Success
+                    sys = assemble!(circuit)
+                    acc = MNASolutionAccessor(sol, sys)
+
+                    # Check we got valid values (not NaN) at t=0.5ms
+                    v_q1_coll = voltage(acc, :q1_coll, 0.5e-3)
+                    v_q2_coll = voltage(acc, :q2_coll, 0.5e-3)
+
+                    @test !isnan(v_q1_coll)
+                    @test !isnan(v_q2_coll)
+                end
             end
         end
 

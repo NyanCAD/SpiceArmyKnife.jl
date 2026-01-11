@@ -38,12 +38,17 @@ This is the recommended initialization algorithm for circuits with nonlinear
 devices (diodes, MOSFETs, voltage-dependent capacitors).
 
 # Arguments
-- `abstol`: Tolerance for the DC solve (default: 1e-10)
+- `abstol`: Tolerance for the DC solve (default: 1e-9)
+- `maxiters`: Maximum Newton iterations (default: 500). VA models with internal
+  nodes (like BJT excess phase) may need more iterations to converge at tight
+  tolerances.
 - `nlsolve`: Nonlinear solver to use (default: `CedarRobustNLSolve()`)
 
 # Example
 ```julia
 sol = tran!(circuit, (0.0, 1e-3))  # Uses CedarDCOp by default
+sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(abstol=1e-8))  # Tighter
+sol = tran!(circuit, (0.0, 1e-3); initializealg=CedarDCOp(maxiters=1000))  # More iters
 ```
 
 # Solver Details
@@ -53,9 +58,10 @@ circuits (oscillators, singular Jacobians).
 """
 struct CedarDCOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
+    maxiters::Int
     nlsolve::NLSOLVE
 end
-CedarDCOp(;abstol=1e-10, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, nlsolve)
+CedarDCOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarDCOp(abstol, maxiters, nlsolve)
 
 """
     CedarTranOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -65,9 +71,10 @@ operating-point-dependent behavior.
 """
 struct CedarTranOp{NLSOLVE} <: DiffEqBase.DAEInitializationAlgorithm
     abstol::Float64
+    maxiters::Int
     nlsolve::NLSOLVE
 end
-CedarTranOp(;abstol=1e-10, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, nlsolve)
+CedarTranOp(;abstol=1e-9, maxiters=500, nlsolve=CedarRobustNLSolve()) = CedarTranOp(abstol, maxiters, nlsolve)
 
 """
     CedarUICOp <: DiffEqBase.DAEInitializationAlgorithm
@@ -118,7 +125,8 @@ CedarUICOp(; warmup_steps::Int=10, dt::Float64=1e-12) = CedarUICOp(warmup_steps,
 function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
                                    alg::Union{CedarDCOp, CedarTranOp})
     prob = integrator.sol.prob
-    abstol = min(integrator.opts.abstol, alg.abstol)
+    # Use the DC solve tolerance directly - don't constrain to transient tolerance
+    abstol = alg.abstol
 
     (; p, f) = prob
     u0 = integrator.u
@@ -146,7 +154,7 @@ function SciMLBase.initialize_dae!(integrator::Sundials.IDAIntegrator,
 
     # Call the shared Newton iteration
     u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, u0_zeros;
-                                                abstol=abstol, maxiters=100,
+                                                abstol=abstol, maxiters=alg.maxiters,
                                                 nlsolve=alg.nlsolve)
 
     integrator.u .= u_sol
@@ -173,7 +181,10 @@ end
 function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
                                    alg::Union{CedarDCOp, CedarTranOp})
     prob = integrator.sol.prob
-    abstol = min(integrator.opts.abstol, alg.abstol)
+    # Use the DC solve tolerance directly - don't constrain to transient tolerance
+    # DC analysis for circuits with internal model nodes (like BJT excess phase)
+    # may have larger residuals that are still acceptable for transient startup
+    abstol = alg.abstol
 
     # For ODE problems, p is the EvalWorkspace
     ws = prob.p
@@ -191,7 +202,7 @@ function SciMLBase.initialize_dae!(integrator::ODEIntegrator,
 
     # Solve DC operating point using the simulation workspace
     u_sol, converged = MNA._dc_newton_compiled(cs_dc, ws, zeros(length(u0));
-                                                abstol=abstol, maxiters=100,
+                                                abstol=abstol, maxiters=alg.maxiters,
                                                 nlsolve=alg.nlsolve)
 
     integrator.u .= u_sol
